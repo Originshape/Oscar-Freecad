@@ -1,0 +1,111 @@
+{
+ "fixtures": {
+  "plate_4holes": {
+   "class": "plate",
+   "params": {
+    "length": 100.0,
+    "width": 60.0,
+    "thickness": 8.0,
+    "hole_diameter": 10.0,
+    "hole_inset_x": 20.0,
+    "hole_inset_y": 15.0
+   },
+   "volume_mm3": 45486.726,
+   "faces": 10,
+   "bbox": {
+    "min": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "max": [
+     100.0,
+     60.0,
+     8.0
+    ]
+   }
+  },
+  "l_bracket": {
+   "class": "bracket",
+   "params": {
+    "profile": [
+     [
+      0,
+      0
+     ],
+     [
+      70,
+      0
+     ],
+     [
+      70,
+      10
+     ],
+     [
+      10,
+      10
+     ],
+     [
+      10,
+      50
+     ],
+     [
+      0,
+      50
+     ]
+    ],
+    "depth": 50.0,
+    "bore_diameter": 12.0,
+    "bore_axis_offset_y": 30.0,
+    "bore_axis_z": 25.0
+   },
+   "volume_mm3": 53869.027,
+   "faces": 9,
+   "bbox": {
+    "min": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "max": [
+     70.0,
+     50.0,
+     50.0
+    ]
+   }
+  },
+  "stepped_shaft": {
+   "class": "shaft",
+   "params": {
+    "steps": [
+     {
+      "diameter": 20.0,
+      "length": 40.0
+     },
+     {
+      "diameter": 12.0,
+      "length": 30.0
+     },
+     {
+      "diameter": 8.0,
+      "length": 20.0
+     }
+    ]
+   },
+   "volume_mm3": 16964.6,
+   "faces": 7,
+   "bbox": {
+    "min": [
+     -10.0,
+     -9.997,
+     0.0
+    ],
+    "max": [
+     10.0,
+     9.997,
+     90.0
+    ]
+   }
+  }
+ }
+}

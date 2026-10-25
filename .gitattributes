@@ -1,0 +1,4 @@
+# Left out of release ZIPs (git archive); the Addon Manager's git install still has them.
+tests/ export-ignore
+scripts/ export-ignore
+.github/ export-ignore

@@ -1,0 +1,12 @@
+Oscar for FreeCAD
+Copyright 2026 OriginShape
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It includes software derived from freecad-mcp (https://github.com/neka-nat/freecad-mcp),
+Copyright (c) 2025 Shirokuma (k tanaka), licensed under the MIT License. The derived files are in
+oscar/cad/ (dispatch.py, engine.py, headless.py, properties.py, scripting.py, serialize.py,
+server.py, views.py); the MIT license text is in oscar/cad/LICENSE-freecad-mcp.
+
+Oscar runs inside FreeCAD (https://www.freecad.org), which is licensed under the GNU LGPL 2.1 or
+later. Oscar does not include or modify FreeCAD itself.

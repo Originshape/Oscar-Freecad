@@ -1,0 +1,72 @@
+{
+  "format": 1,
+  "name": "spreadsheet_int_quantity_crash",
+  "source": "audit F9 shape: Spreadsheet.get() returns a plain int for a unitless cell, the model calls .Value on it and the script dies with \"'int' object has no attribute 'Value'\"; the next round fixes it. The sheet was created by the failed script, so a leftover 'Params' would turn the retry's sheet into 'Params001'.",
+  "prompt": "make a plate whose length is count_n times 10 mm, driven by a Params spreadsheet",
+  "profile": {
+    "base_url": "https://api.openai.com/v1"
+  },
+  "caps": {},
+  "rounds": [
+    {
+      "events": [
+        {
+          "type": "tool_calls",
+          "stop": "tool_use",
+          "calls": [
+            {
+              "name": "create_document",
+              "args": {
+                "name": "{doc}"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "note": "the crash",
+      "events": [
+        {
+          "type": "tool_calls",
+          "stop": "tool_use",
+          "calls": [
+            {
+              "name": "execute_code",
+              "args": {
+                "code": "import FreeCAD as App\nimport Part\nd = App.getDocument('{doc}')\nsheet = d.addObject('Spreadsheet::Sheet', 'Params')\nsheet.set('A1', '4')\nsheet.setAlias('A1', 'count_n')\nd.recompute()\nn = sheet.get('count_n').Value\no = d.addObject('Part::Box', 'Plate')\no.Length = 10 * n\nd.recompute()\n",
+                "include_screenshot": false
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "note": "the retry reads the cell through getattr",
+      "events": [
+        {
+          "type": "tool_calls",
+          "stop": "tool_use",
+          "calls": [
+            {
+              "name": "execute_code",
+              "args": {
+                "code": "import FreeCAD as App\nimport Part\nd = App.getDocument('{doc}')\nsheet = d.addObject('Spreadsheet::Sheet', 'Params')\nsheet.set('A1', '4')\nsheet.setAlias('A1', 'count_n')\nd.recompute()\nn = getattr(sheet.get('count_n'), 'Value', sheet.get('count_n'))\no = d.addObject('Part::Box', 'Plate')\no.Length = 10 * n\nd.recompute()\n",
+                "include_screenshot": false
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "events": [
+        {
+          "type": "text",
+          "text": "The plate is 40 mm long, driven by count_n."
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,68 @@
+{
+  "format": 1,
+  "name": "plan_only_reply",
+  "source": "audit F3 shape (the most common weak-model failure): the model answers the request with a numbered plan and no tool call, again after the first nudge, and only acts when the second nudge forces a tool.",
+  "prompt": "make a plate with two mounting holes",
+  "profile": {
+    "base_url": "https://api.openai.com/v1"
+  },
+  "caps": {},
+  "rounds": [
+    {
+      "events": [
+        {
+          "type": "text",
+          "text": "Here is my plan:\n1. Create the document\n2. Model the base plate\n3. Add the mounting holes\n4. Verify the result and export it\nI will start with these steps."
+        }
+      ]
+    },
+    {
+      "note": "after nudge 1: the same plan again",
+      "events": [
+        {
+          "type": "text",
+          "text": "Here is my plan:\n1. Create the document\n2. Model the base plate\n3. Add the mounting holes\n4. Verify the result and export it\nI will start with these steps."
+        }
+      ]
+    },
+    {
+      "note": "after nudge 2 (a tool is forced): it finally acts",
+      "events": [
+        {
+          "type": "tool_calls",
+          "stop": "tool_use",
+          "calls": [
+            {
+              "name": "create_document",
+              "args": {
+                "name": "{doc}"
+              }
+            },
+            {
+              "name": "create_object",
+              "args": {
+                "doc_name": "{doc}",
+                "obj_type": "Part::Box",
+                "obj_name": "Plate",
+                "obj_properties": {
+                  "Length": 50,
+                  "Width": 30,
+                  "Height": 5
+                },
+                "include_screenshot": false
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "events": [
+        {
+          "type": "text",
+          "text": "Made the plate."
+        }
+      ]
+    }
+  ]
+}

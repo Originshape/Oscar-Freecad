@@ -1,0 +1,72 @@
+{
+  "format": 1,
+  "name": "partial_objects_after_failed_script",
+  "source": "audit F11 shape: a script creates Shell and Lid and then dies on its last line; the old pipeline left both objects behind, the retry created 'Shell001' / 'Lid001' and the model built on the duplicates.",
+  "prompt": "make a box with a lid, 60 x 40 x 20 mm",
+  "profile": {
+    "base_url": "https://api.openai.com/v1"
+  },
+  "caps": {},
+  "rounds": [
+    {
+      "events": [
+        {
+          "type": "tool_calls",
+          "stop": "tool_use",
+          "calls": [
+            {
+              "name": "create_document",
+              "args": {
+                "name": "{doc}"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "note": "dies after both objects exist",
+      "events": [
+        {
+          "type": "tool_calls",
+          "stop": "tool_use",
+          "calls": [
+            {
+              "name": "execute_code",
+              "args": {
+                "include_screenshot": false,
+                "code": "import FreeCAD as App\nimport Part\nd = App.getDocument('{doc}')\nshell = d.addObject('Part::Box', 'Shell')\nshell.Length = 60\nshell.Width = 40\nshell.Height = 20\nlid = d.addObject('Part::Box', 'Lid')\nlid.Length = 60\nlid.Width = 40\nlid.Height = 3\nd.recompute()\nraise RuntimeError('lip does not fit the shell')\n"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "note": "the same script without the bad line",
+      "events": [
+        {
+          "type": "tool_calls",
+          "stop": "tool_use",
+          "calls": [
+            {
+              "name": "execute_code",
+              "args": {
+                "include_screenshot": false,
+                "code": "import FreeCAD as App\nimport Part\nd = App.getDocument('{doc}')\nshell = d.addObject('Part::Box', 'Shell')\nshell.Length = 60\nshell.Width = 40\nshell.Height = 20\nlid = d.addObject('Part::Box', 'Lid')\nlid.Length = 60\nlid.Width = 40\nlid.Height = 3\nd.recompute()\n"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "events": [
+        {
+          "type": "text",
+          "text": "Built the shell and the lid."
+        }
+      ]
+    }
+  ]
+}

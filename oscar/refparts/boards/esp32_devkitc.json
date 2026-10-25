@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "id": "esp32_devkitc",
+  "name": "ESP32-DevKitC V4",
+  "aliases": ["esp32 devkitc v4", "esp32 devkitc", "esp32 dev kit c", "esp32 devkit", "esp32 dev board", "esp32 development board", "esp32"],
+  "kind": "mcu",
+  "frame": {"origin": "pcb_bottom_lower_left", "x": "long_edge", "y": "short_edge", "z": "up_through_pcb", "units": "mm"},
+  "outline": {
+    "shape": "rounded_rect", "length": 54.4, "width": 27.9, "corner_radius": 0.0,
+    "source": "ESP32-DevKitC V4 user guide and dimensions drawing (Espressif): 54.4 x 27.9 mm overall (with the PCB antenna); not yet checked against the DXF, corners treated as square",
+    "source_url": "https://docs.espressif.com/projects/esp-dev-kits/en/latest/esp32/esp32-devkitc/user_guide.html",
+    "confidence": "community"
+  },
+  "pcb": {
+    "thickness": 1.6,
+    "source": "typical FR4 board thickness; not dimensioned in the guide",
+    "confidence": "assumed"
+  },
+  "mounting_holes": {
+    "diameter": 2.2, "pad_diameter": 4.0, "thread": "M2",
+    "positions": [[8.0, 13.95], [22.0, 13.95]],
+    "source": "ASSUMED support points: the ESP32-DevKitC has NO mounting holes; these two positions on the centre line between the header rows are suggested spots for printed support posts (M2 self-tapping), not holes in the board",
+    "confidence": "assumed"
+  },
+  "connectors": [
+    {"id": "usb_micro", "name": "micro-USB", "kind": "micro_usb", "face": "-x",
+     "box": {"x": [-1.3, 4.3], "y": [10.2, 17.7], "z": [1.6, 4.7]}, "cutout": true, "margin_hint": 0.4,
+     "plug_w": 11.0, "plug_h": 8.0,
+     "source": "micro-B receptacle centred on the short edge (y = 13.95 mm), overhanging by about 1.3 mm",
+     "source_url": "https://docs.espressif.com/projects/esp-dev-kits/en/latest/esp32/esp32-devkitc/user_guide.html",
+     "confidence": "approximate", "note": "size and overhang approximate; the height 3.1 mm also covers the ESP32-WROOM-32 module top"}
+  ],
+  "height": {"max_top_z": 4.7, "min_bottom_z": 1.6},
+  "omitted": ["ESP32-WROOM-32 module (about 3.1 mm above the PCB, covered by the micro-USB box height) and the PCB antenna end", "EN and BOOT buttons (about 3.5 mm tall at the USB end; no opening unless the user needs button access)", "pin headers (2 x 19, 2.54 mm pitch, 25.4 mm apart; the pin tails protrude below the PCB)"],
+  "verify_against": "https://docs.espressif.com/projects/esp-dev-kits/en/latest/esp32/esp32-devkitc/user_guide.html",
+  "verified": false
+}

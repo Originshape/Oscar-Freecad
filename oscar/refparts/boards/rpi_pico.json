@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "id": "rpi_pico",
+  "name": "Raspberry Pi Pico",
+  "aliases": ["raspberry pi pico", "raspberry pi pico rp2040", "rpi pico", "rpi_pico", "pi pico", "rp2040 pico", "pico"],
+  "kind": "mcu",
+  "frame": {"origin": "pcb_bottom_lower_left", "x": "long_edge", "y": "short_edge", "z": "up_through_pcb", "units": "mm"},
+  "outline": {
+    "shape": "rounded_rect", "length": 51.0, "width": 21.0, "corner_radius": 2.0,
+    "source": "Raspberry Pi Pico datasheet, mechanical specification (Raspberry Pi Ltd): 51 x 21 mm; corner radius approximate (about 2 mm), not yet checked against the drawing",
+    "source_url": "https://datasheets.raspberrypi.com/pico/pico-datasheet.pdf",
+    "confidence": "community"
+  },
+  "pcb": {
+    "thickness": 1.0,
+    "source": "Raspberry Pi Pico datasheet, mechanical specification (Raspberry Pi Ltd): single-sided 1 mm PCB; not yet checked against the drawing",
+    "confidence": "community"
+  },
+  "mounting_holes": {
+    "diameter": 2.1, "pad_diameter": 3.4, "thread": "M2",
+    "positions": [[2.0, 4.8], [49.0, 4.8], [2.0, 16.2], [49.0, 16.2]],
+    "pattern": {"offset": [2.0, 4.8], "dx": 47.0, "dy": 11.4},
+    "source": "Raspberry Pi Pico datasheet, mechanical specification (Raspberry Pi Ltd): four 2.1 mm holes, 47.0 x 11.4 mm pattern 2.0 / 4.8 mm from the edges (recalled, not yet checked against the drawing); pad_diameter 3.4 is an assumed keep-out ring because the micro-USB shell is close to the hole",
+    "source_url": "https://datasheets.raspberrypi.com/pico/pico-datasheet.pdf",
+    "confidence": "community"
+  },
+  "connectors": [
+    {"id": "usb_micro", "name": "micro-USB", "kind": "micro_usb", "face": "-x",
+     "box": {"x": [-1.5, 4.1], "y": [6.75, 14.25], "z": [1.0, 3.9]}, "cutout": true, "margin_hint": 0.4,
+     "plug_w": 11.0, "plug_h": 8.0,
+     "source": "micro-B receptacle centred on the short edge (y = 10.5 mm), overhanging about 1.5 mm; total height 3.9 mm",
+     "source_url": "https://datasheets.raspberrypi.com/pico/pico-datasheet.pdf",
+     "confidence": "approximate", "note": "overhang and depth approximate"}
+  ],
+  "height": {"max_top_z": 3.9, "min_bottom_z": 1.0},
+  "omitted": ["BOOTSEL button and LED (no wall opening unless the user needs button access)", "castellated edge pads and soldered header pins", "debug (SWD) pads"],
+  "verify_against": "https://datasheets.raspberrypi.com/pico/pico-datasheet.pdf",
+  "verified": false
+}

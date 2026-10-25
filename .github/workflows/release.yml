@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0
+# On a v* tag: check that package.xml carries the same version, then attach a ZIP of the addon (the
+# Addon Manager installs from git; the ZIP is for manual and offline installs).
+name: release
+on:
+  push: { tags: ["v*"] }
+permissions: { contents: write }
+jobs:
+  zip:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version check
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          grep -q "<version>$tag</version>" package.xml || { echo "package.xml version != $tag"; exit 1; }
+      - name: Build the ZIP
+        run: |
+          mkdir -p dist
+          git archive --format=zip --prefix=Oscar/ -o "dist/Oscar-$GITHUB_REF_NAME.zip" HEAD
+      - uses: softprops/action-gh-release@v2
+        with: { files: "dist/*.zip" }

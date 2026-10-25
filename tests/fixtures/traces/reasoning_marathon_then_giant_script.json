@@ -1,0 +1,105 @@
+{
+  "format": 1,
+  "name": "reasoning_marathon_then_giant_script",
+  "source": "audit F1/F2 shape: a reasoning model thinks for five minutes in the first round, then (after the retry) writes the whole enclosure as ONE script that the output limit cuts off. Synthesized: no user data, sizes and timings are the real shape.",
+  "prompt": "Make a base plate and a tube clamp for a 20 mm tube.",
+  "profile": {
+    "base_url": "https://api.openai.com/v1"
+  },
+  "caps": {
+    "reasoning": "stream",
+    "reasoning_control": "openai_effort",
+    "max_output": 16000
+  },
+  "rounds": [
+    {
+      "note": "20 reasoning events of 300 characters, 15 s apart: 300 s in total, far under the character limit",
+      "events": [
+        {
+          "type": "reasoning",
+          "chars": 300,
+          "repeat": 20,
+          "advance_s": 15
+        },
+        {
+          "type": "stop",
+          "reason": "length"
+        }
+      ]
+    },
+    {
+      "note": "the retry at reasoning=off: the model writes everything as one script and the reply is cut",
+      "events": [
+        {
+          "type": "text",
+          "text": "I will write the whole bracket as one script."
+        },
+        {
+          "type": "bad_tool_call",
+          "name": "execute_code",
+          "stop": "max_tokens",
+          "raw_head": "{\"code\": \"import FreeCAD as App\\nimport Part\\nd = App.newDocument('{doc}')\\n",
+          "raw_unit": "b = Part.makeBox(10, 10, 10)\\n",
+          "raw_times": 900
+        }
+      ]
+    },
+    {
+      "note": "told to split: one small call per part",
+      "events": [
+        {
+          "type": "tool_calls",
+          "stop": "tool_use",
+          "calls": [
+            {
+              "name": "create_document",
+              "args": {
+                "name": "{doc}"
+              }
+            },
+            {
+              "name": "create_object",
+              "args": {
+                "doc_name": "{doc}",
+                "obj_type": "Part::Box",
+                "obj_name": "Base",
+                "obj_properties": {
+                  "Length": 40,
+                  "Width": 25,
+                  "Height": 4
+                },
+                "include_screenshot": false
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "note": "second part as a short script",
+      "events": [
+        {
+          "type": "tool_calls",
+          "stop": "tool_use",
+          "calls": [
+            {
+              "name": "execute_code",
+              "args": {
+                "include_screenshot": false,
+                "code": "import FreeCAD as App\nimport Part\nd = App.getDocument('{doc}')\nt = d.addObject('Part::Cylinder', 'Clamp')\nt.Radius = 10\nt.Height = 25\nd.recompute()\n"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "events": [
+        {
+          "type": "text",
+          "text": "Built the base plate and the tube clamp."
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "id": "arduino_nano",
+  "name": "Arduino Nano (classic, mini-B USB)",
+  "aliases": ["arduino nano", "arduino nano v3", "arduino nano 3.0", "nano v3", "nano 3.0"],
+  "kind": "mcu",
+  "frame": {"origin": "pcb_bottom_lower_left", "x": "long_edge", "y": "short_edge", "z": "up_through_pcb", "units": "mm"},
+  "outline": {
+    "shape": "rounded_rect", "length": 45.0, "width": 18.0, "corner_radius": 0.0,
+    "source": "Arduino Nano (classic, mini-B USB) published dimensions (Arduino): 45 x 18 mm, treated as a rectangle",
+    "source_url": "https://docs.arduino.cc/hardware/nano",
+    "confidence": "community"
+  },
+  "pcb": {
+    "thickness": 1.6,
+    "source": "typical FR4 board thickness; not dimensioned on the drawing",
+    "confidence": "assumed"
+  },
+  "mounting_holes": {
+    "diameter": 2.2, "pad_diameter": 4.0, "thread": "M2",
+    "positions": [[8.0, 9.0], [37.0, 9.0]],
+    "source": "ASSUMED support points: the classic Arduino Nano has NO mounting holes; these two positions on the centre line between the header rows are suggested spots for printed support posts (M2 self-tapping), not holes in the board",
+    "confidence": "assumed"
+  },
+  "connectors": [
+    {"id": "usb_mini_b", "name": "mini-B USB", "kind": "mini_usb", "face": "-x",
+     "box": {"x": [-1.2, 5.5], "y": [5.15, 12.85], "z": [1.6, 5.7]}, "cutout": true, "margin_hint": 0.4,
+     "plug_w": 11.0, "plug_h": 8.0,
+     "source": "mini-B receptacle about 7.7 x 4.1 mm centred on the short edge (y = 9.0 mm), shell overhanging by about 1.2 mm",
+     "source_url": "https://docs.arduino.cc/hardware/nano",
+     "confidence": "approximate", "note": "size and overhang approximate; clones differ"}
+  ],
+  "height": {"max_top_z": 5.7, "min_bottom_z": 1.6},
+  "omitted": ["pin headers (2 x 15, 2.54 mm pitch, 15.24 mm apart; the pin tails protrude below the PCB)", "reset button, ICSP header, ATmega328P and the USB-serial chip"],
+  "verify_against": "https://docs.arduino.cc/hardware/nano",
+  "verified": false
+}

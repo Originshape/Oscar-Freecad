@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "id": "arduino_uno",
+  "name": "Arduino Uno Rev3",
+  "aliases": ["arduino uno rev3", "arduino uno r3", "arduino uno", "uno rev3", "uno r3", "uno"],
+  "kind": "mcu",
+  "frame": {"origin": "pcb_bottom_lower_left", "x": "long_edge", "y": "short_edge", "z": "up_through_pcb", "units": "mm"},
+  "outline": {
+    "shape": "rounded_rect", "length": 68.6, "width": 53.4, "corner_radius": 0.0,
+    "source": "Arduino Uno Rev3 mechanical drawing (Arduino): 68.6 x 53.4 mm; the real outline has a stepped right edge and chamfered corners, approximated here as a rectangle",
+    "source_url": "https://docs.arduino.cc/hardware/uno-rev3",
+    "confidence": "community"
+  },
+  "pcb": {
+    "thickness": 1.6,
+    "source": "typical FR4 board thickness; not dimensioned on the drawing",
+    "confidence": "assumed"
+  },
+  "mounting_holes": {
+    "diameter": 3.2, "pad_diameter": 5.0, "thread": "M3",
+    "positions": [[13.97, 2.54], [15.24, 50.8], [66.04, 7.62], [66.04, 35.56]],
+    "source": "Arduino Uno Rev3 mechanical drawing (Arduino): the four holes at (0.55, 0.1), (0.6, 2.0), (2.6, 0.3) and (2.6, 1.4) inches published by Arduino and by designers of Uno cases; pad_diameter 5.0 is an assumed keep-out ring (6.0 would cross the board edge at the 50.8 mm hole)",
+    "source_url": "https://docs.arduino.cc/hardware/uno-rev3",
+    "confidence": "community"
+  },
+  "connectors": [
+    {"id": "usb_b", "name": "USB-B", "kind": "usb_b", "face": "-x",
+     "box": {"x": [-6.0, 10.0], "y": [32.1, 44.1], "z": [1.6, 12.5]}, "cutout": true, "margin_hint": 0.5,
+     "plug_w": 14.0, "plug_h": 12.0,
+     "source": "USB-B receptacle about 12 x 10.9 mm, centred at y = 38.1 mm, overhanging the left edge by about 6 mm",
+     "source_url": "https://docs.arduino.cc/hardware/uno-rev3",
+     "confidence": "approximate", "note": "position, overhang and height are approximate; measure your board"},
+    {"id": "dc_jack", "name": "DC power jack (2.1 mm barrel)", "kind": "barrel_jack", "face": "-x",
+     "box": {"x": [-6.0, 8.0], "y": [3.1, 12.1], "z": [1.6, 12.6]}, "cutout": true, "margin_hint": 0.5,
+     "plug_w": 11.0, "plug_h": 11.0,
+     "source": "barrel jack about 9 x 11 mm, centred at y = 7.6 mm, overhanging the left edge by about 6 mm",
+     "source_url": "https://docs.arduino.cc/hardware/uno-rev3",
+     "confidence": "approximate", "note": "position, overhang and height are approximate; measure your board"}
+  ],
+  "height": {"max_top_z": 12.6, "min_bottom_z": 1.6},
+  "omitted": ["female headers (about 8.5 mm above the PCB, lower than the USB-B and DC jacks; a shield adds its own height)", "reset button, ICSP headers, ATmega16U2 and ATmega328P", "solder tails of the through-hole parts below the PCB"],
+  "verify_against": "https://docs.arduino.cc/hardware/uno-rev3",
+  "verified": false
+}

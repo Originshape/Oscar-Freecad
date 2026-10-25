@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "kit_id": "enc1",
+  "name": "PiCase",
+  "board": "rpi4b",
+  "material": "ABS",
+  "wall_t": 2.0,
+  "floor_t": 2.0,
+  "lid_t": 2.0,
+  "clearance": 0.3,
+  "shrink_comp": "clearance",
+  "corner_r": 3.0,
+  "standoff": {"h": 4.0, "d": 6.0, "pilot_d": 2.2},
+  "lid": {"style": "snap_fit", "gap": 1.0, "lip_h": 3.0, "lip_t": 1.2, "fit": 0.25},
+  "hooks": {"count": 4, "w": 6.0, "t": 1.2, "overhang": 0.8, "length": 12.0, "barb_h": 1.0, "ramp_deg": 30, "retention_deg": 45, "window_margin": 0.3},
+  "vents": {"enabled": true, "part": "lid", "face": "top", "pattern": "slots", "count": 9, "slot_w": 2.0, "slot_l": 24.0, "pitch": 4.0, "center": null, "angle_deg": 0},
+  "ports": {"auto": true, "include": [], "exclude": [], "margin": 0.4, "gap": 0.3, "plug_clearance": true, "overrides": []},
+  "cutouts": [],
+  "lid_lift": 0.0,
+  "print_orientation": {"shell": "floor_down", "lid": "top_down"},
+  "colors": {"shell": [0.18, 0.45, 0.75], "lid": [0.85, 0.85, 0.85], "ref": [0.10, 0.55, 0.20]}
+}

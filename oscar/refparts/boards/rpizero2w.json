@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "id": "rpizero2w",
+  "name": "Raspberry Pi Zero 2 W",
+  "aliases": ["raspberry pi zero 2 w", "raspberry pi zero 2w", "pi zero 2 w", "pi zero 2w", "rpi zero 2 w", "rpi zero 2w", "rpizero2w", "zero 2 w", "zero 2w"],
+  "kind": "sbc",
+  "frame": {"origin": "pcb_bottom_lower_left", "x": "long_edge", "y": "short_edge", "z": "up_through_pcb", "units": "mm"},
+  "outline": {
+    "shape": "rounded_rect", "length": 65.0, "width": 30.0, "corner_radius": 3.0,
+    "source": "Raspberry Pi Zero 2 W mechanical drawing (Raspberry Pi Ltd): 65 x 30 mm; the 3.0 mm corner radius is not dimensioned on the drawing (value used by published case designs)",
+    "source_url": "https://datasheets.raspberrypi.com/rpizero2/raspberry-pi-zero-2-w-mechanical-drawing.pdf",
+    "confidence": "community"
+  },
+  "pcb": {
+    "thickness": 1.4,
+    "source": "typical FR4 board thickness; not dimensioned on the mechanical drawing",
+    "confidence": "assumed"
+  },
+  "mounting_holes": {
+    "diameter": 2.75, "pad_diameter": 6.0, "thread": "M2.5",
+    "positions": [[3.5, 3.5], [61.5, 3.5], [3.5, 26.5], [61.5, 26.5]],
+    "pattern": {"offset": [3.5, 3.5], "dx": 58.0, "dy": 23.0},
+    "source": "Raspberry Pi Zero 2 W mechanical drawing (Raspberry Pi Ltd): 3.5 mm from the edges, 58 x 23 mm pattern as drawn; hole 2.75 and pad 6.0 are not dimensioned there (standard Raspberry Pi M2.5 footprint)",
+    "source_url": "https://datasheets.raspberrypi.com/rpizero2/raspberry-pi-zero-2-w-mechanical-drawing.pdf",
+    "confidence": "community"
+  },
+  "connectors": [
+    {"id": "mini_hdmi", "name": "mini-HDMI", "kind": "mini_hdmi", "face": "-y",
+     "box": {"x": [6.9, 17.9], "y": [-0.3, 7.2], "z": [1.4, 4.8]}, "cutout": true, "margin_hint": 0.4,
+     "plug_w": 13.0, "plug_h": 7.0,
+     "source": "port centre x = 12.4 mm as drawn; shell about 11 x 3.4 mm",
+     "source_url": "https://datasheets.raspberrypi.com/rpizero2/raspberry-pi-zero-2-w-mechanical-drawing.pdf",
+     "confidence": "community", "note": "centre from the drawing, shell size approximate"},
+    {"id": "usb_data", "name": "micro-USB data (OTG)", "kind": "micro_usb", "face": "-y",
+     "box": {"x": [37.4, 45.4], "y": [-1.0, 4.6], "z": [1.4, 4.2]}, "cutout": true, "margin_hint": 0.4,
+     "plug_w": 11.0, "plug_h": 8.0,
+     "source": "port centre x = 41.4 mm as drawn; body size from the receptacle datasheet",
+     "source_url": "https://datasheets.raspberrypi.com/rpizero2/raspberry-pi-zero-2-w-mechanical-drawing.pdf",
+     "confidence": "community", "note": "centre from the drawing, body size approximate"},
+    {"id": "usb_power", "name": "micro-USB power input", "kind": "micro_usb", "face": "-y",
+     "box": {"x": [50.0, 58.0], "y": [-1.0, 4.6], "z": [1.4, 4.2]}, "cutout": true, "margin_hint": 0.4,
+     "plug_w": 11.0, "plug_h": 8.0,
+     "source": "port centre x = 54.0 mm as drawn; body size from the receptacle datasheet",
+     "source_url": "https://datasheets.raspberrypi.com/rpizero2/raspberry-pi-zero-2-w-mechanical-drawing.pdf",
+     "confidence": "community", "note": "centre from the drawing, body size approximate"},
+    {"id": "microsd", "name": "microSD card slot", "kind": "microsd", "face": "-x",
+     "box": {"x": [-0.5, 12.5], "y": [11.0, 23.0], "z": [1.4, 3.2]}, "cutout": true, "margin_hint": 0.6,
+     "source": "socket at the short edge, outline read off the drawing (about 12 x 12 mm); card protrudes slightly",
+     "source_url": "https://datasheets.raspberrypi.com/rpizero2/raspberry-pi-zero-2-w-mechanical-drawing.pdf",
+     "confidence": "approximate", "note": "slot position and height are approximate; verify before cutting"},
+    {"id": "gpio", "name": "40-pin GPIO header (optional)", "kind": "pin_header", "face": "top",
+     "box": {"x": [7.1, 57.9], "y": [23.96, 29.04], "z": [1.4, 9.9]}, "cutout": false, "margin_hint": 0.0,
+     "source": "2 x 20 pads on a 2.54 mm pitch along the top hole row (y = 26.5 mm); a soldered header is 8.5 mm tall",
+     "source_url": "https://datasheets.raspberrypi.com/rpizero2/raspberry-pi-zero-2-w-mechanical-drawing.pdf",
+     "confidence": "approximate", "note": "present only when a header is soldered (the 'WH' variant); kept as a conservative lid keepout"}
+  ],
+  "height": {"max_top_z": 9.9, "min_bottom_z": 1.4},
+  "omitted": ["CSI camera connector (internal, no wall opening)", "SoC shield height", "solder pads and test points on the underside"],
+  "verify_against": "https://datasheets.raspberrypi.com/rpizero2/raspberry-pi-zero-2-w-mechanical-drawing.pdf",
+  "verified": false
+}

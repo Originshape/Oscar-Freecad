@@ -1,0 +1,172 @@
+{
+ "schema_version": 1,
+ "id": "plate_4holes",
+ "part_class": "plate",
+ "units": "mm",
+ "target": "freecad",
+ "frame": {
+  "origin": [
+   50,
+   30,
+   0
+  ],
+  "planes": {
+   "bottom": {
+    "origin": [
+     50,
+     30,
+     0
+    ],
+    "normal": [
+     0,
+     0,
+     1
+    ],
+    "x_dir": [
+     1,
+     0,
+     0
+    ]
+   },
+   "top": {
+    "origin": [
+     50,
+     30,
+     "thickness"
+    ],
+    "normal": [
+     0,
+     0,
+     1
+    ],
+    "x_dir": [
+     1,
+     0,
+     0
+    ],
+    "note": "z binds thickness so hole sketches ride the pad top"
+   }
+  }
+ },
+ "parameters": {
+  "length": {
+   "value": 100.0,
+   "evidence": {
+    "op": "user_request",
+    "detail": "requested length 100 mm"
+   }
+  },
+  "width": {
+   "value": 60.0,
+   "evidence": {
+    "op": "user_request",
+    "detail": "requested width 60 mm"
+   }
+  },
+  "thickness": {
+   "value": 8.0,
+   "evidence": {
+    "op": "user_request",
+    "detail": "requested thickness 8 mm"
+   }
+  },
+  "hole_dia": {
+   "value": 10.0,
+   "evidence": {
+    "op": "user_request",
+    "detail": "requested hole dia 10 mm"
+   }
+  },
+  "hole_dx": {
+   "value": 30.0,
+   "evidence": {
+    "op": "user_request",
+    "detail": "requested hole dx 30 mm"
+   }
+  },
+  "hole_dy": {
+   "value": 15.0,
+   "evidence": {
+    "op": "user_request",
+    "detail": "requested hole dy 15 mm"
+   }
+  }
+ },
+ "features": [
+  {
+   "id": "base_sketch",
+   "op": "sketch",
+   "plane": {
+    "frame_plane": "bottom"
+   },
+   "profile": {
+    "shape": "rectangle",
+    "width": "length",
+    "height": "width",
+    "center": [
+     0,
+     0
+    ]
+   }
+  },
+  {
+   "id": "base_pad",
+   "op": "pad",
+   "sketch": "base_sketch",
+   "length": "thickness"
+  },
+  {
+   "id": "hole_a",
+   "op": "hole",
+   "plane": {
+    "frame_plane": "top"
+   },
+   "position": {
+    "x": "hole_dx",
+    "y": "hole_dy"
+   },
+   "diameter": "hole_dia",
+   "through": true
+  },
+  {
+   "id": "hole_b",
+   "op": "hole",
+   "plane": {
+    "frame_plane": "top"
+   },
+   "position": {
+    "x": "hole_dx",
+    "y": -15.0
+   },
+   "diameter": "hole_dia",
+   "through": true,
+   "note": "y = -hole_dy; symmetric pattern v1 uses literal mirror"
+  },
+  {
+   "id": "hole_c",
+   "op": "hole",
+   "plane": {
+    "frame_plane": "top"
+   },
+   "position": {
+    "x": -30.0,
+    "y": "hole_dy"
+   },
+   "diameter": "hole_dia",
+   "through": true
+  },
+  {
+   "id": "hole_d",
+   "op": "hole",
+   "plane": {
+    "frame_plane": "top"
+   },
+   "position": {
+    "x": -30.0,
+    "y": -15.0
+   },
+   "diameter": "hole_dia",
+   "through": true
+  }
+ ]
+}

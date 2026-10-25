@@ -1,0 +1,199 @@
+{
+ "schema_version": 1,
+ "id": "l_bracket",
+ "part_class": "bracket",
+ "units": "mm",
+ "target": "freecad",
+ "frame": {
+  "origin": [
+   0,
+   0,
+   0
+  ],
+  "planes": {
+   "back": {
+    "origin": [
+     0,
+     0,
+     0
+    ],
+    "normal": [
+     0,
+     1,
+     0
+    ],
+    "x_dir": [
+     1,
+     0,
+     0
+    ]
+   },
+   "front": {
+    "origin": [
+     0,
+     50,
+     0
+    ],
+    "normal": [
+     0,
+     1,
+     0
+    ],
+    "x_dir": [
+     1,
+     0,
+     0
+    ]
+   },
+   "bore_entry": {
+    "origin": [
+     0,
+     0,
+     0
+    ],
+    "normal": [
+     -1,
+     0,
+     0
+    ],
+    "x_dir": [
+     0,
+     1,
+     0
+    ],
+    "note": "holes drill along -normal (into the leg at +X)"
+   }
+  }
+ },
+ "parameters": {
+  "profile_len": {
+   "value": 70.0,
+   "evidence": {
+    "op": "user_request",
+    "detail": "requested profile len 70 mm"
+   }
+  },
+  "profile_h": {
+   "value": 50.0,
+   "evidence": {
+    "op": "user_request",
+    "detail": "requested profile h 50 mm"
+   }
+  },
+  "leg_t": {
+   "value": 10.0,
+   "evidence": {
+    "op": "user_request",
+    "detail": "requested leg t 10 mm"
+   }
+  },
+  "depth": {
+   "value": 50.0,
+   "evidence": {
+    "op": "user_request",
+    "detail": "requested depth 50 mm"
+   }
+  },
+  "bore_dia": {
+   "value": 12.0,
+   "evidence": {
+    "op": "user_request",
+    "detail": "requested bore dia 12 mm"
+   }
+  },
+  "bore_y": {
+   "value": 30.0,
+   "evidence": {
+    "op": "user_request",
+    "detail": "requested bore y 30 mm"
+   }
+  },
+  "bore_z": {
+   "value": 25.0,
+   "evidence": {
+    "op": "user_request",
+    "detail": "requested bore z 25 mm"
+   }
+  }
+ },
+ "features": [
+  {
+   "id": "profile_sketch",
+   "op": "sketch",
+   "plane": {
+    "frame_plane": "back"
+   },
+   "profile": {
+    "shape": "profile",
+    "start": [
+     0,
+     0
+    ],
+    "segments": [
+     {
+      "type": "line",
+      "to": [
+       "profile_len",
+       0
+      ]
+     },
+     {
+      "type": "line",
+      "to": [
+       "profile_len",
+       "leg_t"
+      ]
+     },
+     {
+      "type": "line",
+      "to": [
+       "leg_t",
+       "leg_t"
+      ]
+     },
+     {
+      "type": "line",
+      "to": [
+       "leg_t",
+       "profile_h"
+      ]
+     },
+     {
+      "type": "line",
+      "to": [
+       0,
+       "profile_h"
+      ]
+     },
+     {
+      "type": "line",
+      "to": [
+       0,
+       0
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "id": "body_pad",
+   "op": "pad",
+   "sketch": "profile_sketch",
+   "length": "depth"
+  },
+  {
+   "id": "bore",
+   "op": "hole",
+   "plane": {
+    "frame_plane": "bore_entry"
+   },
+   "position": {
+    "x": "bore_y",
+    "y": "bore_z"
+   },
+   "diameter": "bore_dia",
+   "through": true,
+   "note": "plane x_dir = +Y, so sketch x maps to world Y and sketch y to world Z"
+  }
+ ]
+}

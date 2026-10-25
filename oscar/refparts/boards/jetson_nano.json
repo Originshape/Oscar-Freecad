@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "id": "jetson_nano",
+  "name": "NVIDIA Jetson Nano Developer Kit",
+  "aliases": ["jetson nano developer kit", "jetson nano dev kit", "jetson nano devkit", "nvidia jetson nano", "jetson nano"],
+  "kind": "sbc",
+  "frame": {"origin": "pcb_bottom_lower_left", "x": "long_edge", "y": "short_edge", "z": "up_through_pcb", "units": "mm"},
+  "outline": {
+    "shape": "rounded_rect", "length": 100.0, "width": 80.0, "corner_radius": 3.0,
+    "source": "NVIDIA Jetson Nano Developer Kit datasheet (NVIDIA): 100 x 80 mm carrier board (overall 100 x 80 x 29 mm with the module and heatsink); corner radius approximate",
+    "source_url": "https://www.nvidia.com/en-us/autonomous-machines/embedded-systems/jetson-nano/product-development/",
+    "confidence": "community"
+  },
+  "pcb": {
+    "thickness": 1.6,
+    "source": "typical FR4 board thickness; not published",
+    "confidence": "assumed"
+  },
+  "mounting_holes": {
+    "diameter": 3.0, "pad_diameter": 6.0, "thread": "M3",
+    "positions": [[7.0, 11.0], [93.0, 11.0], [7.0, 69.0], [93.0, 69.0]],
+    "pattern": {"offset": [7.0, 11.0], "dx": 86.0, "dy": 58.0},
+    "source": "ASSUMED pattern: NVIDIA's carrier board specification does not publish the mounting hole positions; measure them from the NVIDIA STEP model (measure_reference_part) before building",
+    "confidence": "assumed"
+  },
+  "connectors": [
+    {"id": "module_heatsink", "name": "Jetson module and heatsink (keepout)", "kind": "heatsink", "face": "top",
+     "box": {"x": [12.0, 78.0], "y": [14.0, 66.0], "z": [1.6, 29.0]}, "cutout": false, "margin_hint": 0.0,
+     "source": "coarse keepout box: the module and heatsink stand in the middle of the board; the 29 mm overall height is NVIDIA's published figure",
+     "source_url": "https://www.nvidia.com/en-us/autonomous-machines/embedded-systems/jetson-nano/product-development/",
+     "confidence": "assumed", "note": "footprint assumed; only the overall height is published; no wall opening"}
+  ],
+  "height": {"max_top_z": 29.0, "min_bottom_z": 1.6},
+  "omitted": ["every wall connector (USB 3.0 stacks, HDMI, DisplayPort, Gigabit Ethernet, DC jack, micro-USB): their positions are not published; import the NVIDIA STEP model and measure it", "40-pin header, camera (CSI) connectors, M.2 slot, fan header"],
+  "verify_against": "https://www.nvidia.com/en-us/autonomous-machines/embedded-systems/jetson-nano/product-development/",
+  "verified": false
+}

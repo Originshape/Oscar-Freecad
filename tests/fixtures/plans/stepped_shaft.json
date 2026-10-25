@@ -1,0 +1,182 @@
+{
+ "schema_version": 1,
+ "id": "stepped_shaft",
+ "part_class": "shaft",
+ "units": "mm",
+ "target": "freecad",
+ "frame": {
+  "origin": [
+   0,
+   0,
+   0
+  ],
+  "planes": {
+   "base": {
+    "origin": [
+     0,
+     0,
+     0
+    ],
+    "normal": [
+     0,
+     -1,
+     0
+    ],
+    "x_dir": [
+     1,
+     0,
+     0
+    ],
+    "note": "XZ plane: sketch x = world X (radius), sketch y = world Z (height)"
+   }
+  },
+  "axes": {
+   "z": {
+    "direction": [
+     0,
+     0,
+     1
+    ],
+    "point": [
+     0,
+     0,
+     0
+    ]
+   }
+  }
+ },
+ "parameters": {
+  "r1": {
+   "value": 10.0,
+   "evidence": {
+    "op": "user_request",
+    "detail": "requested r1 10 mm"
+   }
+  },
+  "l1": {
+   "value": 40.0,
+   "evidence": {
+    "op": "user_request",
+    "detail": "requested l1 40 mm"
+   }
+  },
+  "r2": {
+   "value": 6.0,
+   "evidence": {
+    "op": "user_request",
+    "detail": "requested r2 6 mm"
+   }
+  },
+  "z2": {
+   "value": 70.0,
+   "evidence": {
+    "op": "user_request",
+    "detail": "requested z2 70 mm"
+   }
+  },
+  "r3": {
+   "value": 4.0,
+   "evidence": {
+    "op": "user_request",
+    "detail": "requested r3 4 mm"
+   }
+  },
+  "z_total": {
+   "value": 90.0,
+   "evidence": {
+    "op": "user_request",
+    "detail": "requested z total 90 mm"
+   }
+  },
+  "rev_360": {
+   "value": 360.0,
+   "evidence": {
+    "op": "user_request",
+    "detail": "requested rev 360 360 mm"
+   }
+  }
+ },
+ "features": [
+  {
+   "id": "half_profile",
+   "op": "sketch",
+   "plane": {
+    "frame_plane": "base"
+   },
+   "profile": {
+    "shape": "profile",
+    "start": [
+     0,
+     0
+    ],
+    "segments": [
+     {
+      "type": "line",
+      "to": [
+       "r1",
+       0
+      ]
+     },
+     {
+      "type": "line",
+      "to": [
+       "r1",
+       "l1"
+      ]
+     },
+     {
+      "type": "line",
+      "to": [
+       "r2",
+       "l1"
+      ]
+     },
+     {
+      "type": "line",
+      "to": [
+       "r2",
+       "z2"
+      ]
+     },
+     {
+      "type": "line",
+      "to": [
+       "r3",
+       "z2"
+      ]
+     },
+     {
+      "type": "line",
+      "to": [
+       "r3",
+       "z_total"
+      ]
+     },
+     {
+      "type": "line",
+      "to": [
+       0,
+       "z_total"
+      ]
+     },
+     {
+      "type": "line",
+      "to": [
+       0,
+       0
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "id": "revolve",
+   "op": "revolution",
+   "sketch": "half_profile",
+   "axis": {
+    "frame_axis": "z"
+   },
+   "angle": "rev_360"
+  }
+ ]
+}

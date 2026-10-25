@@ -1,0 +1,38 @@
+__pycache__/
+*.pyc
+.devhome/
+dist/
+.DS_Store
+
+# ---- policy: documents and research files are never committed ----
+*.md
+*.pdf
+*.doc
+*.docx
+*.rtf
+*.odt
+*.pages
+docs/
+research/
+notes/
+# ...except the repository's own documents at the root, which the addon page and the Addon Manager link to
+!/README.md
+!/CONTRIBUTING.md
+!/SECURITY.md
+!/DEVELOPMENT.md
+!/CHANGELOG.md
+
+# ---- secrets, credentials and local state: never committed ----
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+secrets.*
+credentials*
+oscar_settings.json
+settings.json
+*.log
+logs/
+.cache/

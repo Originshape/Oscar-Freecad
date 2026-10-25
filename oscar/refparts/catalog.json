@@ -1,0 +1,105 @@
+{
+  "schema": 1,
+  "allow_hosts": ["raw.githubusercontent.com", "github.com", "datasheets.raspberrypi.com", "www.raspberrypi.com", "pip.raspberrypi.com", "pip-assets.raspberrypi.com"],
+  "entries": [
+    {
+     "id": "rpi4b", "name": "Raspberry Pi 4 Model B", "kind": "sbc",
+     "aliases": ["raspberry pi 4", "raspberry pi 4 model b", "raspberry pi 4b", "rpi 4", "rpi4", "rpi4b", "pi 4", "pi4"],
+     "board": "boards/rpi4b.json",
+     "vendor_urls": ["https://www.raspberrypi.com/products/raspberry-pi-4-model-b/"],
+     "datasheet_urls": ["https://datasheets.raspberrypi.com/rpi4/raspberry-pi-4-mechanical-drawing.pdf"],
+     "step_urls": [
+      {"url": "https://raw.githubusercontent.com/multigamesystem/MGS-CAD-Files/main/STEP%20files%20with%20images/Raspberry%20Pi%204%20Model%20B%20v4.step",
+       "mirror": false, "trust": "community", "size": 17535443,
+       "expected_sha256": "fd75897c59e79106ada16c3c744c212b92e60f1992b8b42349ddc2f2b3e90ce4",
+       "expected_bbox": [88.99, 58.4, 19.9], "on_hash_mismatch": "identity",
+       "license": "unspecified - community model, accuracy unverified: cross-checked against the official drawing, see notes",
+       "last_verified": "2026-10-02",
+       "note": "Community model (multigamesystem/MGS-CAD-Files), no official Pi 4 STEP exists. Downloaded and imported 2026-10-02: 109 solids, PCB 85 x 56 x 1.6, holes 58 x 49 at (3.5, 3.5), connector centres within 0.2 mm of the drawing-based boxes (audio jack 0.5 mm); the model reaches 1 to 2 mm further past the board edges. The board file keeps the drawing values (see its step_cross_check)."}
+     ],
+     "license": "dimensions: manufacturer's published drawing; the STEP file is a community model, licence unspecified", "last_verified": "2026-10-02", "verified": false
+    },
+    {
+     "id": "rpi3bplus", "name": "Raspberry Pi 3 Model B+", "kind": "sbc",
+     "aliases": ["raspberry pi 3 model b+", "raspberry pi 3 b+", "raspberry pi 3b+", "raspberry pi 3 model b plus", "raspberry pi 3", "rpi 3b+", "rpi3b+", "rpi3bplus", "rpi 3", "rpi3", "pi 3b+", "pi 3 b+", "pi3b+", "pi 3", "pi3"],
+     "board": "boards/rpi3bplus.json",
+     "vendor_urls": ["https://www.raspberrypi.com/products/raspberry-pi-3-model-b-plus/"],
+     "datasheet_urls": ["https://datasheets.raspberrypi.com/rpi3/raspberry-pi-3-b-plus-mechanical-drawing.pdf"],
+     "step_urls": [],
+     "license": "dimensions: manufacturer's published mechanical drawing; no CAD file is redistributed", "last_verified": "", "verified": false
+    },
+    {
+     "id": "rpi5", "name": "Raspberry Pi 5", "kind": "sbc",
+     "aliases": ["raspberry pi 5", "raspberry pi 5 model b", "rpi 5", "rpi5", "pi 5", "pi5"],
+     "board": "boards/rpi5.json",
+     "vendor_urls": ["https://www.raspberrypi.com/products/raspberry-pi-5/"],
+     "datasheet_urls": ["https://datasheets.raspberrypi.com/rpi5/raspberry-pi-5-mechanical-drawing.pdf"],
+     "step_urls": [
+      {"url": "https://pip.raspberrypi.com/documents/RP-010083-CA",
+       "mirror": false, "trust": "official", "size": 13270704,
+       "expected_sha256": "6841637b4cfa97637bf34b529bfe896f24d9634b2c40b57a156781f55d88f06f",
+       "member": "rpi-5b_no_graphics.step",
+       "member_sha256": "78164070c1cc7ab854382950d2e85926c6e35432f1e5a146b733397a7c6afb44", "member_bytes": 77627469,
+       "expected_bbox": [88.5, 57.2, 18.98], "on_hash_mismatch": "identity",
+       "license": "vendor-published, see vendor terms (the archive's LICENSE.txt: MIT, Raspberry Pi Ltd; the model is provided for guidance only, without guarantee of accuracy)",
+       "last_verified": "2026-10-02",
+       "note": "Official Raspberry Pi 5 STEP (RP-010083-CA, 'No Graphics small file'); the URL redirects to pip-assets.raspberrypi.com. A LARGE model: 2689 solids, 77.6 MB unpacked, importing takes several minutes. Measured 2026-10-02: PCB 85 x 56 x 1.276, holes 58 x 49 at (3.5, 3.5); no micro-HDMI shells in the model."}
+     ],
+     "license": "dimensions: manufacturer's published mechanical drawing; STEP file: vendor-published, see vendor terms", "last_verified": "2026-10-02", "verified": false
+    },
+    {
+     "id": "rpizero2w", "name": "Raspberry Pi Zero 2 W", "kind": "sbc",
+     "aliases": ["raspberry pi zero 2 w", "raspberry pi zero 2w", "pi zero 2 w", "pi zero 2w", "rpi zero 2 w", "rpi zero 2w", "rpizero2w", "zero 2 w", "zero 2w"],
+     "board": "boards/rpizero2w.json",
+     "vendor_urls": ["https://www.raspberrypi.com/products/raspberry-pi-zero-2-w/"],
+     "datasheet_urls": ["https://datasheets.raspberrypi.com/rpizero2/raspberry-pi-zero-2-w-mechanical-drawing.pdf"],
+     "step_urls": [],
+     "license": "dimensions: manufacturer's published mechanical drawing; no CAD file is redistributed", "last_verified": "", "verified": false
+    },
+    {
+     "id": "rpi_pico", "name": "Raspberry Pi Pico", "kind": "mcu",
+     "aliases": ["raspberry pi pico", "raspberry pi pico rp2040", "rpi pico", "rpi_pico", "pi pico", "rp2040 pico", "pico"],
+     "board": "boards/rpi_pico.json",
+     "vendor_urls": ["https://www.raspberrypi.com/products/raspberry-pi-pico/"],
+     "datasheet_urls": ["https://datasheets.raspberrypi.com/pico/pico-datasheet.pdf"],
+     "step_urls": [],
+     "license": "dimensions: manufacturer's published mechanical drawing; no CAD file is redistributed", "last_verified": "", "verified": false
+    },
+    {
+     "id": "arduino_uno", "name": "Arduino Uno Rev3", "kind": "mcu",
+     "aliases": ["arduino uno rev3", "arduino uno r3", "arduino uno", "uno rev3", "uno r3", "uno"],
+     "board": "boards/arduino_uno.json",
+     "vendor_urls": ["https://store.arduino.cc/products/arduino-uno-rev3"],
+     "datasheet_urls": ["https://docs.arduino.cc/hardware/uno-rev3"],
+     "step_urls": [],
+     "license": "dimensions: manufacturer's published data and community case designs; no CAD file is redistributed", "last_verified": "", "verified": false
+    },
+    {
+     "id": "arduino_nano", "name": "Arduino Nano (classic, mini-B USB)", "kind": "mcu",
+     "aliases": ["arduino nano", "arduino nano v3", "arduino nano 3.0", "nano v3", "nano 3.0"],
+     "board": "boards/arduino_nano.json",
+     "vendor_urls": ["https://store.arduino.cc/products/arduino-nano"],
+     "datasheet_urls": ["https://docs.arduino.cc/hardware/nano"],
+     "step_urls": [],
+     "license": "dimensions: manufacturer's published data and community case designs; no CAD file is redistributed", "last_verified": "", "verified": false
+    },
+    {
+     "id": "esp32_devkitc", "name": "ESP32-DevKitC V4", "kind": "mcu",
+     "aliases": ["esp32 devkitc v4", "esp32 devkitc", "esp32 dev kit c", "esp32 devkit", "esp32 dev board", "esp32 development board", "esp32"],
+     "board": "boards/esp32_devkitc.json",
+     "vendor_urls": ["https://www.espressif.com/en/products/devkits/esp32-devkitc"],
+     "datasheet_urls": ["https://docs.espressif.com/projects/esp-dev-kits/en/latest/esp32/esp32-devkitc/user_guide.html"],
+     "step_urls": [],
+     "license": "dimensions: manufacturer's published data and community case designs; no CAD file is redistributed", "last_verified": "", "verified": false
+    },
+    {
+     "id": "jetson_nano", "name": "NVIDIA Jetson Nano Developer Kit", "kind": "sbc",
+     "aliases": ["jetson nano developer kit", "jetson nano dev kit", "jetson nano devkit", "nvidia jetson nano", "jetson nano"],
+     "board": "boards/jetson_nano.json",
+     "vendor_urls": ["https://www.nvidia.com/en-us/autonomous-machines/embedded-systems/jetson-nano/product-development/"],
+     "datasheet_urls": [],
+     "step_urls": [],
+     "license": "dimensions: manufacturer's published overall size; hole and connector positions are not published", "last_verified": "", "verified": false
+    }
+  ]
+}
