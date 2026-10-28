@@ -20,10 +20,27 @@ import uuid
 from .stopreason import is_cut_off, normalize_stop_reason  # noqa: F401  (re-exported on purpose)
 
 __all__ = [
-    "CUTOFF_NOTE", "BUDGET_NOTE", "WATCHDOG_NOTE", "NO_TEXT_PLACEHOLDER",
+    "CUTOFF_NOTE", "BUDGET_NOTE", "WATCHDOG_NOTE", "NO_TEXT_PLACEHOLDER", "TOKEN_CUT_NOTE", "CREDITS_CUT_NOTE",
+    "CREDITS_EMPTY_MESSAGE", "shortened_for_credits",
     "normalize_stop_reason", "is_cut_off", "args_problem", "bad_arguments_message", "call_chat",
     "is_synthetic", "real_user_request", "make_note", "args_hash", "clip", "first_line", "unique_call_ids",
 ]
+
+# Appended to a reply cut at its output cap (agent._cut_note): the model's own cap, or the lower one OriginShape set
+# because the account's credits are low (``x-oscar-normalized`` says ``credits``; audit 2026-10-28: that was blamed on
+# the model's output budget).
+TOKEN_CUT_NOTE = "\n\n(The reply was cut off at the output-token limit.)"
+CREDITS_CUT_NOTE = ("\n\n(The reply was cut off: your OriginShape credits are low, so the reply was shortened to what "
+                    "they can pay for.)")
+CREDITS_EMPTY_MESSAGE = ("Your OriginShape credits are low, so the reply was shortened to what they can pay for, and "
+                         "the model spent all of it on thinking. Add credits or choose a plan, or start a new chat: a "
+                         "shorter chat needs fewer credits.")
+
+
+def shortened_for_credits(provider: object) -> bool:
+    """True when OriginShape lowered the last reply's output budget because the account's credits are low."""
+    return "credits" in str(getattr(provider, "last_normalized", "") or "").split(",")
+
 
 # What the app says when a reasoning model spent the whole output budget on thinking (agent._CUTOFF_NOTE).
 CUTOFF_NOTE = (

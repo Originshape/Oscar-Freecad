@@ -1319,6 +1319,21 @@ def _account_snapshot(state: Any) -> dict:
     return snapshot if isinstance(snapshot, dict) else {}
 
 
+def account_balance(snapshot: Any) -> tuple[float, float]:
+    """``(balance, held)`` of an account snapshot, as the website shows them: the balance, and the part of it running
+    requests hold for now (``balance - available``). "Out of credits" means the balance reached zero, never a balance
+    that a running request holds (audit 2026-10-28: FreeCAD said 0 while the website said 12)."""
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    balance = _num(snapshot.get("credits_balance") if "credits_balance" in snapshot else snapshot.get("credits_available"))
+    held = balance - _num(snapshot.get("credits_available", balance))
+    return balance, held if held >= 0.005 else 0.0
+
+
+def on_trial(snapshot: Any) -> bool:
+    """A trial account: credit packs are for subscribers, so "Buy credits" is "Choose a plan" for it."""
+    return isinstance(snapshot, dict) and _text(snapshot.get("plan")).strip().lower() == "trial"
+
+
 def _account_email(state: Any) -> str:
     email = _account_snapshot(state).get("email") or (state.get("email") if isinstance(state, dict) else "")
     return _text(email).strip()
@@ -1355,10 +1370,10 @@ def account_badge(state: Any) -> tuple[str, str, str]:
         text, tone = "Suspended", "warn"
         parts.append("your account is suspended")
     elif status == "approved":
-        available = _num(snapshot.get("credits_available"))
-        text, tone = format_credits(available), ("warn" if available <= 0 else "")
-        low = " (running low)" if snapshot.get("credits_low") is True and available > 0 else ""
-        parts.append(f"{text} left{low}")
+        balance, held = account_balance(snapshot)
+        text, tone = format_credits(balance), ("warn" if balance <= 0 else "")
+        low = " (running low)" if snapshot.get("credits_low") is True and balance > 0 else ""
+        parts.append(f"{text} left{low}" + (f", {format_credits(held)} held by a running request" if held else ""))
     else:   # signed in, the account not loaded yet
         text, tone = "Signed in", ""
     plan = _text(snapshot.get("plan_name") or snapshot.get("plan")).strip()
@@ -1384,14 +1399,17 @@ def account_menu(state: Any) -> list[tuple[str, str]]:
     rows = [("", f"Signed in as {email}" if email else "Signed in to OriginShape")]
     if _text(_account_snapshot(state).get("status")) == "waitlisted":
         rows.append(("", "Your account is on the waitlist"))
-    return rows + update + [("-", ""), ("buy", "Buy credits…"), ("manage", "Manage account…"), ("refresh", "Refresh"),
+    buy = ("subscribe", "Choose a plan…") if on_trial(_account_snapshot(state)) else ("buy", "Buy credits…")
+    return rows + update + [("-", ""), buy, ("manage", "Manage account…"), ("refresh", "Refresh"),
                             ("-", ""), ("signout", "Sign out")]
 
 
-def account_card(kind: str, *, reason: str = "", returned: bool = False) -> tuple[str, list[tuple[str, str]]]:
+def account_card(kind: str, *, reason: str = "", returned: bool = False,
+                 trial: bool = False) -> tuple[str, list[tuple[str, str]]]:
     """``(markdown, actions)`` of an ``ACCOUNT`` card. ``kind`` is one of ``ACCOUNT_CARD_KINDS`` (anything else:
     ``("", [])``). ``reason="no_key"`` words the onboarding card for a profile that lacks its API key. ``returned``
-    says the message the user sent is back in the input (its very first request failed)."""
+    says the message the user sent is back in the input (its very first request failed). ``trial``: a trial account,
+    which gets more credits with a plan (packs are for subscribers)."""
     back = " Your message is back in the input: send it again when you are ready." if returned else ""
     signin = [("oscar://account/signin", "Sign in with browser"), ("oscar://account/device", "Sign in with a code")]
     own_key = ("oscar://settings", "Use my own API key")
@@ -1410,6 +1428,9 @@ def account_card(kind: str, *, reason: str = "", returned: bool = False) -> tupl
         return ("**Your OriginShape account is on the waitlist.** You can chat as soon as it is approved; you will "
                 "hear from us by email." + back, [("oscar://account/refresh", "Check again"), own_key])
     if kind == "no_credits":
+        if trial:
+            return ("**You have no OriginShape credits left.** Choose a plan to get more credits." + back,
+                    [("oscar://account/subscribe", "Choose a plan"), own_key])
         return ("**You have no OriginShape credits left.** Buy credits or choose a plan to continue." + back,
                 [("oscar://account/buy", "Buy credits"), ("oscar://account/subscribe", "See plans"), own_key])
     if kind == "outdated":

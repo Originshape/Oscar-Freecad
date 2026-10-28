@@ -348,8 +348,15 @@ class AgentWorker(ContextWiring, QtCore.QThread):
             last.content = f"{last.content}\n\n<workspace_state>\n{snapshot}\n</workspace_state>"
 
     def stop(self) -> None:
-        """Ask the turn to end: the loop re-checks before every tool call and every provider round."""
+        """Ask the turn to end: the loop re-checks before every tool call and every provider round, and an approval the
+        turn is waiting for closes unanswered (a refusal) instead of holding Stop for up to two minutes."""
         self._stop = True
+        try:
+            from . import netguard as _netguard
+
+            _netguard.cancel_open_questions()
+        except Exception:  # noqa: BLE001 - Stop itself must never fail
+            pass
 
     def pause(self) -> None:
         """Hold the flow at the next round boundary (between provider calls and tool runs); generation in flight finishes first."""
@@ -1258,7 +1265,12 @@ class AgentWorker(ContextWiring, QtCore.QThread):
 
     # -- finishing --------------------------------------------------------------------------------------
 
+    def _cut_note(self) -> str:
+        return loopcore.CREDITS_CUT_NOTE if loopcore.shortened_for_credits(self.provider) else loopcore.TOKEN_CUT_NOTE
+
     def _empty_reply_message(self, stop_reason: str) -> str:
+        if _cut_off(stop_reason) and loopcore.shortened_for_credits(self.provider):
+            return loopcore.CREDITS_EMPTY_MESSAGE
         if _cut_off(stop_reason):
             # the provider may have learned a lower cap than the profile's
             effective = getattr(self.provider, "_max_tokens", None)
@@ -1323,7 +1335,7 @@ class AgentWorker(ContextWiring, QtCore.QThread):
                 f"(Stopped after {self._tool_round} tool rounds — ask me to continue to keep going.)")
             blocks = []
         elif _cut_off(stop) and text.strip():
-            text += "\n\n(The reply was cut off at the output-token limit.)"
+            text += self._cut_note()
             blocks = []
         elif not text.strip():
             # An empty reply must never pass as a successful answer: the panel would render nothing at all.
@@ -1449,7 +1461,7 @@ class AgentWorker(ContextWiring, QtCore.QThread):
         outcome = "validated" if ok_validation else "answered"
         ledger.mark_delivered(self.project is not None)
         summary = self._finalize(outcome)
-        model_text = text + ("\n\n(The reply was cut off at the output-token limit.)" if _cut_off(stop) else "")
+        model_text = text + (self._cut_note() if _cut_off(stop) else "")
         self._record_answer(model_text, blocks if model_text == text else [])
         if outcome == "validated" and summary:
             return self._result(True, f"{model_text}\n\n{summary}", outcome)

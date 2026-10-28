@@ -202,6 +202,20 @@ class FailureTest(LoopbackCase):
         self.assertResult(self.finish(browser), "declined")
         self.assertEqual(self.fake.counts["token:authorization_code"], 0)
 
+    def test_a_suspended_account_is_told_so_not_declined(self):
+        """The consent page sends a suspended account back with access_denied / account_suspended (audit 2026-10-28:
+        the page was a dead end and Oscar waited out its timeout)."""
+        self.flow.prepare()
+        url = (f"http://127.0.0.1:{self.flow.port}/callback?error=access_denied&error_description=account_suspended"
+               f"&state={self.flow._state}")
+        browser = self.browse_in_background(url)
+        with self.assertRaises(AuthError) as ctx:
+            self.flow.wait(threading.Event(), timeout=10)
+        self.assertEqual(ctx.exception.code, "suspended")
+        self.assertIn("suspended", str(ctx.exception))
+        self.assertNotIsInstance(ctx.exception, SignInDeclined)
+        browser["thread"].join(10)
+
     def test_another_authorize_error_is_reported_by_code(self):
         self.flow.prepare()
         url = (f"http://127.0.0.1:{self.flow.port}/callback?error=invalid_request&error_description=bad"

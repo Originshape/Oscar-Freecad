@@ -188,7 +188,7 @@ class DeviceSignIn:
                 delay = min(interval * (2 ** failures), MAX_INTERVAL_S)   # RFC 8628 3.5: back off on errors
                 continue
             failures = 0
-            code, _ = transport.oauth_error(reply, self._device_code)
+            code, desc = transport.oauth_error(reply, self._device_code)
             if code == "authorization_pending":
                 delay = interval
                 continue
@@ -197,6 +197,8 @@ class DeviceSignIn:
                 delay = interval
                 continue
             if code == "access_denied":
+                if transport.says_suspended(reply, desc):
+                    raise transport.AccountSuspended(transport.SUSPENDED_MESSAGE, status=reply.status)
                 raise SignInDeclined("The sign-in request was declined.", status=reply.status)
             if code == "expired_token":
                 raise SignInExpired("The code expired before it was approved. Start again to get a new one.",

@@ -725,7 +725,8 @@ class SignedInTest(_DialogCase):
         self.assertTrue(self.wait(lambda: d.account_credits.text() == "42.5 credits"), d.account_credits.text())
         self.assertTrue(d.account_notice.isHidden())
         self.assertFalse(d.account_billing_btn.property("oscarPrimary"))
-        self.assertEqual(d.ai_account_state.text(), "Signed in as ada@example.com · 42.5 credits available")
+        self.assertEqual(d.ai_account_state.text(), "Signed in as ada@example.com · 42.5 credits left")
+        self.assertEqual(d.account_billing_btn.text(), "Choose a plan")   # a trial account: packs need a plan
         self.assertTrue(d.goto_account_btn.isHidden())
 
     def test_an_account_that_cannot_be_loaded_says_so_until_it_can(self):

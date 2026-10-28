@@ -26,6 +26,7 @@ active document.
 
 import copy
 import difflib
+import re
 from typing import Any
 
 from . import tools_kit_base as base
@@ -37,6 +38,8 @@ _MAX_ROWS = 40
 _MAX_ITEMS = 80
 _PHASES_SET = ("PARAMS", "BUILD", "VERIFY")
 _PHASES_GET = ("PLAN", "PARAMS", "BUILD", "VERIFY", "DELIVER")
+_UNIT_SUFFIX = re.compile(r"\s*(?:mm|deg)\s*$")
+_BARE_NAME = re.compile(r"(?<![\w.])([a-z][a-z0-9_]*)(?![\w(.])")     # what kit.params prefixes with the sheet name
 
 
 class _Refused(Exception):
@@ -83,6 +86,45 @@ def render_table(rows: "list[dict]", sheet: str, cap: int = _MAX_ROWS) -> str:
 
 def _row(rows: "list[dict]", name: str) -> "dict | None":
     return next((r for r in rows if r["name"] == name), None)
+
+
+def _plan_sheets(doc: Any) -> "list[str]":
+    """Names of the parameter sheets ``apply_feature_plan`` built in ``doc`` (``Parameters``, ``Parameters001`` ...), in document
+    order. Only the builder's stamp proves one: a user's own sheet with the same name and layout is never edited."""
+    from .plan.builder import PLAN_MARK
+
+    return [o.Name for o in doc.Objects if o.TypeId == "Spreadsheet::Sheet" and getattr(o, "Label2", "") == PLAN_MARK]
+
+
+def _param_sheets(doc: Any) -> "list[str]":
+    """Every parameter sheet the tools use in ``doc``: ``Params`` (the kit's) first, then the FeaturePlan sheets."""
+    params_obj = doc.getObject(_params.SHEET_NAME)
+    return ([_params.SHEET_NAME] if getattr(params_obj, "TypeId", "") == "Spreadsheet::Sheet" else []) + _plan_sheets(doc)
+
+
+def _sheet_in(doc: Any, requested: str = _params.SHEET_NAME) -> str:
+    """The sheet a tool reads or writes: ``requested``, except that ``Params`` in a document that has none but has a FeaturePlan sheet
+    means that sheet (the plan's geometry is bound to it, so a new ``Params`` would drive nothing)."""
+    if requested != _params.SHEET_NAME:
+        return requested
+    return next(iter(_param_sheets(doc)), requested)
+
+
+def _sheet_holding(doc: Any, name: str) -> "str | None":
+    """The sheet whose row ``name`` drives the model: of the sheets that hold it, the one objects are bound to (a name in both
+    ``Params`` and a plan sheet: the bound copy), else the first; ``None`` when no sheet holds it."""
+    holding = [s for s in _param_sheets(doc) if name in _params.Params(doc, s).names()]
+    if len(holding) > 1:
+        holding = [s for s in holding if (_row(_params.Params(doc, s).table(), name) or {}).get("bound")] or holding
+    return next(iter(holding), None)
+
+
+def _plain_value(value: Any) -> Any:
+    """``value`` as a FeaturePlan cell holds it: a plain number, as the builder writes it ('6 mm' -> '6'), because '6 mm' in a derived
+    ``plate_w - 2*corner_r`` is a unit mismatch FreeCAD refuses. Numbers and formulas are kept."""
+    if isinstance(value, str) and not value.strip().startswith("="):
+        return _UNIT_SUFFIX.sub("", value)
+    return value
 
 
 # --------------------------------------------------------------------------------------------------------------------
@@ -296,7 +338,8 @@ def _validate_items(items: Any) -> "tuple[list[dict], list[str]]":
 
 @tool(
     "set_parameters",
-    "Create or update rows of the Params spreadsheet (the single source of truth for every driving dimension). Each row has a name, a "
+    "Create or update rows of the Params spreadsheet (the single source of truth for every driving dimension; in a part built by "
+    "apply_feature_plan, its Parameters sheet). Each row has a name, a "
     "value (number, a string with a unit like '2.4 mm', or a formula starting with '='), a unit, a source and a note. Returns the table.",
     {"type": "object", "properties": {
         "doc_name": {"type": "string"},
@@ -329,18 +372,23 @@ def _set_parameters(doc_name: str, params: list, sheet: str = _params.SHEET_NAME
         doc = base.open_doc(actual)
         if doc is None:
             return {"error": f"document '{actual}' is not open"}
+        here = _sheet_in(doc, sheet_name)
+        plan_sheet = here in _plan_sheets(doc)
         spec_here = spec_dict if base.spec_applies(doc, spec_dict, owner) else None    # the chat's spec may belong to another document
         before_state = _geometry_state(doc)
         invalid_before = _invalid_names(doc)
         was_current = _stages_current(doc, spec_here)
         try:
             with build.atomic(doc, "Oscar set_parameters"):
-                table = _params.ensure_sheet(doc, sheet_name)
+                table = _params.Params(doc, here) if plan_sheet else _params.ensure_sheet(doc, here)
                 for it in items:
-                    table.set(it["name"], it["value"], unit=it["unit"], source=it["source"], note=it["note"])
+                    if plan_sheet:      # plain numbers, as the plan writes them
+                        table.set(it["name"], _plain_value(it["value"]), unit="", source=it["source"], note=it["note"])
+                    else:
+                        table.set(it["name"], it["value"], unit=it["unit"], source=it["source"], note=it["note"])
                 doc.recompute()
                 design = [it["name"] for it in items if it["name"] in _spec.DESIGN_PARAMS]
-                if design and sheet_name == _params.SHEET_NAME:
+                if design and here == _params.SHEET_NAME:
                     errs = _effective_errors(doc, spec_here)
                     if errs:
                         raise _Refused("the values break the enclosure spec rules:\n" + "\n".join(f"- {e}" for e in errs[:6]))
@@ -353,19 +401,19 @@ def _set_parameters(doc_name: str, params: list, sheet: str = _params.SHEET_NAME
         except _params.ParamsError as exc:
             return {"error": f"{_clean(exc)}; nothing was changed"}
         results, skip_note = ([], "")
-        if sheet_name == _params.SHEET_NAME:
+        if here == _params.SHEET_NAME:
             results, skip_note = _rebuild_dependents(doc, spec_here, [it["name"] for it in items], ref_status)
         failed = [r for r in results if not r.ok]
         if failed:
             return {"error": f"the dependent stage could not be rebuilt ({failed[0].message}); the sheet now holds the new values, "
                              "fix the values or set them back"}
-        table = _params.Params(doc, sheet_name)
+        table = _params.Params(doc, here)
         after_state = _geometry_state(doc)
         kit_id = str((spec_here or {}).get("kit_id") or "enc1")
         changed, _names = _changed_text(doc, before_state, after_state, kit_id)
-        new_spec = _sync_spec(doc, spec_here, [it["name"] for it in items], was_current) if sheet_name == _params.SHEET_NAME else None
+        new_spec = _sync_spec(doc, spec_here, [it["name"] for it in items], was_current) if here == _params.SHEET_NAME else None
         return {"rows": table.table(), "names": table.names(), "rebuilt": [r.stage for r in results], "skip": skip_note, "changed": changed,
-                "spec": new_spec}
+                "spec": new_spec, "sheet": here}
 
     out = base.gui_call("set_parameters", task)
     if out.get("error"):
@@ -373,8 +421,8 @@ def _set_parameters(doc_name: str, params: list, sheet: str = _params.SHEET_NAME
     base.set_extra(ctx, param_names=out["names"])
     if out.get("spec"):
         base.store_spec(ctx, actual, out["spec"])
-    lines = [f"Set {len(items)} parameter{'s' if len(items) != 1 else ''} in sheet '{sheet_name}': {base.limit_list([it['name'] for it in items], 8)}.",
-             render_table(out["rows"], sheet_name)]
+    lines = [f"Set {len(items)} parameter{'s' if len(items) != 1 else ''} in sheet '{out['sheet']}': {base.limit_list([it['name'] for it in items], 8)}.",
+             render_table(out["rows"], out["sheet"])]
     if out["rebuilt"]:
         lines.append(f"Rebuilt stage{'s' if len(out['rebuilt']) != 1 else ''} {', '.join(out['rebuilt'])}; {out['changed']}.")
     if out["skip"]:
@@ -388,7 +436,8 @@ def _set_parameters(doc_name: str, params: list, sheet: str = _params.SHEET_NAME
 
 @tool(
     "get_parameters",
-    "Read the Params spreadsheet: every parameter with value, unit, formula, source, and how many object properties are bound to it.",
+    "Read the Params spreadsheet (without one, the Parameters sheet of an apply_feature_plan build): every parameter with value, "
+    "unit, formula, source, and how many object properties are bound to it.",
     {"type": "object", "properties": {"doc_name": {"type": "string"}, "sheet": {"type": "string", "default": "Params"}},
      "required": ["doc_name"]},
     category="params", phases=_PHASES_GET,
@@ -403,11 +452,12 @@ def _get_parameters(doc_name: str, sheet: str = _params.SHEET_NAME):
         doc = base.open_doc(actual)
         if doc is None:
             return {"error": f"document '{actual}' is not open"}
+        here = _sheet_in(doc, sheet_name)
         try:
-            table = _params.Params(doc, sheet_name)
+            table = _params.Params(doc, here)
         except _params.ParamsError as exc:
             return {"missing": _clean(exc)}
-        return {"rows": table.table(), "names": table.names()}
+        return {"rows": table.table(), "names": table.names(), "sheet": here}
 
     out = base.gui_call("get_parameters", task)
     if out.get("error"):
@@ -417,7 +467,7 @@ def _get_parameters(doc_name: str, sheet: str = _params.SHEET_NAME):
         return (f"Document '{actual}' has no sheet '{sheet_name}' yet. Create it with set_parameters(doc_name='{actual}', params=[...]) "
                 "or build_enclosure(stage='params').")
     base.set_extra(ctx, param_names=out["names"])
-    return render_table(out["rows"], sheet_name)
+    return render_table(out["rows"], out["sheet"])
 
 
 # --------------------------------------------------------------------------------------------------------------------
@@ -445,7 +495,8 @@ def _read_property(obj: Any, prop: str) -> str:
 @tool(
     "bind_expression",
     "Bind an object property to a spreadsheet expression so it follows the parameter, for example Length = Params.wall_t * 2 or "
-    "Placement.Base.z = Params.lid_lift. The expression is validated by a recompute; on error nothing is changed.",
+    "Placement.Base.z = Params.lid_lift (bare names get the sheet that holds them: Parameters in a part built by "
+    "apply_feature_plan). The expression is validated by a recompute; on error nothing is changed.",
     {"type": "object", "properties": {
         "doc_name": {"type": "string"}, "object": {"type": "string"},
         "property": {"type": "string", "description": "Length, Radius, Placement.Base.z, ..."},
@@ -454,7 +505,8 @@ def _read_property(obj: Any, prop: str) -> str:
     category="params", mutating=True, geometry=True, phases=_PHASES_SET,
 )
 def _bind_expression(doc_name: str, object: str, property: str, expression: str):  # noqa: A002
-    """Bind ``object.property`` to ``expression`` (bare parameter names get the ``Params.`` prefix); a recompute that fails undoes it."""
+    """Bind ``object.property`` to ``expression`` (bare parameter names get the prefix of the sheet that holds them, ``Params.`` by
+    default); a recompute that fails undoes it."""
     ctx = current_context()
     obj_name, prop, expr = str(object or "").strip(), str(property or "").strip(), str(expression or "").strip()
     problems = []
@@ -486,8 +538,10 @@ def _bind_expression(doc_name: str, object: str, property: str, expression: str)
             close = difflib.get_close_matches(top, props, n=4, cutoff=0.5)
             return {"error": f"'{obj.Name}' has no property '{top}'" + (f" (similar: {', '.join(close)})" if close else "")
                     + f"; it has {', '.join(props[:12])}{' ...' if len(props) > 12 else ''}"}
+        # bare names take the sheet of the first one that is a parameter (a FeaturePlan part: its Parameters sheet)
+        sheet_name = next(filter(None, (_sheet_holding(doc, w) for w in _BARE_NAME.findall(expr))), None) or _sheet_in(doc)
         try:
-            table = _params.Params(doc)
+            table = _params.Params(doc, sheet_name)
         except _params.ParamsError as exc:
             return {"error": f"{_clean(exc)}; create it with set_parameters first"}
         old_value = _read_property(obj, prop)
@@ -526,7 +580,8 @@ def _value_text(value: Any, unit: str) -> str:
 @tool(
     "set_parameter",
     "Change ONE parameter value, recompute the model and report what changed and whether it is still valid. This is how you tune a "
-    "dimension (for example wall_t to 2.4) without rebuilding by hand.",
+    "dimension (for example wall_t to 2.4) without rebuilding by hand, in the Params sheet or the Parameters sheet of an "
+    "apply_feature_plan build.",
     {"type": "object", "properties": {
         "doc_name": {"type": "string"}, "name": {"type": "string"},
         "value": {"type": "string", "description": "A number ('2.4'), a number with unit ('2.4 mm') or a formula ('=wall_t*2'). "
@@ -560,8 +615,9 @@ def _set_parameter(doc_name: str, name: str, value: Any, recompute: bool = True,
         doc = base.open_doc(actual)
         if doc is None:
             return {"error": f"document '{actual}' is not open"}
+        sheet_name = _sheet_holding(doc, param) or _sheet_in(doc)
         try:
-            table = _params.Params(doc)
+            table = _params.Params(doc, sheet_name)
         except _params.ParamsError:
             return {"error": f"document '{actual}' has no 'Params' sheet; create it with build_enclosure(stage='params') or set_parameters"}
         rows = table.table()
@@ -569,12 +625,15 @@ def _set_parameter(doc_name: str, name: str, value: Any, recompute: bool = True,
         if row is None:
             names = [r["name"] for r in rows]
             close = difflib.get_close_matches(param, names, n=3, cutoff=0.6)
-            return {"error": f"'{param}' is not a parameter in sheet 'Params'. Parameters: {base.limit_list(names, 12)}"
+            return {"error": f"'{param}' is not a parameter in sheet '{sheet_name}'. Parameters: {base.limit_list(names, 12)}"
                              + (f" (similar: {', '.join(close)})" if close else "") + "."}
         if row["expr"] and not is_formula:
             return {"error": f"'{param}' is derived ({row['expr']}), so a number would be overwritten at the next rebuild; change its "
                              "inputs with set_parameter, or pass a formula starting with '=' to replace the derivation"}
-        spec_here = spec_dict if base.spec_applies(doc, spec_dict, owner) else None    # the chat's spec may belong to another document
+        kit_sheet = sheet_name == _params.SHEET_NAME
+        new_value = value if kit_sheet else _plain_value(value)
+        # the chat's spec may belong to another document, and a FeaturePlan sheet is never the enclosure's
+        spec_here = spec_dict if kit_sheet and base.spec_applies(doc, spec_dict, owner) else None
         old_contents = table.sheet.getContents(row["cell"]) or ""
         old = {"value": row["value"], "unit": row["unit"], "source": row["source"], "note": row["note"], "contents": old_contents}
         before_state = _geometry_state(doc)
@@ -583,7 +642,7 @@ def _set_parameter(doc_name: str, name: str, value: Any, recompute: bool = True,
         recomputed = 0
         try:
             with build.atomic(doc, f"Oscar set_parameter {param}"):
-                table.set(param, value, source="user_requirement", note=old["note"])
+                table.set(param, new_value, source="user_requirement", note=old["note"])
                 if do_recompute:
                     recomputed = int(doc.recompute() or 0)
                     if param in _spec.DESIGN_PARAMS:
@@ -598,7 +657,7 @@ def _set_parameter(doc_name: str, name: str, value: Any, recompute: bool = True,
         except _params.ParamsError as exc:
             return {"error": f"{_clean(exc)}; '{param}' stays {_value_text(old['value'], old['unit'])}"}
         results, skip_note = ([], "")
-        if do_recompute:
+        if do_recompute and kit_sheet:
             results, skip_note = _rebuild_dependents(doc, spec_here, [param], ref_status)
             failed = [r for r in results if not r.ok]
             if failed:
@@ -607,7 +666,7 @@ def _set_parameter(doc_name: str, name: str, value: Any, recompute: bool = True,
                 _rebuild_dependents(doc, spec_here, [param], ref_status)
                 return {"error": f"rebuilding '{failed[0].stage}' with {param} = {value} failed ({failed[0].message}); "
                                  f"'{param}' was set back to {_value_text(old['value'], old['unit'])}"}
-        table = _params.Params(doc)
+        table = _params.Params(doc, sheet_name)
         new_row = _row(table.table(), param) or row
         after_state = _geometry_state(doc)
         kit_id = str((spec_here or {}).get("kit_id") or "enc1")

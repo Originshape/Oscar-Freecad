@@ -839,6 +839,9 @@ class HttpErrorTextTest(unittest.TestCase):
         self.assertTrue(r("Rate limit reached for requests"))
         self.assertTrue(r("Too many requests"))
         self.assertTrue(r("The server is at capacity"))
+        # the OriginShape gateway's event when the model's stream breaks (gateway/sse.py STREAM_INTERRUPTED_EVENT)
+        self.assertTrue(r("api_error The connection to the model was interrupted. Please try again."))
+        self.assertTrue(r("Internal server error"))
         self.assertFalse(r("insufficient_quota: rate limit"))      # quota beats rate limit
         self.assertFalse(r("invalid_request_error"))
 

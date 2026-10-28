@@ -18,5 +18,6 @@ jobs:
         run: |
           mkdir -p dist
           git archive --format=zip --prefix=Oscar/ -o "dist/Oscar-$GITHUB_REF_NAME.zip" HEAD
+          (cd dist && sha256sum "Oscar-$GITHUB_REF_NAME.zip" > "Oscar-$GITHUB_REF_NAME.zip.sha256")
       - uses: softprops/action-gh-release@v2
-        with: { files: "dist/*.zip" }
+        with: { files: "dist/Oscar-*" }

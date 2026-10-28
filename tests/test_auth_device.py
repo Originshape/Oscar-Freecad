@@ -164,6 +164,15 @@ class PollTest(DeviceCase):
         with self.assertRaises(SignInDeclined):
             flow.poll(threading.Event())
 
+    def test_a_suspended_account_is_told_so(self):
+        flow = self.flow()
+        flow.start()
+        self.fake.fail("/oauth/token", 400, {"error": "access_denied", "error_description": "account_suspended"})
+        with self.assertRaises(AuthError) as ctx:
+            flow.poll(threading.Event())
+        self.assertEqual(ctx.exception.code, "suspended")
+        self.assertNotIsInstance(ctx.exception, SignInDeclined)
+
     def test_expired_token(self):
         flow = self.flow()
         flow.start()

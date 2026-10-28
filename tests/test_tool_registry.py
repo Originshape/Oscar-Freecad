@@ -204,9 +204,22 @@ class SpecsTest(unittest.TestCase):
         self.assertEqual(set(tools.INTENT_CATEGORIES["fem"]), every)
         for intent in ("inspect", "question", "other"):
             self.assertEqual(set(tools.INTENT_CATEGORIES[intent]), every)
-        for intent in ("enclosure", "fixture", "bracket"):
-            self.assertEqual(len(tools.INTENT_HIDDEN[intent]), 11)
+        self.assertEqual(len(tools.INTENT_HIDDEN["enclosure"]), 11)
+        for intent in ("fixture", "bracket"):
+            self.assertEqual(set(tools.INTENT_HIDDEN["enclosure"] - tools.INTENT_HIDDEN[intent]),
+                             {"apply_feature_plan", "reapply_plan_feature"}, intent)
         self.assertNotIn("generic_part", tools.INTENT_HIDDEN)
+
+    def test_bracket_and_fixture_are_offered_the_feature_plan(self):
+        """The structured_part playbook builds a bracket / fixture from a FeaturePlan, so both see the plan tools (film-shoot
+        finding: they were hidden with the enclosure kit's list, so the playbook never switched on)."""
+        from oscar import agent_ctx
+
+        for intent in ("bracket", "fixture"):
+            names = {s.name for s in tools.specs(intent=intent)}
+            self.assertLessEqual({"apply_feature_plan", "reapply_plan_feature"}, names, intent)
+            self.assertIn("structured_part", agent_ctx.playbooks_for(intent, "an L bracket with two holes", names))
+        self.assertNotIn("apply_feature_plan", {s.name for s in tools.specs(intent="enclosure")})
 
     def test_enclosure_intent_hides_fem_and_the_kit_hidden_tools(self):
         names = {s.name for s in tools.specs(intent="enclosure")}

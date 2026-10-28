@@ -467,7 +467,8 @@ class StepReportTests(ConnectCase):
             raise AuthUnavailable("The server is busy.")
 
         self.fake.add_job("A flange", task_id="t1")
-        with mock.patch.object(connect.Client, "upload", unavailable):
+        with mock.patch.object(connect.Client, "upload", unavailable), \
+                mock.patch.object(connect, "UPLOAD_RETRY_S", (0.0, 0.0)):
             loop = connect.Loop(lambda: self.session, start_turn=lambda job, files: FakeTurn(job), is_idle=lambda: True,
                                 on_state=lambda state, message: None, versions=connect.versions("1.1.3"),
                                 files_dir=lambda: self.files_dir, log=log)
@@ -478,6 +479,38 @@ class StepReportTests(ConnectCase):
         failed = [fields for kind, fields in logged if kind == "connect_upload_failed"]
         self.assertTrue(failed)
         self.assertEqual(failed[0]["file_kind"], "preview")
+        # an export is sent again before it is given up, and the browser is told which one is missing (audit
+        # 2026-10-28: a 503 / 429 used to drop exports without a word)
+        self.assertEqual([f["attempt"] for f in failed if f["file_kind"] == "export"], [1, 2, 3, 1, 2, 3])
+        errors = [e["data"]["message"] for e in self.fake.events["t1"] if e["kind"] == "error"]
+        self.assertIn("Couldn’t upload flange.step: the OriginShape server was busy.", errors)
+        self.assertIn("Couldn’t upload flange.stl: the OriginShape server was busy.", errors)
+
+    def test_a_long_download_keeps_the_device_seen(self):
+        """The server gives a running turn back to the queue once its FreeCAD is silent for 2 minutes, so a long call
+        on the connect thread is covered by keep-alives from a helper thread."""
+        self.fake.add_job("A flange", task_id="t1")
+        posts = []
+        real_post = connect.Client.post_events
+
+        def post_events(client, task_id, events):
+            posts.append((task_id, list(events)))
+            return real_post(client, task_id, events)
+
+        def slow_download(self_, client, job):
+            time.sleep(0.3)
+            return [], []
+
+        with mock.patch.object(connect, "KEEPALIVE_S", 0.05), \
+                mock.patch.object(connect.Client, "post_events", post_events), \
+                mock.patch.object(connect.Loop, "_download", slow_download):
+            loop = connect.Loop(lambda: self.session, start_turn=lambda job, files: FakeTurn(job), is_idle=lambda: True,
+                                on_state=lambda state, message: None, versions=connect.versions("1.1.3"),
+                                files_dir=lambda: self.files_dir)
+            self.addCleanup(loop.stop, 2.0)
+            loop.start()
+            self.assertTrue(wait_until(lambda: "t1" in self.fake.finished))
+        self.assertGreaterEqual(posts.count(("t1", [])), 2)
 
     def test_a_glb_preview_is_uploaded_as_glb(self):
         class GlbTurn(FakeTurn):
@@ -846,6 +879,28 @@ class RevertTests(ConnectCase):
         self.assertEqual(self.fake.revert_reports[revert_id],
                          {"ok": False, "reverted": ["m-3"], "message": "A turn made in FreeCAD comes first."})
         self.assertEqual(self.fake.revert_uploads, [], "no preview without a tree or a model")
+
+    def test_a_prompt_freecad_refused_counts_as_undone_without_asking_freecad(self):
+        """A refused prompt changed nothing, so reverting past it must not fail with "FreeCAD was restarted" (audit
+        2026-10-28: every revert at or before a refused turn failed)."""
+        def refuse(job):
+            raise connect.TurnRefused("Oscar is busy with another chat in FreeCAD.")
+
+        revert, calls = self.reverter()
+        self.fake.add_job("A flange", task_id="t1")   # m-1, refused
+        loop = self.loop(turn=refuse, revert=revert)
+        loop.start()
+        self.assertTrue(wait_until(lambda: "t1" in self.fake.finished))
+        revert_id = self.fake.add_revert(["m-2", "m-1"], task_id="t1")
+        self.assertTrue(wait_until(lambda: revert_id in self.fake.revert_reports))
+        [job] = calls
+        self.assertEqual(job.messages, ("m-2",), "FreeCAD is asked only about the turn it ran")
+        self.assertEqual(self.fake.revert_reports[revert_id]["reverted"], ["m-2", "m-1"])
+        self.assertTrue(self.fake.revert_reports[revert_id]["ok"])
+        only = self.fake.add_revert(["m-1"], task_id="t1")
+        self.assertTrue(wait_until(lambda: only in self.fake.revert_reports))
+        self.assertEqual(self.fake.revert_reports[only]["reverted"], ["m-1"])
+        self.assertEqual(len(calls), 1, "nothing to ask FreeCAD")
 
     def test_a_revert_that_breaks_is_reported_as_not_done(self):
         revert, _calls = self.reverter(RuntimeError("boom"))

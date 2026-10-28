@@ -57,7 +57,7 @@ from .panel_blocks import (  # noqa: F401 - re-exported: tests and gui_smoke imp
     _BLOCK_SEQ, _DETAIL_LIMIT, Block, LogBrowser, Step, ThumbCache, _accent, _font_size, _fg, _muted, _text_color)
 from .panel_follow import FollowMixin
 from .panel_render import (  # noqa: F401 - md_to_html stays importable from oscar.panel
-    classify_file_link, md_to_html, TurnView, account_badge, account_card, account_menu)
+    classify_file_link, md_to_html, TurnView, account_badge, account_card, account_menu, on_trial)
 from .panel_revert import RevertMixin
 from .panel_rewind import RewindMixin
 from .panel_session import WELCOME, SessionMixin  # noqa: F401 - WELCOME stays importable from oscar.panel
@@ -669,7 +669,8 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
 
     def _account_block(self, kind: str, *, reason: str = "", returned: bool = False) -> Block:
         """A new (unattached) ``ACCOUNT`` block of ``kind``."""
-        text, actions = account_card(kind, reason=reason, returned=returned)
+        snapshot = settings_ui.account_hub().state.get("snapshot")
+        text, actions = account_card(kind, reason=reason, returned=returned, trial=on_trial(snapshot))
         block = Block(Block.ACCOUNT, text, detail=kind)
         block.actions = actions
         block.reason = reason

@@ -33,9 +33,9 @@ from .. import turnlog as _turnlog
 from . import config, discovery, keystore
 from .account import AccountSnapshot, parse_me
 from .keystore import KeystoreError, StoredCredential
-from .transport import (CLIENT_ID, AuthError, Reply, Saved, SignedOut, TimeoutSpec, TokenSet, api_error,
-                        clean_token, download, is_unavailable, oauth_error, request, revoke_quietly, token_set,
-                        unavailable)
+from .transport import (CLIENT_ID, SUSPENDED_MESSAGE, AuthError, Reply, Saved, SignedOut, TimeoutSpec, TokenSet,
+                        api_error, clean_token, download, is_unavailable, oauth_error, request, revoke_quietly,
+                        says_suspended, token_set, unavailable)
 
 on_change: Callable[[str], Any] | None = None
 
@@ -97,6 +97,7 @@ class AuthSession:
         self._snapshot_at = 0.0               # time.monotonic() of the last /v1/me
         self._generation = 0                  # bumped by every sign-in and sign-out: late results of an older
                                               # session (a refresh that finishes after sign-out) are dropped
+        self._ended = "expired"               # why the server last ended the grant: "expired" or "suspended"
 
     def __repr__(self) -> str:
         with self._state:
@@ -183,7 +184,13 @@ class AuthSession:
             if cred is None and not had_token:
                 raise SignedOut("You are not signed in to OriginShape.")
             if cred is not None:
-                tokens = self._refresh(cred, generation)
+                with keystore.refresh_lock(self.api_url):   # another FreeCAD may share this stored sign-in
+                    cred = self._adopt_stored(cred, generation)
+                    tokens = self._refresh(cred, generation)
+                    if tokens is None:   # refused: a FreeCAD that renewed meanwhile left its rotated token in the store
+                        newer = self._adopt_stored(cred, generation)
+                        if newer is not cred:
+                            tokens = self._refresh(newer, generation)
                 if tokens is not None:
                     return tokens.access_token
             # The grant ended (invalid_grant), or a sign-in without a refresh token ran out. Dropped from memory
@@ -195,7 +202,9 @@ class AuthSession:
                 if token:
                     return token
         if dropped:   # the keystore and on_change OUTSIDE the lock: on_change may call straight back in
-            self._announce_signed_out("expired")
+            self._announce_signed_out(self._ended)
+        if self._ended == "suspended":
+            raise SignedOut(SUSPENDED_MESSAGE, code="suspended")
         raise SignedOut("Your OriginShape sign-in has expired or was revoked. Please sign in again.")
 
     def auth_header(self) -> dict[str, str]:
@@ -212,6 +221,23 @@ class AuthSession:
                 self._access_expires = 0.0
             return self._cred is not None and self._cred.kind == "oauth"
 
+    def _adopt_stored(self, cred: StoredCredential, generation: int) -> StoredCredential:
+        """The stored OAuth credential when another process has rotated it since this one read it (the store holds a
+        different refresh token), else ``cred``. Sending our older, already used token would make the server end the
+        sign-in for every FreeCAD."""
+        try:
+            stored = keystore.load(self.api_url)
+        except KeystoreError:
+            return cred
+        if stored is None or stored.kind != "oauth" or not stored.secret or stored.secret == cred.secret:
+            return cred
+        with self._state:
+            if self._generation != generation or self._cred is not cred:
+                return cred
+            self._cred = stored
+        _log("refresh", outcome="adopted_stored")
+        return stored
+
     def _refresh(self, cred: StoredCredential, generation: int) -> TokenSet | None:
         """Renew with the refresh token (under ``_refreshing``). None when the server ended the grant
         (``invalid_grant``); the caller forgets the sign-in."""
@@ -222,6 +248,7 @@ class AuthSession:
             code, _desc = oauth_error(reply, cred.secret)
             _log("refresh", outcome=code or f"http_{reply.status}")
             if code == "invalid_grant":
+                self._ended = "suspended" if says_suspended(reply) else "expired"
                 return None
             if is_unavailable(reply.status):
                 raise unavailable(reply)
@@ -269,8 +296,8 @@ class AuthSession:
             key = clean_token(key, "API key")
         except AuthError:
             key = ""   # raised below, outside the handler: one code for every malformed key, nothing chained
-        if not key.startswith("os_"):
-            raise AuthError(message, code="invalid_key")
+        if not key.startswith("os_live_"):   # the server reads only os_live_ as a key (security/tokens.py); any other
+            raise AuthError(message, code="invalid_key")   # os_ value would be checked as a JWT and refused
         reply = request("GET", self.api_url + "/v1/me", timeout=ME_TIMEOUT, headers={"Authorization": f"Bearer {key}"})
         if reply.status == 401:
             raise AuthError("OriginShape did not accept this API key. Check it on the website, or create a new one.",

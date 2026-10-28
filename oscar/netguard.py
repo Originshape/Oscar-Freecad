@@ -217,6 +217,21 @@ def _take_remote(approval_id: int) -> str | None:
     with _REMOTE_LOCK:
         return _REMOTE_ANSWERS.pop(approval_id, None)
 
+
+_CANCELLED = [0]   # bumped by cancel_open_questions; an open question that sees it change closes unanswered
+
+
+def cancel_open_questions() -> None:
+    """Close every open question as unanswered (``NO_ANSWER``, a refusal): the turn that asked was stopped, so Stop
+    takes effect now instead of after ``DENY_TIMEOUT_S`` (audit 2026-10-28). Any thread."""
+    with _REMOTE_LOCK:
+        _CANCELLED[0] += 1
+
+
+def _cancel_count() -> int:
+    with _REMOTE_LOCK:
+        return _CANCELLED[0]
+
 # Turn-scoped decision cache: one human decision per turn covers the whole
 # category. Without this, a model retrying downloads popped one dialog per
 # attempt — and when nobody clicked, each burned the full 120 s timeout.
@@ -501,6 +516,7 @@ def ask_user(title: str, text: str, *, choices: Sequence[Choice], default: str, 
     # afterwards (it was busy) is answered without a dialog: dispatch stops waiting 30 s later, so nobody is shown a
     # question the agent has already given up on.
     deadline = time.monotonic() + limit
+    asked_at = _cancel_count()   # a Stop after this closes the question
     remote = [choice for choice in choices if choice.remote]
     info = {"id": next(_APPROVAL_IDS), "op": op, "title": title, "text": text, "detailed": detailed,
             "choices": [{"key": choice.key, "label": choice.label, "role": choice.role} for choice in remote]}
@@ -512,7 +528,7 @@ def ask_user(title: str, text: str, *, choices: Sequence[Choice], default: str, 
 
     def ask() -> str:
         remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        if remaining <= 0 or _cancel_count() != asked_at:
             return NO_ANSWER
         early = take_remote()   # answered from the browser before the busy GUI thread got here
         if early is not None:
@@ -566,6 +582,9 @@ def ask_user(title: str, text: str, *, choices: Sequence[Choice], default: str, 
         timer.start(max(1, int(remaining * 1000)))
 
         def poll_remote() -> None:
+            if _cancel_count() != asked_at:   # the turn was stopped: nobody waits for this answer any more
+                expire()
+                return
             choice = take_remote()
             if choice is not None and choice.key in buttons:
                 by_remote.append(True)
@@ -573,8 +592,7 @@ def ask_user(title: str, text: str, *, choices: Sequence[Choice], default: str, 
 
         poller = QtCore.QTimer()
         poller.timeout.connect(poll_remote)
-        if remote:
-            poller.start(REMOTE_POLL_MS)
+        poller.start(REMOTE_POLL_MS)
         _announce_wait(True)
         try:
             box.exec()

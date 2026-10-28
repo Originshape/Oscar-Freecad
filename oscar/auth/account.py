@@ -25,7 +25,10 @@ from . import config
 from .transport import AuthError, InvalidServerURL, api_error
 
 LINEUP: tuple[str, ...] = ("origin1", "origin1-super")   # the account's models before the server's list is known
-DEFAULT_MODEL = "oscar-default"
+# The retired spellings of the two tiers: the server still accepts them but never lists them in /v1/models, so their
+# entry there is their tier's (``params.LEGACY_ACCOUNT_MODELS`` is this table).
+RETIRED_ALIASES: dict[str, str] = {"oscar-default": "origin1-super", "oscar-fast": "origin1"}
+DEFAULT_MODEL = "origin1"   # the server's default when its list names none (oscar-default is a retired spelling)
 MODELS_TIMEOUT: tuple[float, float] = (5.0, 8.0)
 
 
@@ -70,7 +73,7 @@ class AccountSnapshot:
     email: str = ""
     name: str = ""
     is_admin: bool = False
-    plan: str = ""                   # "trial" | "pro"
+    plan: str = ""                   # "trial" | "pro" | "studio"
     plan_name: str = ""
     credits_balance: float = 0.0
     credits_available: float = 0.0
@@ -98,8 +101,9 @@ class AccountSnapshot:
 
     @property
     def out_of_credits(self) -> bool:
-        """An approved account that cannot start a request (the server stays authoritative)."""
-        return self.approved and self.credits_available <= 0
+        """An approved account whose balance reached zero (the website's meaning; credits a running request holds
+        don't count). The server stays authoritative."""
+        return self.approved and self.credits_balance <= 0
 
     @property
     def links(self) -> dict[str, str]:
@@ -318,9 +322,13 @@ def is_model_id(value: Any) -> bool:
 
 
 def cached_model(alias: str, api_url: str | None = None) -> ModelInfo | None:
-    """The cached ``/v1/models`` entry of ``alias``, or None (nothing fetched, or not listed). No network."""
+    """The cached ``/v1/models`` entry of ``alias`` (a retired alias: its tier's entry), or None (nothing fetched, or
+    not listed). No network. Audit 2026-10-28: a retired alias fell back to a 32k window, 4096 output tokens and no
+    caching, because the server never lists it."""
     with _CATALOG_LOCK:
         if not _CATALOGS:   # resolving the API URL reads the settings file: skip it while nothing was fetched
             return None
     catalog = cached_models(api_url)
-    return catalog.get(alias) if catalog is not None else None
+    if catalog is None:
+        return None
+    return catalog.get(alias) or catalog.get(RETIRED_ALIASES.get(alias, ""))

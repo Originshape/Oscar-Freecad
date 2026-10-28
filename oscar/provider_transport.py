@@ -102,11 +102,14 @@ def is_quota_error(text: str) -> bool:
 
 
 def retriable_message(text: str) -> bool:
-    """True when an in-stream error message names an overload or rate limit (and is not a quota problem)."""
+    """True when an in-stream error message names an overload, a rate limit or a broken connection to the model (the
+    OriginShape gateway's "connection to the model was interrupted", Anthropic's own ``api_error``), and is not a quota
+    problem."""
     lower = (text or "").lower()
     if is_quota_error(lower):
         return False
-    return any(word in lower for word in ("overloaded", "rate_limit", "rate limit", "too many requests", "capacity"))
+    return any(word in lower for word in ("overloaded", "rate_limit", "rate limit", "too many requests", "capacity",
+                                          "interrupted", "api_error", "internal server error"))
 
 
 def http_error(status: int, body: str) -> ProviderError:

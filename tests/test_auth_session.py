@@ -290,6 +290,34 @@ class RefreshTest(SessionCase):
             self.session.access_token()
         self.assertIsNone(self.stored())
 
+    def test_two_freecads_sharing_the_stored_sign_in_never_send_a_used_token(self):
+        """A second process reads the stored refresh token once; when the first has rotated it since, the second must
+        renew with the rotated one from the store, or the server takes the old one for a stolen token and ends the
+        sign-in for both (audit 2026-10-28)."""
+        self.sign_in(age=900)
+        other = session.AuthSession(self.fake.url)   # a second FreeCAD: the same store, its own memory
+        self.assertTrue(other.has_session())         # it has read the stored token now
+        self.session.access_token()                  # the first renews and stores the rotated token
+        self.assertTrue(other.access_token())        # the second renews with that one
+        self.assertTrue(self.session.invalidate())
+        self.assertTrue(self.session.access_token(), "and the first again, with the second's rotated token")
+        self.assertFalse(any(grant.revoked for grant in self.fake.grants.values()))
+        self.assertEqual(self.fake.counts["token:refresh_token"], 3)
+
+    def test_a_suspended_account_is_told_so_not_to_sign_in_again(self):
+        """Suspension revokes the grant; the refresh answer says why (``reason: account_suspended``), and the user is
+        told the account is suspended instead of "sign in again" (audit 2026-10-28)."""
+        self.sign_in(age=900)
+        self.fake.fail("/oauth/token", 400, {"error": "invalid_grant", "error_description": "This account is suspended.",
+                                             "reason": "account_suspended"})
+        with self.assertRaises(SignedOut) as ctx:
+            self.session.access_token()
+        self.assertEqual(ctx.exception.code, "suspended")
+        self.assertIn("suspended", str(ctx.exception))
+        self.assertNotIn("sign in again", str(ctx.exception).lower())
+        self.assertEqual(self.events[0]["reason"], "suspended")
+        self.assertFalse(self.session.has_session())
+
     def test_a_transient_failure_keeps_the_session(self):
         tokens = self.sign_in(age=900)
         self.fake.fail("/oauth/token", 503)
@@ -355,7 +383,8 @@ class RefreshTest(SessionCase):
 
 class ApiKeyTest(SessionCase):
     def test_a_malformed_key_is_refused_without_a_request(self):
-        for bad in ("", "sk-ant-not-ours-123456", "os_live_ has spaces", "short", None, "os_live_x\ny-zzzzzz"):
+        for bad in ("", "sk-ant-not-ours-123456", "os_live_ has spaces", "short", None, "os_live_x\ny-zzzzzz",
+                    "os_test_" + "x" * 43):   # only os_live_ is a key to the server (security/tokens.py)
             with self.assertRaises(AuthError) as ctx:
                 self.session.use_api_key(bad)
             self.assertEqual(ctx.exception.code, "invalid_key", bad)
@@ -539,13 +568,15 @@ class AccountTest(SessionCase):
         with mock.patch.dict(os.environ, {"OSCAR_API_URL": self.fake.url}):
             self.assertEqual(account.fetch_me().email, "ada@example.com")
             self.assertIsNone(account.cached_models())
-            self.fake.models["data"][1]["display_name"] = "Oscar (quick)"
+            self.fake.models["data"][0]["display_name"] = "Origin1 (quick)"
             catalog = account.fetch_models()
-            self.assertEqual(catalog.default, "oscar-default")
+            self.assertEqual(catalog.default, "origin1")
             self.assertIs(account.cached_models(), catalog)
-            self.assertEqual(account.cached_model("oscar-fast").display_name, "Oscar (quick)")
-            self.assertEqual(account.cached_model("oscar-default").display_name, "Oscar (best)")
-        self.assertEqual(account.cached_model("oscar-fast", self.fake.url).display_name, "Oscar (quick)")
+            self.assertEqual(account.cached_model("origin1").display_name, "Origin1 (quick)")
+            # the retired spellings are never listed: they read as their tier's entry
+            self.assertEqual(account.cached_model("oscar-fast").display_name, "Origin1 (quick)")
+            self.assertEqual(account.cached_model("oscar-default").display_name, "Origin1 Super")
+        self.assertEqual(account.cached_model("oscar-fast", self.fake.url).display_name, "Origin1 (quick)")
         self.assertIsNone(account.cached_model("oscar-fast", "https://app.originshape.design"),
                           "another server's catalog is not used")
         self.fake.fail("/v1/models", 503)

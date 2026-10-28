@@ -650,5 +650,67 @@ class RealKeychainTest(unittest.TestCase):
         backend.delete(account)
 
 
+
+class RefreshLockTest(unittest.TestCase):
+    """Two FreeCADs share one stored refresh token; the server ends the sign-in when a used one comes back, so a
+    refresh holds a lock file next to the credential file (audit 2026-10-28)."""
+
+    def setUp(self):
+        import shutil
+        import tempfile
+
+        folder = tempfile.mkdtemp(prefix="oscar-lock-")
+        self.addCleanup(shutil.rmtree, folder, True)
+        patcher = mock.patch.dict(os.environ, {keystore.ENV_STORE: "file",
+                                               keystore.ENV_FILE: os.path.join(folder, "creds.json")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_second_refresh_waits_for_the_first(self):
+        import threading
+        import time
+
+        order = []
+        entered = threading.Event()
+
+        def second():
+            entered.wait(2.0)
+            with keystore.refresh_lock("https://app.example"):
+                order.append("second")
+
+        thread = threading.Thread(target=second)
+        thread.start()
+        with keystore.refresh_lock("https://app.example"):
+            entered.set()
+            time.sleep(0.3)
+            order.append("first")
+        thread.join(5.0)
+        self.assertEqual(order, ["first", "second"])
+
+    def test_a_lock_held_too_long_is_skipped_not_waited_for(self):
+        import threading
+
+        held, release = threading.Event(), threading.Event()
+
+        def holder():
+            with keystore.refresh_lock("https://app.example"):
+                held.set()
+                release.wait(5.0)
+
+        thread = threading.Thread(target=holder)
+        thread.start()
+        self.addCleanup(thread.join, 5.0)
+        self.addCleanup(release.set)
+        held.wait(2.0)
+        with mock.patch.object(keystore, "REFRESH_LOCK_WAIT_S", 0.2):
+            with keystore.refresh_lock("https://app.example"):   # goes ahead unlocked
+                pass
+
+    def test_memory_mode_locks_nothing(self):
+        with mock.patch.dict(os.environ, {keystore.ENV_STORE: "memory"}):
+            with keystore.refresh_lock("https://app.example"), keystore.refresh_lock("https://app.example"):
+                pass
+
+
 if __name__ == "__main__":
     unittest.main()

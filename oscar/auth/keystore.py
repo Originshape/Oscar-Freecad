@@ -27,6 +27,7 @@ so such a file would silently be left out of the release.
 
 import base64
 import binascii
+import contextlib
 import hashlib
 import json
 import os
@@ -36,7 +37,9 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
+from collections.abc import Iterator
 from typing import Any, Callable
 
 from .. import context_guard as _context_guard
@@ -675,6 +678,70 @@ def _forget_file_copy(account: str) -> None:
         failure = e.code
     if failure:
         _log("delete_failed", backend="file", reason=failure)
+
+
+# -- one refresh at a time across processes ------------------------------------------------------------------
+
+REFRESH_LOCK_WAIT_S = 30.0   # a refresh takes at most ~20 s; after this the lock is skipped rather than waited for
+
+
+@contextlib.contextmanager
+def refresh_lock(api_url: str) -> Iterator[None]:
+    """Hold the stored sign-in of ``api_url`` for one refresh, across processes. Two FreeCADs share one stored refresh
+    token and the server ends the whole sign-in when a used one comes back, so the second waits here and then finds the
+    rotated token in the store. Best effort: in ``memory`` mode, without a settings folder, or after
+    ``REFRESH_LOCK_WAIT_S``, nothing is locked."""
+    folder = os.path.dirname(credential_file_path()) if mode() != "memory" else ""
+    handle = None
+    if folder:
+        try:
+            os.makedirs(folder, exist_ok=True)
+            handle = open(os.path.join(folder, f".oscar_refresh_{account_name(api_url)[-12:]}.lock"), "a+b")
+        except OSError:
+            handle = None
+    locked = handle is not None and _lock(handle)
+    try:
+        yield
+    finally:
+        if handle is not None:
+            if locked:
+                _unlock(handle)
+            handle.close()
+
+
+def _lock(handle: Any) -> bool:
+    deadline = time.monotonic() + REFRESH_LOCK_WAIT_S
+    while True:
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.1)
+
+
+def _unlock(handle: Any) -> None:
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
 
 
 # -- the one-time "stored in a file" notice -------------------------------------------------------------------

@@ -208,13 +208,24 @@ class AliasBodyTest(_Case):
                 caps = models.resolve_caps(bare_profile("originshape", alias))
                 self.assertEqual(caps.source, "catalog")
                 self.assertEqual((caps.reasoning_control, caps.vision, caps.context_window, caps.max_output,
-                                  caps.prompt_cache), ("anthropic_adaptive", True, 200000, 64000, True))
+                                  caps.prompt_cache), ("anthropic_adaptive", True, 1000000, 64000, True))
                 self.assertEqual(models.host_class(bare_profile("originshape", alias)), "originshape")
         origin1 = next(m for m in self.fake.models["data"] if m["id"] == "origin1")
         origin1.update(capabilities={"reasoning": "budget", "vision": False}, max_output_tokens=32000)
         account.fetch_models(self.fake.url)
         caps = models.resolve_caps(bare_profile("originshape", "origin1"))
         self.assertEqual((caps.reasoning_control, caps.vision, caps.max_output), ("anthropic_budget", False, 32000))
+
+    def test_the_output_cap_follows_the_model_list(self):
+        """The gateway would silently lower a max_tokens above the model's own cap (audit 2026-10-28)."""
+        origin1 = next(m for m in self.fake.models["data"] if m["id"] == "origin1")
+        origin1["max_output_tokens"] = 16000
+        account.fetch_models(self.fake.url)
+        prov = self.provider("origin1")
+        self.assertEqual(prov._max_tokens(), 16000)
+        self.assertEqual(prov._max_tokens(8000), 8000)
+        self.assertEqual(self.provider("oscar-fast")._max_tokens(), 16000, "a retired alias: its tier's cap")
+        self.assertEqual(self.provider("origin1-super")._max_tokens(), 32000, "the profile's cap below the model's")
 
     def test_without_the_model_list_the_defaults_apply_and_no_request_is_made(self):
         account.clear_model_cache()
@@ -228,8 +239,7 @@ class AliasBodyTest(_Case):
         profile = bare_profile("originshape", "oscar-default")
         with mock.patch.object(requests, "get", side_effect=AssertionError("network")), \
                 mock.patch.object(requests, "post", side_effect=AssertionError("network")):
-            self.assertEqual(provider_probe.list_models(profile),
-                             (["oscar-default", "oscar-fast", "origin1", "origin1-super"], ""))
+            self.assertEqual(provider_probe.list_models(profile), (["origin1", "origin1-super"], ""))
             self.assertEqual(provider_probe.probe(profile), {})
 
 
@@ -443,6 +453,45 @@ class AccountErrorTest(_Case):
         self.assertEqual(str(error), LLM_NOT_CONFIGURED_MESSAGE)
         self.assertEqual((error.status, error.code, error.retriable), (501, "llm_not_configured", False))
         self.assertEqual((len(self.fake.gateway_requests), self.sleeps), (1, []))
+
+    def test_a_long_chat_with_credits_left_is_not_called_out_of_credits(self):
+        """The gateway holds credits for the whole chat before it runs; a 402 with credits left names the chat length
+        (audit 2026-10-28: a 50-credit account was told "no credits left" once a chat reached ~0.7 MB)."""
+        message = ("This chat is too long for the credits left: it needs about 58.20 credits set aside and 12.40 are "
+                   "available. Start a new chat, or add credits.")
+        body = json.dumps({"type": "error", "error": {
+            "type": "invalid_request_error", "code": "insufficient_credits", "message": message,
+            "details": [{"field": "available_credits", "message": "12.40"},
+                        {"field": "required_credits", "message": "58.20"}]}})
+        self.fake.gateway = [raw_reply(body, status=402, content_type="application/json")]
+        error = self.final()
+        self.assertEqual((error.status, error.kind, error.code, error.retriable),
+                         (402, "account", "chat_too_long_for_credits", False))
+        self.assertEqual(str(error), f"{message} (HTTP 402)")
+        self.assertEqual(error.data["details"]["required_credits"], "58.20")
+
+    def test_the_daily_limit_says_when_it_resets_and_is_not_retried(self):
+        self.fake.gateway = [gateway_error(429, "rate_limited", "You've reached today's usage limit. It resets at "
+                                           "midnight UTC.", headers={"Retry-After": "12345"})]
+        error = self.final()
+        self.assertEqual((error.code, error.retriable, error.retry_after), ("daily_limit", False, 12345.0))
+        self.assertIn("today's usage limit", str(error))
+        self.assertIn("in about 3 h 26 min", str(error))
+        self.assertNotIn("limiting how many requests", str(error))
+        self.assertEqual((len(self.fake.gateway_requests), self.sleeps), (1, []))
+
+    def test_one_model_without_a_provider_is_named_not_the_whole_server(self):
+        self.fake.gateway = [gateway_error(501, "llm_not_configured", "This model is not available on this server. "
+                                           "Pick another model.")]
+        error = self.final()
+        self.assertEqual((error.code, error.retriable), ("llm_not_configured", False))
+        self.assertTrue(str(error).startswith("This model is not available on this server."))
+
+    def test_other_api_errors_show_their_message_not_the_json(self):
+        self.fake.gateway = [gateway_error(413, "request_too_large", "The request is larger than 32 MB.")]
+        error = self.final()
+        self.assertEqual(str(error), "The request is too large for OriginShape (HTTP 413): The request is larger than 32 MB.")
+        self.assertEqual(error.code, "request_too_large")
 
     def test_a_model_the_server_does_not_offer(self):
         error = self.chat(self.provider("oscar-unknown"))["error"]

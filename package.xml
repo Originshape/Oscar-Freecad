@@ -2,13 +2,13 @@
 <package format="1" xmlns="https://wiki.freecad.org/Package_Metadata">
     <name>Oscar</name>
     <description>Oscar makes CAD from a prompt in FreeCAD: describe a part in a chat panel and Oscar plans, builds, validates and exports it as an editable parametric model (Params spreadsheet, sketches, PartDesign) through 43 CAD tools, with an OriginShape account or any cloud or local (Ollama) model.</description>
-    <version>0.2.0</version>
-    <date>2026-10-25</date>
-    <maintainer email="oscar@originshape.design">OriginShape</maintainer>
+    <version>0.2.1</version>
+    <date>2026-10-28</date>
+    <maintainer email="hello@originshape.design">OriginShape</maintainer>
     <license file="LICENSE">Apache-2.0</license>
-    <url type="repository" branch="main">https://github.com/originshape/oscar-freecad</url>
-    <url type="bugtracker">https://github.com/originshape/oscar-freecad/issues</url>
-    <url type="readme">https://github.com/originshape/oscar-freecad/blob/main/README.md</url>
+    <url type="repository" branch="main">https://github.com/Originshape/Oscar-Freecad</url>
+    <url type="bugtracker">https://github.com/Originshape/Oscar-Freecad/issues</url>
+    <url type="readme">https://github.com/Originshape/Oscar-Freecad/blob/main/README.md</url>
     <url type="website">https://app.originshape.design</url>
     <icon>Resources/icons/Oscar.svg</icon>
     <freecadmin>1.1.0</freecadmin>

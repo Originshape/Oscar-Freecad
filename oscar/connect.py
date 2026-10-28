@@ -58,6 +58,7 @@ the task's chat in FreeCAD (``recover``). Text that leaves this computer has its
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
@@ -69,7 +70,8 @@ import struct
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+import dataclasses
 from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.parse import urlencode
@@ -100,6 +102,7 @@ REMOTE_PREF = "ConnectApprovals"   # params boolean: the browser may answer appr
 REMOTE_DEFAULT = True
 MAX_ATTACHMENTS = 50               # files in one job (10 per message, a PDF brings up to 4 pages)
 DOWNLOAD_ATTEMPTS = 3
+UPLOAD_RETRY_S = (5.0, 15.0, 30.0)  # an export the server was too busy for (503, 429: 60 uploads a minute) is sent again
 FILES_KEPT_S = 30 * 86400          # downloaded attachments older than this are removed when the loop starts
 APPROVAL_WAIT_TEXT = "Waiting for your approval in FreeCAD"
 STOPPED_TEXT = "Stopped."
@@ -928,6 +931,7 @@ class Loop:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._state = ""
+        self._unstarted: set[str] = set()   # prompts answered without a turn (refused, files missing): nothing to undo
 
     # lifecycle ----------------------------------------------------------------------------------------------------
 
@@ -1034,17 +1038,20 @@ class Loop:
     def _run_job(self, client: Client, job: Job) -> None:
         self._log("connect_job", task=job.task_id, turn=job.turn, files=len(job.attachments))
         try:
-            files, problems = self._download(client, job)
+            with self._alive(lambda: client.post_events(job.task_id, [])):
+                files, problems = self._download(client, job)
         except TurnGone:
             return
         problem_events = [{"kind": "error", "data": {"message": _clip(text, MESSAGE_LIMIT)}} for text in problems]
         if job.attachments and not files and not job.text.strip():
+            self._unstarted.add(job.message_id)
             self._finish(client, job.task_id, "Oscar couldn’t download the attached files, so there was nothing to "
                          "work on. Attach them again.", ok=False, events=problem_events)
             return
         try:
             turn = self._start_turn(job, files)
         except TurnRefused as e:
+            self._unstarted.add(job.message_id)
             self._finish(client, job.task_id, str(e) or "Oscar couldn't start this task.", ok=False,
                          events=[*problem_events, {"kind": "error", "data": {"message": _clip(e, MESSAGE_LIMIT)}}])
             return
@@ -1076,6 +1083,25 @@ class Loop:
         self._log("connect_open_model", delivery=model.id, task=model.task_id, size=model.size)
         folder = os.path.join(self._files_dir(), MODELS_DIR, _path_part(model.id))
         dest = os.path.join(folder, safe_filename(model.name) or "model.step")
+        with self._alive(lambda: client.hello(self._versions)):
+            ok, message, document = self._fetch_and_open(client, model, folder, dest)
+        self._log("connect_model_opened" if ok else "connect_model_not_opened", delivery=model.id,
+                  message=_clip(message, 200))
+        for attempt in range(OPEN_REPORT_ATTEMPTS):
+            try:
+                client.model_opened(model.id, ok, _clip(message, MESSAGE_LIMIT), _clip(document, 200))
+                return
+            except AuthUnavailable:
+                if attempt == OPEN_REPORT_ATTEMPTS - 1 or self._stop.wait(BACKOFF_S[attempt]):
+                    return
+            except AuthError as e:
+                if isinstance(e, SignedOut):
+                    raise
+                self._log("connect_open_report_error", delivery=model.id, error=str(e)[:200])
+                return
+
+    def _fetch_and_open(self, client: Client, model: OpenModel, folder: str, dest: str) -> tuple[bool, str, str]:
+        """Download the model and have FreeCAD open it: ``(ok, message, document)``."""
         problem = ""
         for attempt in range(DOWNLOAD_ATTEMPTS):
             try:
@@ -1107,37 +1133,30 @@ class Loop:
                     ok, message, document = False, f"FreeCAD couldn’t open the model ({type(e).__name__}).", ""
                 finally:
                     self._state_is("connected")
-        self._log("connect_model_opened" if ok else "connect_model_not_opened", delivery=model.id,
-                  message=_clip(message, 200))
-        for attempt in range(OPEN_REPORT_ATTEMPTS):
-            try:
-                client.model_opened(model.id, ok, _clip(message, MESSAGE_LIMIT), _clip(document, 200))
-                return
-            except AuthUnavailable:
-                if attempt == OPEN_REPORT_ATTEMPTS - 1 or self._stop.wait(BACKOFF_S[attempt]):
-                    return
-            except AuthError as e:
-                if isinstance(e, SignedOut):
-                    raise
-                self._log("connect_open_report_error", delivery=model.id, error=str(e)[:200])
-                return
+        return ok, message, document
 
     def _revert(self, client: Client, job: RevertJob) -> None:
         """Undo a revert job's turns in FreeCAD, upload the model's preview after it, and say which were undone.
         ``SignedOut`` propagates (the server gives up on the revert after a while and tells the browser)."""
         self._log("connect_revert", revert=job.id, task=job.task_id, turns=len(job.messages))
-        if self._revert_turns is None:
+        # prompts this FreeCAD answered without starting a turn changed nothing: undone already, FreeCAD isn't asked
+        unstarted = tuple(message for message in job.messages if message in self._unstarted)
+        rest = dataclasses.replace(job, messages=tuple(m for m in job.messages if m not in self._unstarted))
+        if not rest.messages:
+            outcome = RevertOutcome(())
+        elif self._revert_turns is None:
             outcome = RevertOutcome((), "This Oscar for FreeCAD can’t revert from the browser.")
         else:
             self._state_is("working")
             try:
-                outcome = self._revert_turns(job)
+                with self._alive(lambda: client.hello(self._versions)):
+                    outcome = self._revert_turns(rest)
             except Exception as e:  # noqa: BLE001 - the browser gets a message, the log the reason
                 self._log("connect_revert_error", revert=job.id, error=f"{type(e).__name__}: {e}"[:200])
                 outcome = RevertOutcome((), f"FreeCAD couldn’t revert ({type(e).__name__}).")
             finally:
                 self._state_is("connected")
-        done = set(outcome.reverted)
+        done = set(outcome.reverted) | set(unstarted)
         reverted = [message for message in job.messages if message in done]
         ok = len(reverted) == len(job.messages)
         if outcome.preview is not None and reverted:
@@ -1218,6 +1237,27 @@ class Loop:
             self._log("connect_step_failed", task=job.task_id, what=what, error=f"{type(e).__name__}: {e}"[:200])
             return None
 
+    @contextlib.contextmanager
+    def _alive(self, ping: Callable[[], Any]) -> Iterator[None]:
+        """Keep this FreeCAD seen while the connect thread waits on one long call (an attachment download, a preview or
+        the exports FreeCAD takes minutes to make, an open, a revert): ``ping`` every ``KEEPALIVE_S`` from a helper
+        thread. The server puts a running turn back in the queue once its FreeCAD has been silent for 2 minutes
+        (workspace ``LOST_AFTER``), and a turn claimed again is built twice and its first answer is lost."""
+        done = threading.Event()
+
+        def run() -> None:
+            while not done.wait(KEEPALIVE_S):
+                try:
+                    ping()
+                except Exception:  # noqa: BLE001 - a missed keep-alive is sent again at the next tick
+                    pass
+
+        threading.Thread(target=run, name="oscar-connect-alive", daemon=True).start()
+        try:
+            yield
+        finally:
+            done.set()
+
     def _keep_answer(self, job: Job, turn: Turn, cancelled: bool = False) -> None:
         """Write the turn's answer to the outbox once it has ended (waits for the end up to a minute)."""
         if self._outbox is None or not turn.wait(60.0):
@@ -1236,6 +1276,10 @@ class Loop:
         cancelled = False
         awaiting = getattr(turn, "awaiting_answer", None)
         answer = getattr(turn, "answer", None)
+
+        def keep_alive() -> None:
+            client.post_events(job.task_id, [])
+
         while True:
             done = turn.wait(FLUSH_S)
             now = time.monotonic()
@@ -1259,15 +1303,16 @@ class Loop:
                     self._log("connect_events_refused", task=job.task_id, error=str(e)[:200])
                     last_post = now
             if done or now - last_preview >= PREVIEW_INTERVAL_S:
-                preview = self._guarded(job, "preview", turn.take_preview)
-                if preview is not None:
-                    version, data = preview[0], preview[1]
-                    fmt = preview[2] if len(preview) > 2 and preview[2] in PREVIEW_FORMATS else "stl"
-                    self._guarded(job, "preview_upload", lambda: self._upload(
-                        client, job, turn, "preview", fmt, f"preview-{version}.{fmt}", version, data))
-                    last_preview = now
-                if preview is not None or done:
-                    self._guarded(job, "tree", lambda: self._send_tree(client, job, turn))
+                with self._alive(keep_alive):   # a busy FreeCAD can take minutes for one preview
+                    preview = self._guarded(job, "preview", turn.take_preview)
+                    if preview is not None:
+                        version, data = preview[0], preview[1]
+                        fmt = preview[2] if len(preview) > 2 and preview[2] in PREVIEW_FORMATS else "stl"
+                        self._guarded(job, "preview_upload", lambda: self._upload(
+                            client, job, turn, "preview", fmt, f"preview-{version}.{fmt}", version, data))
+                        last_preview = now
+                    if preview is not None or done:
+                        self._guarded(job, "tree", lambda: self._send_tree(client, job, turn))
             if done:
                 break
         ok, text = self._guarded(job, "result", turn.result) or (False, "")
@@ -1275,9 +1320,10 @@ class Loop:
         if self._outbox is not None:
             self._outbox.add(job.task_id, job.message_id, answer, ok)   # before anything else can fail
         if ok:
-            for name, fmt, data in self._guarded(job, "exports", turn.exports) or ():
-                self._guarded(job, "export_upload", lambda n=name, f=fmt, d=data: self._upload(
-                    client, job, turn, "export", f, n, version, d))
+            with self._alive(keep_alive):
+                for name, fmt, data in self._guarded(job, "exports", turn.exports) or ():
+                    self._guarded(job, "export_upload", lambda n=name, f=fmt, d=data: self._upload(
+                        client, job, turn, "export", f, n, version, d))
         self._finish(client, job.task_id, answer, ok=ok, events=turn.events.drain(), message_id=job.message_id)
 
     def _send_tree(self, client: Client, job: Job, turn: Turn) -> None:
@@ -1302,12 +1348,21 @@ class Loop:
 
     def _upload(self, client: Client, job: Job, turn: Turn, kind: str, fmt: str, name: str, version: int,
                 data: bytes) -> None:
-        try:
-            client.upload(job.task_id, kind=kind, fmt=fmt, name=name, version=version, data=data)
-        except UploadRefused as e:
-            turn.events.error(f"Couldn’t upload {name}: {e}")
-        except AuthUnavailable as e:
-            self._log("connect_upload_failed", task=job.task_id, file_kind=kind, error=str(e)[:200])
+        waits = UPLOAD_RETRY_S if kind == "export" else ()   # a preview is replaced by the next one anyway
+        for attempt in range(len(waits) + 1):
+            try:
+                client.upload(job.task_id, kind=kind, fmt=fmt, name=name, version=version, data=data)
+                return
+            except UploadRefused as e:
+                turn.events.error(f"Couldn’t upload {name}: {e}")
+                return
+            except AuthUnavailable as e:
+                self._log("connect_upload_failed", task=job.task_id, file_kind=kind, attempt=attempt + 1,
+                          error=str(e)[:200])
+                if attempt == len(waits) or self._stop.wait(waits[attempt]):
+                    if kind == "export":   # never a silent gap in the files: the browser says which one is missing
+                        turn.events.error(f"Couldn’t upload {name}: the OriginShape server was busy.")
+                    return
 
     def _finish(self, client: Client, task_id: str, text: str, *, ok: bool, events: list[dict[str, Any]],
                 message_id: str = "") -> None:

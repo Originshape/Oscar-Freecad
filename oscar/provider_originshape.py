@@ -105,9 +105,41 @@ def _error_body(text: str, *secrets: str) -> tuple[str, str, str]:
     return error_code(error.get("code")), error_code(error.get("type")), safe_text(error.get("message"), *secrets)
 
 
+def _error_details(text: str) -> dict[str, str]:
+    """``{field: message}`` of the envelope's ``details`` list (a 402 names ``available_credits`` and
+    ``required_credits`` there when a long chat needs more credits set aside than the account has)."""
+    try:
+        data = json.loads(text) if text else None
+    except ValueError:
+        return {}
+    error = data.get("error") if isinstance(data, dict) else None
+    details = error.get("details") if isinstance(error, dict) else None
+    return {str(d.get("field")): safe_text(d.get("message")) for d in details or () if isinstance(d, dict)}
+
+
+def _credits(text: str) -> float:
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _wait_text(seconds: "float | None") -> str:
+    """``in 41 s`` for a short wait, ``in about 3 h 25 min`` for a long one (a daily limit resets at midnight UTC)."""
+    if not seconds:
+        return "in a moment"
+    if seconds < 600:
+        return f"in {math.ceil(seconds)} s"
+    minutes = math.ceil(seconds / 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"in about {hours} h {minutes} min" if hours else f"in about {minutes} min"
+
+
 def _auth_failure(error: AuthError) -> ProviderError:
     """The provider error for a sign-in that cannot give a token (an ``AuthError`` message is safe by contract)."""
     if isinstance(error, SignedOut):
+        if error.code == "suspended":   # the server ended the grant because the account is suspended
+            return ProviderError(str(error), status=error.status, kind="account", code="suspended")
         return ProviderError(str(error), status=error.status, kind="auth", code="signed_out")
     if isinstance(error, AuthUnavailable):   # the token endpoint is unreachable or failing: like a transport error
         return ProviderError(str(error), status=error.status, retriable=True, kind="transport", code="unavailable")
@@ -195,6 +227,19 @@ class OriginShapeProvider(AnthropicProvider):
             body["tool_choice"] = {"type": "auto", **kept}
         return body
 
+    def _max_tokens(self, per_call: int | None = None) -> int:
+        """The output cap, also bounded by the model's own in ``/v1/models`` (``max_output_tokens``): the gateway would
+        lower a larger one silently."""
+        value = super()._max_tokens(per_call)
+        try:
+            from .auth import account
+
+            info = account.cached_model(self.profile.model or "")
+        except Exception:  # noqa: BLE001 - no settings file or an unusable server URL: the profile's cap stands
+            info = None
+        cap = info.max_output_tokens if info is not None else 0
+        return min(value, cap) if cap else value
+
     # -- errors ---------------------------------------------------------------------------------------------
 
     def _reauthenticate(self, text: str) -> bool:
@@ -222,7 +267,13 @@ class OriginShapeProvider(AnthropicProvider):
             return ProviderError("OriginShape did not accept your sign-in (HTTP 401). Please sign in again.",
                                  status=401, kind="auth", code="signed_out", data=data)
         if status == 402:
-            return ProviderError("You have no OriginShape credits left (HTTP 402). Buy credits to continue.",
+            details = _error_details(text)
+            if _credits(details.get("available_credits", "")) > 0 and message:
+                # credits are left, but not enough to set aside for a request this long: a new chat helps, buying may not
+                return ProviderError(f"{message} (HTTP 402)", status=402, kind="account", code="chat_too_long_for_credits",
+                                     data={**data, "details": details})
+            return ProviderError("You have no OriginShape credits left (HTTP 402). Add credits or choose a plan to "
+                                 "continue.",
                                  status=402, kind="account", code="insufficient_credits", data=data)
         if status == 403:
             if code == "waitlisted":
@@ -236,18 +287,25 @@ class OriginShapeProvider(AnthropicProvider):
                                  kind="account", code=code or "forbidden", data=data)
         if status == 429 and not upstream and not is_quota_error(text):
             wait = retry_after_seconds(headers)
-            when = f"in {math.ceil(wait)} s" if wait else "in a moment"
+            if "usage limit" in message.lower():   # the account's daily limit (gateway/budget.py), not a request rate
+                return ProviderError(f"{message} (HTTP 429) Try again {_wait_text(wait)}.", status=429, kind="account",
+                                     code="daily_limit", data=data, retry_after=wait)
             return ProviderError(f"OriginShape is limiting how many requests your account can send (HTTP 429). "
-                                 f"Try again {when}.", status=429, retriable=True, kind="account", code="rate_limited",
-                                 data=data, retry_after=wait)
+                                 f"Try again {_wait_text(wait)}.", status=429, retriable=True, kind="account",
+                                 code="rate_limited", data=data, retry_after=wait)
         if status == 501 and code == LLM_NOT_CONFIGURED:   # a server without an AI model: asking again changes nothing
-            return ProviderError(LLM_NOT_CONFIGURED_MESSAGE, status=501, kind="http", code=LLM_NOT_CONFIGURED,
-                                 data=data)
+            # the same code covers one model whose provider has no key ("This model is not available…"): say that
+            said = f"{message} (HTTP 501)" if message and message != LLM_NOT_CONFIGURED_MESSAGE else LLM_NOT_CONFIGURED_MESSAGE
+            return ProviderError(said, status=501, kind="http", code=LLM_NOT_CONFIGURED, data=data)
         if status == 400 and code == "model_unavailable":
             model = self.profile.model or ""
             return ProviderError(f"OriginShape does not offer the model {model!r} (HTTP 400){detail}", status=400,
                                  kind="http", code=code, data=data)
         error = http_error(status, safe_text(text, token, limit=2000))
+        if code and message:   # the API's own envelope: its message, not the raw JSON
+            what = "The request is too large for OriginShape" if status == 413 else "OriginShape could not run the request"
+            error = ProviderError(f"{what} (HTTP {status}): {message}", status=status, retriable=error.retriable,
+                                  kind="http")
         error.code, error.data = code, data
         return error
 

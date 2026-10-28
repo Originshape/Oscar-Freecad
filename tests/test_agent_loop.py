@@ -246,6 +246,20 @@ class ChatTurnTest(LoopCase):
         self.assertTrue(result.ok)
         self.assertTrue(result.text.endswith("(The reply was cut off at the output-token limit.)"))
 
+    def test_a_reply_shortened_for_low_credits_says_so(self):
+        """OriginShape lowers max_tokens to what the credits pay for and says ``credits`` in x-oscar-normalized; the
+        cut-off note names the credits, not the model's output budget (audit 2026-10-28)."""
+        worker = self.build("hello?", [say("Partial answer", stop="length")])
+        worker.provider.last_normalized = "max_tokens,credits"
+        result = worker.run_turn()
+        self.assertTrue(result.ok)
+        self.assertIn("your OriginShape credits are low", result.text)
+        self.assertNotIn("output-token limit", result.text)
+        worker = self.build("hello?", [Round([("stop_reason", "max_tokens"), ("done", "max_tokens")])])
+        worker.provider.last_normalized = "max_tokens,credits"
+        self.assertIn("credits are low", worker._empty_reply_message("max_tokens"))
+        self.assertNotIn("output budget", worker._empty_reply_message("max_tokens"))
+
     def test_provider_error_fails_the_turn(self):
         result = self.run_turn("hello?", [provider_error("HTTP 503")])
         self.assertEqual((result.ok, result.outcome, result.text), (False, "failed", "Provider error: HTTP 503"))

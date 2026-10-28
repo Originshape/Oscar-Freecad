@@ -1210,5 +1210,50 @@ class PhaseGuidanceWiringTest(unittest.TestCase):
             self.assertEqual(flow.phase_guidance("NOPE"), "")
 
 
+class PlanEvidenceTest(unittest.TestCase):
+    """One apply_feature_plan call builds the whole part, so it is the work of every template step whose features it holds
+    (before, a bracket's holes step was left to a bare claim, which the finish gate refuses)."""
+
+    BRACKET = "Design a mounting bracket: 60 x 40 x 4 mm base plate with four M4 holes and 3 mm fillets."
+    FIXTURE = "Design a fixture for a 40 x 30 mm sensor with locating pins and clamp screws."
+    BASE = [{"id": "sk", "op": "sketch"}, {"id": "base", "op": "pad"}]
+
+    @staticmethod
+    def plan_call(ledger, plan):
+        ledger.on_tool_result(oc("apply_feature_plan", args={"doc_name": "D", "plan": plan}, step_index=1))
+
+    def test_a_plan_with_holes_completes_the_base_and_the_holes_step(self):
+        ledger = Ledger.from_request(self.BRACKET)
+        self.assertEqual(ledger.intent, "bracket")
+        self.plan_call(ledger, {"schema_version": 1, "features": self.BASE + [{"id": "holes", "op": "hole"}]})
+        self.assertEqual(ledger.confirm_evidenced_steps(), ["S3", "S4"])
+        self.assertEqual(ledger.claimed_only_steps(), [])
+
+    def test_a_plan_without_holes_leaves_the_holes_step_open(self):
+        ledger = Ledger.from_request(self.BRACKET)
+        self.plan_call(ledger, {"schema_version": 1, "features": self.BASE})
+        self.assertEqual(ledger.confirm_evidenced_steps(), ["S3"])
+        self.assertEqual(ledger.step("S4").status, "pending")
+
+    def test_a_fixture_plan_with_parts(self):
+        ledger = Ledger.from_request(self.FIXTURE)
+        self.assertEqual(ledger.intent, "fixture")
+        plan = {"schema_version": 2, "parts": [{"id": "base", "features": self.BASE + [{"id": "nest", "op": "pocket"},
+                                                                                       {"id": "clamp", "op": "hole"}]}]}
+        self.plan_call(ledger, plan)
+        self.assertEqual(ledger.confirm_evidenced_steps(), ["S5", "S6"])
+
+    def test_any_other_build_call_still_credits_one_step(self):
+        ledger = Ledger.from_request(self.BRACKET)
+        ledger.on_tool_result(oc("execute_code", step_index=1))
+        self.assertEqual(ledger.confirm_evidenced_steps(), ["S3"])
+
+    def test_the_build_steps_suggest_the_plan_first(self):
+        for text, ids in ((self.BRACKET, ("S3", "S4", "S5")), (self.FIXTURE, ("S5", "S6"))):
+            ledger = Ledger.from_request(text)
+            for sid in ids:
+                self.assertEqual(ledger.step(sid).hint_tools[0], "apply_feature_plan", (text, sid))
+
+
 if __name__ == "__main__":
     unittest.main()

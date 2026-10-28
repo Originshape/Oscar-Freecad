@@ -75,6 +75,25 @@ class AuthUnavailable(AuthError):
     code = "unavailable"
 
 
+class AccountSuspended(AuthError):
+    """The account is suspended: a sign-in is refused with ``access_denied`` / ``account_suspended``, a refresh with
+    ``invalid_grant`` and ``"reason": "account_suspended"``. Signing in again cannot help."""
+
+    code = "suspended"
+
+
+SUSPENDED_MESSAGE = ("Your OriginShape account is suspended, so Oscar can't use it. Signing in again won't help: "
+                     "contact OriginShape support to find out why.")
+
+
+def says_suspended(reply_or_body: Any, description: str = "") -> bool:
+    """True when an OAuth error answer says the account is suspended (``"reason": "account_suspended"`` in the body,
+    or ``account_suspended`` as the description: the browser's redirect and the device poll carry it there)."""
+    data = reply_or_body.json() if isinstance(reply_or_body, Reply) else reply_or_body
+    reason = data.get("reason") if isinstance(data, dict) else ""
+    return reason == "account_suspended" or (description or "").strip() == "account_suspended"
+
+
 class SignInDeclined(AuthError):
     """The user answered no (``access_denied``)."""
 
@@ -412,6 +431,8 @@ def token_error(reply: Reply, *secrets: str) -> AuthError:
         return AuthError("The sign-in was not accepted: the code expired or was already used. Please sign in again.",
                          code=code, status=reply.status)
     if code == "access_denied":
+        if says_suspended(reply, desc):
+            return AccountSuspended(SUSPENDED_MESSAGE, status=reply.status)
         return SignInDeclined("The sign-in request was declined.", status=reply.status)
     if code == "expired_token":
         return SignInExpired("The sign-in request expired. Please start again.", status=reply.status)

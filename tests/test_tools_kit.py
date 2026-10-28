@@ -12,6 +12,7 @@ script helpers.
 """
 
 import json
+import math
 import os
 import sys
 import unittest
@@ -919,6 +920,74 @@ class SetParameterTest(Base):
         self.build_to("params")
         self.ok("set_parameter", name="wall_t", value="2.4")
         self.assertEqual(self.outcome.title, tools.derive_title("set_parameter", {"name": "wall_t", "value": "2.4"}))
+
+
+class PlanSheetTest(Base):
+    """A FeaturePlan part keeps its parameters in the builder's ``Parameters`` sheet (film-shoot finding: ``set_parameter`` only knew
+    ``Params``, so it could not resize a bracket built by ``apply_feature_plan``)."""
+
+    def setUp(self):
+        super().setUp()
+        from oscar.plan import builder
+
+        with open(os.path.join(os.path.dirname(__file__), "fixtures", "plans", "l_bracket.json"), encoding="utf-8") as f:
+            report = builder.apply_plan(self.doc, json.load(f))
+        self.assertTrue(report.get("success"), report)
+        self.sheet = self.doc.getObject(report["spreadsheet"])
+        self.body = self.doc.getObject(report["body"])
+
+    def test_set_parameter_resizes_a_plan_part(self):
+        text = self.ok("set_parameter", name="depth", value="45 mm")
+        self.assertIn("depth: 50 -> 45", text)
+        self.assertNotIn("mm", self.sheet.getContents(self.sheet.getCellFromAlias("depth")))    # plan cells stay plain numbers
+        self.assertFalse(hasattr(self.sheet.get("depth"), "Unit"))
+        self.assertAlmostEqual(self.body.Shape.Volume, 1100 * 45 - math.pi * 36 * 10, delta=3.0)
+        self.assertIsNone(self.doc.getObject("Params"))                                          # no second sheet appeared
+        self.assertIn("depth", self.outcome.extra["param_names"])
+
+    def test_get_parameters_reads_the_plan_sheet(self):
+        text = self.ok("get_parameters")
+        self.assertIn(f"PARAMETERS (sheet '{self.sheet.Name}'", text)
+        self.assertRegex(text, r"depth\s+50\b")
+
+    def test_set_parameters_writes_the_plan_sheet_not_a_new_params(self):
+        text = self.ok("set_parameters", params=[{"name": "depth", "value": "40 mm", "unit": "mm", "source": "user_requirement"},
+                                                 {"name": "rib_t", "value": "3", "unit": "mm", "source": "assumption"}])
+        self.assertIn(f"in sheet '{self.sheet.Name}'", text)
+        self.assertIsNone(self.doc.getObject("Params"))                                          # a new Params would drive nothing
+        self.assertAlmostEqual(self.body.Shape.Volume, 1100 * 40 - math.pi * 36 * 10, delta=3.0)
+        for name in ("depth", "rib_t"):
+            self.assertFalse(hasattr(self.sheet.get(name), "Unit"), name)
+
+    def test_bind_expression_uses_the_plan_sheet(self):
+        box = self.doc.addObject("Part::Box", "Box")
+        self.doc.recompute()
+        self.ok("bind_expression", object=box.Name, property="Length", expression="depth*2")
+        bound = next(str(e[1]) for e in box.ExpressionEngine if str(e[0]) == "Length")
+        self.assertIn(f"{self.sheet.Name}.depth", bound)
+        self.assertAlmostEqual(box.Length.Value, 100.0)
+
+    def test_a_name_in_both_sheets_is_changed_where_the_model_is_bound(self):
+        params.ensure_sheet(self.doc).set("depth", 99, source="assumption")                    # a stray copy that drives nothing
+        self.doc.recompute()
+        self.ok("set_parameter", name="depth", value="45")
+        self.assertAlmostEqual(self.body.Shape.Volume, 1100 * 45 - math.pi * 36 * 10, delta=3.0)
+        self.assertAlmostEqual(params.Params(self.doc).get("depth"), 99.0)
+
+    def test_unknown_name_is_reported_against_the_plan_sheet(self):
+        self.fails("set_parameter", f"not a parameter in sheet '{self.sheet.Name}'", "similar: depth", name="dept", value="45")
+
+    def test_a_users_own_parameters_sheet_is_never_edited(self):
+        doc = self.new_doc("Own")
+        sheet = doc.addObject("Spreadsheet::Sheet", "Parameters")
+        sheet.set("A1", "depth")
+        sheet.set("B1", "=50")
+        sheet.setAlias("B1", "depth")
+        doc.recompute()
+        before = sheet.getContents("B1")
+        self.fails("set_parameter", "no 'Params' sheet", doc_name=doc.Name, name="depth", value="45")
+        self.assertEqual(sheet.getContents("B1"), before)
+        self.assertEqual(float(sheet.get("depth")), 50.0)
 
 
 if __name__ == "__main__":

@@ -95,14 +95,16 @@ from .auth import session as _auth_session
 from .auth.device import DeviceSignIn
 from .auth.loopback import LoopbackSignIn
 from .auth.transport import AuthError, SignedOut
-from .panel_render import format_credits
+from .panel_render import account_balance, format_credits, on_trial
 from .params import Profile
 
 # Personal OriginShape API keys are turned off on the server for now (API_KEYS_ENABLED): the "Use an OriginShape API
-# key" sign-in is hidden; the code path stays for when keys come back.
+# key" sign-in is hidden; the code path stays for when keys come back. It is a constant, not read from the server: the
+# option belongs to the signed-out screen, and the server says whether keys are on only to a signed-in account
+# (/v1/me features.api_keys).
 OFFER_API_KEY_SIGNIN = False
 ACCOUNT_REFRESH_AGE_S = 60.0       # a snapshot older than this is fetched again by the next refresh
-SIGN_IN_TIMEOUT_S = 300.0          # how long a browser sign-in waits for the browser
+SIGN_IN_TIMEOUT_S = 600.0          # how long a browser sign-in waits: the server keeps the request 10 minutes
 _ACCOUNT_JOBS = ("account_signin", "account_code", "account_poll", "account_key", "account_signout")
 
 class _Mailbox:
@@ -1506,13 +1508,6 @@ class SettingsDialog(QtWidgets.QDialog):
             page.setSizePolicy(policy, policy)
         self.account_stack.adjustSize()
 
-    @staticmethod
-    def _credits_number(value) -> float:
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return 0.0
-
     def _render_account(self) -> None:
         """Show the hub's state: which page, the account lines, and which buttons can be used now."""
         if not hasattr(self, "account_stack"):
@@ -1533,13 +1528,16 @@ class SettingsDialog(QtWidgets.QDialog):
             self.account_plan.setText(plan or "(loading…)")
             waitlisted = status == "waitlisted"
             notice, tone = "", ""
+            trial = on_trial(snapshot)
             if status == "approved":
-                available = snapshot.get("credits_available")
+                balance, held = account_balance(snapshot)
                 low = " (running low)" if snapshot.get("credits_low") is True else ""
-                self.account_credits.setText(format_credits(available) + low)
-                if self._credits_number(available) <= 0:
-                    notice, tone = ("You're out of credits, so Oscar can't use your account until you add more. Buy "
-                                    "credits, or switch to your own provider on the AI model tab."), "error"
+                in_use = f", {format_credits(held)} held by a running request" if held else ""
+                self.account_credits.setText(format_credits(balance) + low + in_use)
+                if balance <= 0:
+                    more = "Choose a plan" if trial else "Buy credits"
+                    notice, tone = (f"You're out of credits, so Oscar can't use your account until you add more. "
+                                    f"{more}, or switch to your own provider on the AI model tab."), "error"
                 elif low:
                     notice, tone = "You're running low on credits.", "muted"
             elif status == "suspended":
@@ -1564,7 +1562,8 @@ class SettingsDialog(QtWidgets.QDialog):
             self._tone(self.account_notice, tone)
             self.account_notice.setVisible(bool(notice))
             self.account_billing_btn.setVisible(status not in ("waitlisted", "suspended"))
-            out_of_credits = status == "approved" and self._credits_number(snapshot.get("credits_available")) <= 0
+            self.account_billing_btn.setText("Choose a plan" if trial else "Buy credits")   # packs: subscribers only
+            out_of_credits = status == "approved" and account_balance(snapshot)[0] <= 0
             if out_of_credits:                    # then buying credits is the thing to do
                 self._style_primary(self.account_billing_btn)
             else:
@@ -1617,9 +1616,9 @@ class SettingsDialog(QtWidgets.QDialog):
         elif status == "suspended":
             text, go = f"Signed in as {email}. Your account is suspended.", True
         elif status == "approved":
-            available = snapshot.get("credits_available")
-            text = f"Signed in as {email} · {format_credits(available)} available"
-            go = self._credits_number(available) <= 0
+            balance = account_balance(snapshot)[0]
+            text = f"Signed in as {email} · {format_credits(balance)} left"
+            go = balance <= 0
         else:
             text, go = f"Signed in as {email or '…'}", False
         self.ai_account_state.setText(text)

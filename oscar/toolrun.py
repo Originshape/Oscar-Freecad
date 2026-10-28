@@ -53,14 +53,17 @@ INTENT_CATEGORIES: dict[str, frozenset[str]] = {
     **{intent: _ALL_CATEGORIES for intent in ("inspect", "question", "other")},
 }
 
-# Tools the kit intents never see: the kit builds, saves and reloads for the model.
+# Tools the kit intents never see: the app saves, exports and reloads for the model.
 _KIT_HIDDEN = frozenset({
-    "execute_code_async", "get_async_status", "execute_code_headless", "apply_feature_plan",
-    "reapply_plan_feature", "insert_part_from_library", "get_parts_list", "reload_document",
-    "feature_tree_status", "download_file", "save_document",
+    "execute_code_async", "get_async_status", "execute_code_headless", "insert_part_from_library",
+    "get_parts_list", "reload_document", "feature_tree_status", "download_file", "save_document",
 })
+# An enclosure is built by build_enclosure; a bracket or fixture is built from a FeaturePlan (the structured_part
+# playbook), so only the enclosure loses the plan tools.
+_PLAN_TOOLS = frozenset({"apply_feature_plan", "reapply_plan_feature"})
 INTENT_HIDDEN: dict[str, frozenset[str]] = {
-    intent: _KIT_HIDDEN for intent in ("enclosure", "fixture", "bracket")
+    "enclosure": _KIT_HIDDEN | _PLAN_TOOLS,
+    **{intent: _KIT_HIDDEN for intent in ("fixture", "bracket")},
 }
 
 

@@ -290,7 +290,7 @@ class LoopbackSignIn:
 
     # -- worker thread ------------------------------------------------------------------------------------
 
-    def wait(self, cancelled: threading.Event | None, timeout: float = 300.0) -> TokenSet:
+    def wait(self, cancelled: threading.Event | None, timeout: float = 600.0) -> TokenSet:
         """Block until the browser answers, then exchange the code. Returns the ``TokenSet``; raises
         ``SignInCancelled``, ``SignInTimedOut``, ``SignInDeclined``, ``AuthUnavailable`` or ``AuthError``. The
         server's metadata is fetched before waiting, so an unreachable server (or one that is not an OriginShape
@@ -355,6 +355,8 @@ class LoopbackSignIn:
         error = query.get("error")
         if error is not None:
             if error == "access_denied":
+                if transport.says_suspended({}, query.get("error_description") or ""):
+                    raise transport.AccountSuspended(transport.SUSPENDED_MESSAGE)
                 raise SignInDeclined("The sign-in was declined in the browser.")
             code = error_code(error) or "authorize_error"
             raise AuthError(f"The sign-in failed in the browser ({code}).", code=code)

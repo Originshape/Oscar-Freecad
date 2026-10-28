@@ -121,6 +121,15 @@ class LedgerStep:
 # Template plans
 
 _BUILD_TOOLS = ["create_object", "execute_code", "edit_object"]
+# A bracket or fixture is built from a FeaturePlan first (the structured_part playbook); scripts stay the fallback.
+_PLAN_BUILD_TOOLS = ["apply_feature_plan", *_BUILD_TOOLS]
+
+# One apply_feature_plan call builds the whole part, so it is the work of every open BUILD step of the template whose
+# features the plan holds: step id -> the plan ops that do it (empty: any plan, the base body).
+_PLAN_STEP_OPS: dict[str, dict[str, frozenset[str]]] = {
+    "bracket": {"S3": frozenset(), "S4": frozenset({"hole", "pocket"}), "S5": frozenset({"fillet", "chamfer"})},
+    "fixture": {"S5": frozenset({"pocket"}), "S6": frozenset({"hole", "boss"})},
+}
 
 
 def _step(sid: str, phase: str, title: str, acceptance: str, *, owner: str = "model", required: bool = True,
@@ -194,9 +203,9 @@ def seed_template(intent: str, requirements: Sequence[dict], needs_reference: bo
             _step("S4", "PARAMS", "Parameters table", "driving dimensions are named parameters", required=False,
                   hint=["set_parameters"]),
             _step("S5", "BUILD", "Base and nest pocket for the part", "the part sits in a pocket of the base",
-                  hint=_BUILD_TOOLS),
+                  hint=_PLAN_BUILD_TOOLS),
             _step("S6", "BUILD", "Locating and clamping features", "locating / clamping features exist",
-                  required=_kw("fixture_clamp", text), hint=_BUILD_TOOLS),
+                  required=_kw("fixture_clamp", text), hint=_PLAN_BUILD_TOOLS),
             _step("S7", "VERIFY", "Validate model and check fit", "health valid and zero FAIL fit rows", owner="app"),
             _step("S8", "DELIVER", "Save project, export, notes", "notes and exports present", owner="app"),
         ]
@@ -205,11 +214,12 @@ def seed_template(intent: str, requirements: Sequence[dict], needs_reference: bo
             _step("S1", "INTAKE", "Capture requirements and assumptions", "requirements recorded", owner="app", done=True),
             _step("S2", "PARAMS", "Parameters table", "driving dimensions are named parameters", required=False,
                   hint=["set_parameters"]),
-            _step("S3", "BUILD", "Base body and profile", "the bracket body exists as a valid solid", hint=_BUILD_TOOLS),
+            _step("S3", "BUILD", "Base body and profile", "the bracket body exists as a valid solid", hint=_PLAN_BUILD_TOOLS),
             _step("S4", "BUILD", "Holes and slots", "the holes and slots exist",
-                  required=_kw("bracket_holes", text), hint=["execute_code", "edit_object", "create_object"]),
+                  required=_kw("bracket_holes", text),
+                  hint=["apply_feature_plan", "execute_code", "edit_object", "create_object"]),
             _step("S5", "BUILD", "Fillets and finishing features", "finishing features exist", required=False,
-                  hint=["edit_object", "execute_code"]),
+                  hint=["apply_feature_plan", "edit_object", "execute_code"]),
             _step("S6", "VERIFY", "Validate model", "health valid", owner="app"),
             _step("S7", "DELIVER", "Save project, export, notes", "notes and exports present", owner="app"),
         ]
@@ -646,6 +656,27 @@ class Ledger:
                 return hit
         return next((s for s in cands if s.phase == "BUILD"), None)
 
+    def _credit_plan_steps(self, outcome, plan: Any, first: LedgerStep | None) -> bool:
+        """Evidence of one ``apply_feature_plan`` call for the other open template steps it built (``_PLAN_STEP_OPS``): a bracket's
+        holes come in the same plan as its base, so the holes step is not left to a bare claim. A step whose ops are missing from the
+        plan gets nothing. Returns True when anything changed."""
+        wanted = _PLAN_STEP_OPS.get(self.intent)
+        if not wanted:
+            return False
+        from .plan.schema import all_features
+
+        ops = {str(f.get("op") or "") for f in all_features(plan)}
+        changed = False
+        for s in self.steps:
+            need = wanted.get(s.id)
+            if s is first or need is None or not (s.owner == "model" and s.required and self._open_for_evidence(s)):
+                continue
+            if need and not need & ops:
+                continue
+            self._add_evidence(s, self._evidence(outcome))
+            changed = True
+        return changed
+
     def _stage_done(self, step: LedgerStep, stage: str) -> bool:
         """Record a finished stage; completes the step when every stage is done. Returns True when anything changed."""
         changed = False
@@ -694,6 +725,8 @@ class Ledger:
                     step.note = ""                         # redone after a revert
                 self._set_running(step)
                 changed = True
+            if name == "apply_feature_plan" and geometry:
+                changed |= self._credit_plan_steps(outcome, args.get("plan"), step)
         if name == "source_reference_part":
             changed |= self._on_source(outcome, extra)
         elif name == "import_reference_part":

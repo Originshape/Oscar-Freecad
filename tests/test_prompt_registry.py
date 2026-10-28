@@ -84,13 +84,13 @@ class FullRegistryLintTest(unittest.TestCase):
         self.assertLessEqual(set(named(prompt.LITE)), set(toolrun.LITE_TOOLS))
 
     def test_the_kit_intents_hide_what_the_prompt_never_names_for_them(self):
-        hidden = set(toolrun.INTENT_HIDDEN["enclosure"])
-        for intent in KIT_INTENTS:
-            self.assertEqual(set(toolrun.INTENT_HIDDEN[intent]), hidden)
-        text = prompt.build_system_prompt(lite=False, tool_names={s.name for s in tools.specs(intent="enclosure")})
-        for name in hidden:
-            self.assertNotIn(name, text, name)
-        self.assertLessEqual(context.estimate_tokens_text(text), 1100)
+        for intent in KIT_INTENTS:                      # the enclosure hides the most (a bracket / fixture keeps the plan tools)
+            hidden = set(toolrun.INTENT_HIDDEN[intent])
+            self.assertLessEqual(hidden, set(toolrun.INTENT_HIDDEN["enclosure"]), intent)
+            text = prompt.build_system_prompt(lite=False, tool_names={s.name for s in tools.specs(intent=intent)})
+            for name in hidden:
+                self.assertNotIn(name, text, (intent, name))
+            self.assertLessEqual(context.estimate_tokens_text(text), 1100, intent)
 
     def test_every_rendering_per_intent_and_lite_stays_in_budget_and_names_only_offered_tools(self):
         for intent in ("enclosure", "bracket", "generic_part", "fem", "question"):

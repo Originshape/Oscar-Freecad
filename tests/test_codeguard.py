@@ -347,6 +347,19 @@ class DialogTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 12.0)
         self.assertEqual(self._boxes(), [])
 
+    def test_stop_closes_the_open_question_unanswered(self):
+        """Stop must not wait out DENY_TIMEOUT_S while an approval is open (audit 2026-10-28: the browser said
+        "Stopping…" for two minutes with the approval buttons still live)."""
+        valve = self._safety_valve(15000)
+        started = time.monotonic()
+        self._after(200, netguard.cancel_open_questions)
+        self.assertEqual(self.gate(SCRIPT, {}), (False, codeguard.NO_ANSWER_TEXT))
+        self.assertEqual(valve, [], "the dialog had to be closed by force")
+        self.assertLess(time.monotonic() - started, 10.0)
+        self.assertEqual(self._boxes(), [])
+        self._after(100, lambda: self._click("Run"))
+        self.assertEqual(self.gate(SCRIPT, {}), (True, ""), "a later question is asked as usual")
+
     def test_a_remote_view_hears_each_question_and_its_answer(self):
         heard: list = []
         hook = mock.patch.object(netguard, "on_approval", heard.append)

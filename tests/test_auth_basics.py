@@ -589,7 +589,7 @@ class ModelCatalogTest(unittest.TestCase):
         self.assertEqual((best.context_window, best.max_output_tokens), (200000, 64000))
         self.assertEqual(best.capabilities, {"vision": True, "tools": True, "reasoning": "adaptive",
                                              "prompt_caching": True})
-        self.assertEqual(account.parse_models({"default": "missing", "data": []}).default, "oscar-default")
+        self.assertEqual(account.parse_models({"default": "missing", "data": []}).default, "origin1")
         with self.assertRaises(AuthError):
             account.parse_models({"models": []})
 

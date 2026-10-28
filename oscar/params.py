@@ -37,6 +37,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 from . import context_guard as _context_guard
 from . import fsretry as _fsretry
+from .auth import account as _auth_account
 
 import FreeCAD
 
@@ -63,7 +64,7 @@ ACCOUNT_PROFILE_NAME = "OriginShape"
 # them (so a profile or a workspace task that names one keeps working, ``ACCOUNT_MODELS``), the pickers no longer
 # offer them, and a stored profile is read as its tier's current alias (``account_model_alias``, ``_profiles_from``).
 ACCOUNT_MODEL_CHOICES = ("origin1", "origin1-super")
-LEGACY_ACCOUNT_MODELS: dict[str, str] = {"oscar-default": "origin1-super", "oscar-fast": "origin1"}
+LEGACY_ACCOUNT_MODELS: dict[str, str] = dict(_auth_account.RETIRED_ALIASES)
 ACCOUNT_MODELS = ACCOUNT_MODEL_CHOICES + tuple(LEGACY_ACCOUNT_MODELS)   # every alias the account accepts
 ACCOUNT_MODEL_LABELS: dict[str, str] = {"origin1": "Origin1", "origin1-super": "Origin1 Super"}
 

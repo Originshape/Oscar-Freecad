@@ -5,11 +5,11 @@ as a real, editable FreeCAD model, step by step, while you watch.
 
 ```text
 You:   Make an 80 mm flange, 8 mm thick, with six M6 bolt holes on a 60 mm circle.
-Oscar: plans the part → creates a Params spreadsheet → sketches → pads → drills the holes
+Oscar: plans the part → creates a parameter spreadsheet → sketches → pads → drills the holes
        → checks the model → saves the project and shows you what it validated
 ```
 
-> **Version 0.2.0** for FreeCAD 1.1. See [CHANGELOG.md](CHANGELOG.md), and read [Safety](#safety) before using it on
+> **Version 0.2.1** for FreeCAD 1.1. See [CHANGELOG.md](CHANGELOG.md), and read [Safety](#safety) before using it on
 > real work.
 
 **Contents:** [What Oscar does](#what-oscar-does) · [Install](#install) · [Connect an AI model](#connect-an-ai-model) ·
@@ -20,8 +20,9 @@ Oscar: plans the part → creates a Params spreadsheet → sketches → pads →
 
 ## What Oscar does
 
-- **Builds parametric parts from a chat.** Every dimension goes into one `Params` spreadsheet, and the features
-  (sketches, pads, pockets, holes, fillets) are bound to it. Change a cell and the part follows.
+- **Builds parametric parts from a chat.** Every dimension goes into one parameter spreadsheet (`Params`, or
+  `Parameters` for a part built from a plan), and the features (sketches, pads, pockets, holes, fillets) are bound
+  to it. Change a cell and the part follows.
 - **Shows its work.** The panel shows the plan, one row per step with a snapshot, and a summary at the end that
   says what was checked and what was not.
 - **Lets you stay in control.** Pause, steer (type while it works), stop, revert a whole turn, or rewind to any
@@ -52,14 +53,16 @@ Nothing else is required: Oscar is pure Python and uses only what FreeCAD alread
 ### Option A: from FreeCAD's Addon Manager
 
 1. Open **Edit → Preferences → Addon Manager**.
-2. Under **Custom repositories**, add `https://github.com/originshape/oscar-freecad` with branch `main`.
+2. Under **Custom repositories**, add `https://github.com/Originshape/Oscar-Freecad` with branch `main`.
 3. Open the Addon Manager (**Tools → Addon manager**), find **Oscar**, click **Install**.
 4. Restart FreeCAD.
 
 ### Option B: from a release ZIP
 
-1. Download `Oscar-v<version>.zip` from the [latest release](https://github.com/originshape/oscar-freecad/releases/latest)
-   (or the repository as a ZIP) and unzip it.
+1. Download `Oscar-v<version>.zip` from the [latest release](https://github.com/Originshape/Oscar-Freecad/releases/latest)
+   (or the repository as a ZIP) and unzip it. To check the download, compare its SHA-256 with the one in
+   `Oscar-v<version>.zip.sha256` on the same release: `shasum -a 256 Oscar-v<version>.zip` on macOS or Linux,
+   `certutil -hashfile Oscar-v<version>.zip SHA256` on Windows.
 2. Rename the folder to `Oscar`. It must directly contain `package.xml` and `InitGui.py`.
 3. Move the `Oscar` folder into FreeCAD's `Mod` folder:
 
@@ -76,14 +79,15 @@ Nothing else is required: Oscar is pure Python and uses only what FreeCAD alread
 ### Option C: for development (a live link to your checkout)
 
 ```bash
-git clone https://github.com/originshape/oscar-freecad
-cd oscar-freecad
+git clone https://github.com/Originshape/Oscar-Freecad
+cd Oscar-Freecad
 python3 scripts/dev_install.py      # links this folder into FreeCAD's Mod folder; --uninstall removes the link
 ```
 
 ### Check that it worked
 
-Open the workbench list (the drop-down in the toolbar) and choose **Oscar**, or press **Ctrl+Shift+O** anywhere.
+Open the workbench list (the drop-down in the toolbar) and choose **Oscar**, or press **Ctrl+Shift+O** anywhere
+(**⇧⌘O** on macOS).
 The Oscar panel opens on the right.
 
 ## Connect an AI model
@@ -175,7 +179,8 @@ Larger models give better results; small local models work best on simple parts.
 3. Watch it build. Each step appears as a row; click a row to see what it did, or **↶ rewind** to go back to it.
 4. When it finishes, read the summary: what was built, what was validated, what was not, and anything it needs
    from you.
-5. Change a dimension later by asking ("make the plate 6 mm thick") or by editing the `Params` spreadsheet yourself.
+5. Change a dimension later by asking ("make the plate 6 mm thick") or by editing the parameter spreadsheet
+   (`Params` or `Parameters`) yourself.
 
 While Oscar works, the send button becomes **⏸** (pause) and **Esc** stops the turn. Type a message while it
 works to steer it.
@@ -191,7 +196,7 @@ nothing about you or your work is sent). When one is, the panel header says so, 
 off.
 
 To update: in the **Addon Manager**, select **Oscar** and click **Update** (an install from the Addon Manager), or
-replace the `Mod/Oscar` folder with the new release ZIP; then restart FreeCAD. Your chats, projects and settings
+replace the `Mod/Oscar` folder with the new release ZIP (a ZIP install); then restart FreeCAD. Your chats, projects and settings
 stay. If the server needs a newer Oscar than yours (after a change in how they talk), the OriginShape account pauses
 with an **Update Oscar** card until you update; your own AI providers keep working meanwhile.
 
@@ -225,10 +230,11 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 | Problem | What to do |
 |---|---|
-| No **Oscar** workbench after a restart | Check that the folder is `Mod/Oscar` and contains `package.xml` directly (not `Mod/Oscar/oscar-freecad/...`). The Report view (**View → Panels → Report view**) shows load errors |
+| No **Oscar** workbench after a restart | For a ZIP install, check that the folder is `Mod/Oscar` and contains `package.xml` directly (not `Mod/Oscar/Oscar-Freecad-main/...`); the Addon Manager names its folder itself. The Report view (**View → Panels → Report view**) shows load errors |
 | "No API key" or an HTTP 401 error | Open **⚙**, select your profile, paste the key, click **Test connection**. With the OriginShape profile, sign in instead (the header badge) |
 | "Your OriginShape sign-in has ended" | Sign in again from the card or the header badge. Signing out elsewhere, or revoking this computer on the website, ends it |
-| A waitlist or "no credits left" card | The account is waiting for approval, or has spent its credits: **Check again** or **Buy credits** on the card. Your own provider works meanwhile |
+| A waitlist or "no credits left" card | The account is waiting for approval, or has spent its credits: **Check again**, or **Choose a plan** / **Buy credits** on the card (credit packs are for subscribers). Your own provider works meanwhile |
+| "This chat is too long for the credits left" | Each request sets credits aside for the whole chat first. Start a new chat, or add credits |
 | A local model is slow or stops early | Use a bigger model if your computer allows it, or simplify the request. Check that Ollama or LM Studio is running |
 | Oscar asks for network access | It wants to download a reference file or read a web page. Allow it once, or deny it and it continues without |
 | Something went wrong in a turn | Click **↩ revert changes** on the turn's card. The full log is `Oscar/logs/agent.log` in your FreeCAD user folder |
@@ -236,7 +242,7 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 ## Uninstall
 
 Sign out first (**⚙ → OriginShape account → Sign out**) if you signed in. Then use the Addon Manager's
-**Uninstall**, or delete the `Mod/Oscar` folder (or run `python3 scripts/dev_install.py --uninstall` for a
+**Uninstall**, or delete the `Mod/Oscar` folder of a ZIP install (or run `python3 scripts/dev_install.py --uninstall` for a
 development link). Your projects in `~/Documents/Oscar/Projects/` and your settings (`oscar_settings.json`) are kept
 until you delete them.
 

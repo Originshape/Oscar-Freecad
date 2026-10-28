@@ -992,6 +992,29 @@ class AccountRenderTest(unittest.TestCase):
                             (float("nan"), "0 credits"), (None, "0 credits")):
             self.assertEqual(pr.format_credits(value), text, value)
 
+    def test_the_badge_shows_the_balance_like_the_website(self):
+        """Credits a running request holds are not "out of credits" (audit 2026-10-28: FreeCAD said 0 while the
+        website said 12)."""
+        text, tone, tip = pr.account_badge(self.state(credits_balance=12, credits_available=0))
+        self.assertEqual((text, tone), ("12 credits", ""))
+        self.assertIn("12 credits held by a running request", tip)
+        self.assertEqual(pr.account_badge(self.state(credits_balance=0, credits_available=0))[:2], ("0 credits", "warn"))
+        self.assertEqual(pr.account_balance({"credits_balance": 10, "credits_available": 7.5}), (10.0, 2.5))
+        self.assertEqual(pr.account_balance({"credits_available": 4}), (4.0, 0.0))
+
+    def test_a_trial_account_is_offered_a_plan_not_credit_packs(self):
+        """Credit packs are for subscribers (billing/routes.py), so a trial account never sees "Buy credits"."""
+        trial = self.state(plan="trial")
+        actions = [action for action, _label in pr.account_menu(trial)]
+        self.assertIn("subscribe", actions)
+        self.assertNotIn("buy", actions)
+        self.assertIn(("subscribe", "Choose a plan…"), pr.account_menu(trial))
+        self.assertIn(("buy", "Buy credits…"), pr.account_menu(self.state(plan="pro")))
+        text, links = pr.account_card("no_credits", trial=True)
+        self.assertIn("Choose a plan", text)
+        self.assertEqual([url for url, _label in links], ["oscar://account/subscribe", "oscar://settings"])
+        self.assertIn("oscar://account/buy", [url for url, _label in pr.account_card("no_credits")[1]])
+
     def test_the_badge_follows_the_account(self):
         self.assertEqual(pr.account_badge(None)[:2], ("…", ""))
         self.assertEqual(pr.account_badge({"known": False})[:2], ("…", ""))

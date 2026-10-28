@@ -218,8 +218,9 @@ class BadgeTest(_PanelCase):
         labels = self.menu_labels(p)
         self.assertEqual(labels[0], "Signed in as ada@example.com")
         self.assertFalse(p.account_menu.actions()[0].isEnabled())
-        for label in ("Buy credits…", "Manage account…", "Refresh", "Sign out"):
+        for label in ("Choose a plan…", "Manage account…", "Refresh", "Sign out"):   # a trial: packs need a plan
             self.assertIn(label, labels)
+        self.assertNotIn("Buy credits…", labels)
         self.assertEqual(p.account_btn.styleSheet(), "")
 
     def test_no_credits_left_is_a_warning(self):
@@ -461,13 +462,15 @@ class AccountProblemTest(_PanelCase):
         message = self.send(p)
         session_["ledger"] = {"request": "the plan this turn seeded"}
         self.finish(p, self.problem("insufficient_credits"),
-                    "Provider error: You have no OriginShape credits left (HTTP 402). Buy credits to continue.")
+                    "Provider error: You have no OriginShape credits left (HTTP 402). Add credits or choose a plan "
+                    "to continue.")
         self.assertEqual([b for b in p.blocks if b.kind == Block.ERROR], [])          # no raw provider error line
         cards = self.accounts(p, "no_credits")
         self.assertEqual(len(cards), 1)
         self.assertIn("back in the input", cards[0].text)
-        for target in ("oscar://account/buy", "oscar://account/subscribe", "oscar://settings"):
+        for target in ("oscar://account/subscribe", "oscar://settings"):   # a trial account: a plan, not packs
             self.assertIn(target, cards[0].html())
+        self.assertNotIn("oscar://account/buy", cards[0].html())
         self.assertEqual(p.input.toPlainText(), "make a cube")
         self.assertNotIn(message, p.history)
         self.assertEqual([b for b in p.blocks if b.kind == Block.USER], [])

@@ -176,7 +176,7 @@ class AccountRoutesTest(FakeCase):
                         {"x-api-key": key}):
             self.assertEqual(requests.get(self.url + "/v1/me", headers=headers, timeout=5).status_code, 200)
             self.assertEqual(requests.get(self.url + "/v1/models", headers=headers, timeout=5).json()["default"],
-                             "oscar-default")
+                             "origin1")
         for headers in ({}, {"Authorization": "Bearer nope-nope-nope"}, {"Authorization": f"Basic {key}"}):
             answer = requests.get(self.url + "/v1/me", headers=headers, timeout=5)
             self.assertEqual(answer.status_code, 401)
@@ -308,7 +308,7 @@ class GatewayPolicyTest(GatewayCase):
     def test_unknown_models_and_bodies_are_400(self):
         answer = self.post({"model": "not-an-alias", "stream": True})   # the wire must carry an alias
         self.assertEqual(self.error(answer), (400, "model_unavailable", "invalid_request_error"))
-        self.assertIn("oscar-default", answer.json()["error"]["message"])
+        self.assertIn("origin1", answer.json()["error"]["message"])
         not_json = requests.post(self.fake.gateway_url, data=b"model=oscar-default", headers=self.auth, timeout=5)
         self.assertEqual(self.error(not_json)[:2], (400, "invalid_request"))
         self.fake.enforce_models = False

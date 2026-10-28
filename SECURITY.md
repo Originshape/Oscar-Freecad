@@ -1,6 +1,6 @@
 # Security
 
-Report vulnerabilities privately to security@originshape.design (or through a GitHub private security advisory),
+Report vulnerabilities privately to hello@originshape.design (or through a GitHub private security advisory),
 not in public issues. We reply within five working days.
 
 What Oscar can do on your machine, and how it is limited:

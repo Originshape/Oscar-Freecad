@@ -322,6 +322,7 @@ class ChatLoop:
         """
         LIVE.callback = lambda: run.put("_alive")
         response = None
+        self.last_normalized = ""
         try:
             if run.abort.is_set():
                 return
@@ -343,6 +344,9 @@ class ChatLoop:
             if run.abort.is_set():
                 return
             status = getattr(response, "status_code", 200)
+            # what a gateway changed in the request: OriginShape's ``x-oscar-normalized`` says ``credits`` when it
+            # lowered max_tokens to what the account's credits pay for (the agent's cut-off note names that)
+            self.last_normalized = str((getattr(response, "headers", None) or {}).get("x-oscar-normalized") or "")
             run.put("_status", {"status": status})
             if status >= 400:
                 try:

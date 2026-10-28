@@ -308,13 +308,19 @@ def default_me(app: str) -> dict:
     }
 
 
+# Aliases the real gateway still serves but never lists in /v1/models (gateway/models_catalog.py): the retired
+# spellings. The fake's gateway accepts them too, so tests with an old profile keep working the way the server does.
+HIDDEN_MODELS = ("oscar-default", "oscar-fast")
+
+
 def default_models() -> dict:
-    """A /v1/models body: the retired aliases first (tests index them), then the lineup."""
+    """A /v1/models body as the real server sends it (gateway/models_catalog.py): the lineup only, ``origin1`` as the
+    default, a 1M context window and 64000 output tokens (audit 2026-10-28: this fake listed the retired aliases, so
+    tests could not see what a retired name gets)."""
     caps = {"vision": True, "tools": True, "reasoning": "adaptive", "prompt_caching": True}
-    names = {"oscar-default": "Oscar (best)", "oscar-fast": "Oscar (fast)", "origin1": "Origin1",
-             "origin1-super": "Origin1 Super"}
-    return {"default": "oscar-default", "data": [
-        {"id": alias, "display_name": names[alias], "context_window": 200000, "max_output_tokens": 64000,
+    names = {"origin1": "Origin1", "origin1-super": "Origin1 Super"}
+    return {"default": "origin1", "data": [
+        {"id": alias, "display_name": names[alias], "context_window": 1000000, "max_output_tokens": 64000,
          "capabilities": dict(caps)} for alias in names]}
 
 
@@ -783,7 +789,7 @@ class FakeOriginShape:
             if not isinstance(call.json, dict):
                 return self._json(400, envelope("invalid_request", "The request body is not a JSON object."))
             ids = [m.get("id") for m in self.models.get("data", []) if isinstance(m, dict)]
-            if call.json.get("model") not in ids:
+            if call.json.get("model") not in ids and call.json.get("model") not in HIDDEN_MODELS:
                 return self._json(400, envelope("model_unavailable", f"Use one of: {', '.join(map(str, ids))}."))
         available = (self.me.get("credits") or {}).get("available", 0)
         if self.enforce_account and isinstance(available, (int, float)) and available <= 0:

@@ -912,8 +912,9 @@ class WorkspaceConnector(QtCore.QObject):
         doc = open_task_document(job.task_id, job.title, new_task)
         profile = _params.account_profile()
         # The task's model as the browser picked it (the server checked it is one of its aliases, including models
-        # added since this Oscar was released): the gateway is asked for it.
-        model = job.model if _account.is_model_id(job.model) else profile.model
+        # added since this Oscar was released): the gateway is asked for it. A retired alias (a task made before the
+        # rename) runs on its tier's current one, which /v1/models lists with the model's real capabilities.
+        model = _params.account_model_alias(job.model) if _account.is_model_id(job.model) else profile.model
         profile = dataclasses.replace(profile, model=model)
         turn = GuiTurn(job, doc)
         panel._send(workspace=WorkspaceSend(text=job.text, profile=profile, turn=turn, attachments=list(files)))

@@ -14,7 +14,7 @@ FreeCAD model, with every step recorded and checked, through any LLM provider.
 ## Get set up
 
 ```bash
-git clone https://github.com/originshape/oscar-freecad && cd oscar-freecad
+git clone https://github.com/Originshape/Oscar-Freecad && cd Oscar-Freecad
 scripts/launch.sh                 # FreeCAD with this checkout, in a throw-away profile (.devhome/)
 python3 scripts/dev_install.py    # or link this checkout into your normal FreeCAD profile
 scripts/test.sh fast              # quick tests (about a minute)

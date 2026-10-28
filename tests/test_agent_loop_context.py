@@ -881,10 +881,10 @@ class StructuredPartPlaybookSelectionTest(unittest.TestCase):
     def test_a_generic_part_turn_carries_it_and_a_housing_turn_does_not(self):
         case = unittest.TestCase()
         del case                                    # (the turn-level checks live in SystemPromptTest)
-        names = {s.name for s in tools.specs(intent="generic_part")}
-        self.assertIn("apply_feature_plan", names)
-        names = {s.name for s in tools.specs(intent="bracket")}
-        self.assertNotIn("apply_feature_plan", names)  # hidden for the kit intents today: the playbook follows the tool
+        for intent in ("generic_part", "bracket", "fixture"):
+            self.assertIn("apply_feature_plan", {s.name for s in tools.specs(intent=intent)}, intent)
+        names = {s.name for s in tools.specs(intent="enclosure")}
+        self.assertNotIn("apply_feature_plan", names)  # build_enclosure builds a housing: the playbook follows the tool
 
 
 if __name__ == "__main__":
