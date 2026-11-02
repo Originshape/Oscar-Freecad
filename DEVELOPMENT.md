@@ -76,7 +76,8 @@ oscar/
 │                     provider_originshape.py (the OriginShape account);
 │                     provider_*.py: args, chat, check (connection test), probe, reasoning, stream, text, transport
 ├── auth/             the OriginShape sign-in (pure): config (server URL), discovery, pkce, loopback (browser),
-│                     device (code), keystore (keychain / file / memory), session (tokens, /v1/me), account
+│                     device (code), keystore (keychain / file / memory), session (tokens, /v1/me), account,
+│                     consent (the Terms)
 ├── connect.py        connect mode (pure): the /v1/connect client, the event batch, the polling Loop;
 │                     connect_gui.py: its FreeCAD side (starts workspace turns in the panel)
 ├── models.py         ModelCaps: what a model can do (API metadata, a seed table, runtime learning)
@@ -98,6 +99,7 @@ oscar/
 │                     line
 ├── panel_chats.py    rename and search the chats (⋯ menu); chatsearch.py: the matching rule
 ├── updates.py        is there a newer Oscar? (pure: GET /v1/plugin once a day; Oscar → Check for Updates…)
+├── records.py        chats on the OriginShape account (pure); consent_gui.py: the Terms prompt (auth/consent.py)
 └── chats.py  turnlog.py  attachments.py  bridge.py  commands.py  paths.py  fsretry.py
 tests/                unit and integration tests, scripted-model scenarios, gui_smoke.py
 scripts/              launch.sh, dev_install.py, test.sh
@@ -205,6 +207,8 @@ Oscar can use an OriginShape account instead of an API key of your own.
   the Server field is kept for next time but is ignored while the switch is off, so a server left in it never takes
   over a sign-in. A server without an AI model configured answers HTTP 501 `llm_not_configured`, which Oscar shows as
   "The OriginShape server has no AI model configured." and never retries.
+- **The Terms** (`auth/consent.py`, `consent_gui.py`): while the account hasn't accepted the current Terms, Oscar
+  asks for them and holds back a chat on the account (never another provider).
 - **Tests**: `tests/support/fake_originshape.py` and `tests/support/fake_workspace.py` stand in for the service on
   `127.0.0.1`.
 

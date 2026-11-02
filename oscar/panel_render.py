@@ -22,8 +22,8 @@ What lives here
 - the OriginShape account: ``account_badge`` / ``account_menu`` (the header badge and its menu, from the account
   state the panel keeps; an Oscar older than the server's minimum shows "Update Oscar"), ``account_card`` /
   ``account_card_html`` (the ``ACCOUNT`` cards: ``onboarding``, ``signed_out``, ``waitlisted``, ``no_credits``,
-  ``outdated``), ``account_problem_card`` (which card a failed turn's
-  ``account_problem`` payload calls for) and ``format_credits``.
+  ``outdated``, ``consent``), ``account_problem_card`` (which card a failed turn's
+  ``account_problem`` payload calls for), ``terms_pending`` and ``format_credits``.
 
 Every function that returns HTML escapes all payload text; colours arrive as parameters.
 """
@@ -43,7 +43,7 @@ __all__ = [
     "clip_text", "format_credits", "header_text", "heartbeat_text", "make_turn_meta", "md_to_html", "outcome_badge",
     "outcome_color", "parse_anchor", "parse_artifact_anchor", "plan_strip_html", "restore_card_html",
     "restore_thumbs", "split_build_summary", "step_row_html", "summary_block_html", "summary_card_html",
-    "thumb_url", "unique_call_id",
+    "terms_pending", "thumb_url", "unique_call_id",
 ]
 
 DETAIL_LIMIT = 12000   # characters of a tool result / script shown when a step row is expanded
@@ -1290,18 +1290,19 @@ def restore_card_html(title: str, messages: int, meta: Any, *, notice: str = "",
 # "latest_version": str, "min_version": str, "oscar_version": str, "error": str, "error_code": str}``. Any field may be
 # missing or of the wrong type: these functions never raise.
 
-ACCOUNT_CARD_KINDS = ("onboarding", "signed_out", "waitlisted", "no_credits", "outdated")
+ACCOUNT_CARD_KINDS = ("onboarding", "signed_out", "waitlisted", "no_credits", "outdated", "consent")
 
 # The only targets an account card may link to. They name an action of the panel; which page an action opens is
 # decided by the panel from its own configuration, never taken from the link.
 ACCOUNT_TARGETS = frozenset({
     "oscar://account/signin", "oscar://account/device", "oscar://account/buy", "oscar://account/subscribe",
     "oscar://account/refresh", "oscar://account/waitlist", "oscar://account/manage", "oscar://account/download",
-    "oscar://settings",
+    "oscar://account/consent", "oscar://settings",
 })
 
 # ``account_problem`` codes (``ProviderError.code`` of kind "auth" / "account") that have a card of their own
-_PROBLEM_CARDS = {"signed_out": "signed_out", "insufficient_credits": "no_credits", "waitlisted": "waitlisted"}
+_PROBLEM_CARDS = {"signed_out": "signed_out", "insufficient_credits": "no_credits", "waitlisted": "waitlisted",
+                  "terms_required": "consent"}
 _WARN_CARDS = ("signed_out", "waitlisted", "no_credits", "outdated")
 _URL_PROBLEMS = ("invalid_url", "insecure_url")
 
@@ -1379,15 +1380,25 @@ def account_badge(state: Any) -> tuple[str, str, str]:
     plan = _text(snapshot.get("plan_name") or snapshot.get("plan")).strip()
     if plan:
         parts.append(f"{plan} plan")
+    if terms_pending(snapshot):
+        parts.append("accept the Terms and the Privacy Policy to chat with your account")
     if error:
         parts.append(f"last check failed: {error}")
     return text, tone, " · ".join(parts)
 
 
+def terms_pending(snapshot: Any) -> bool:
+    """The account must accept OriginShape's current Terms before it can chat (``oscar.auth.consent.needed``, read
+    here without importing it: this module imports nothing of Oscar's)."""
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    return (snapshot.get("consent_known") is True and snapshot.get("terms_current") is not True
+            and _text(snapshot.get("status")) != "suspended")
+
+
 def account_menu(state: Any) -> list[tuple[str, str]]:
     """The badge menu as ``(action, label)`` rows: ``("", label)`` is a disabled line, ``("-", "")`` a separator.
-    The actions are ``signin``, ``device``, ``download`` (an update of Oscar is available or required), ``buy``,
-    ``manage``, ``refresh`` and ``signout``."""
+    The actions are ``signin``, ``device``, ``download`` (an update of Oscar is available or required), ``consent``
+    (the account has not accepted the current Terms), ``buy``, ``manage``, ``refresh`` and ``signout``."""
     if not isinstance(state, dict) or not state.get("known"):
         return [("", "Checking your OriginShape sign-in…"), ("-", ""), ("refresh", "Refresh")]
     update = [("download", f"Update Oscar to {latest}…" if latest else "Update Oscar…")
@@ -1399,6 +1410,8 @@ def account_menu(state: Any) -> list[tuple[str, str]]:
     rows = [("", f"Signed in as {email}" if email else "Signed in to OriginShape")]
     if _text(_account_snapshot(state).get("status")) == "waitlisted":
         rows.append(("", "Your account is on the waitlist"))
+    if terms_pending(_account_snapshot(state)):
+        rows.append(("consent", "Review the Terms…"))
     buy = ("subscribe", "Choose a plan…") if on_trial(_account_snapshot(state)) else ("buy", "Buy credits…")
     return rows + update + [("-", ""), buy, ("manage", "Manage account…"), ("refresh", "Refresh"),
                             ("-", ""), ("signout", "Sign out")]
@@ -1407,7 +1420,8 @@ def account_menu(state: Any) -> list[tuple[str, str]]:
 def account_card(kind: str, *, reason: str = "", returned: bool = False,
                  trial: bool = False) -> tuple[str, list[tuple[str, str]]]:
     """``(markdown, actions)`` of an ``ACCOUNT`` card. ``kind`` is one of ``ACCOUNT_CARD_KINDS`` (anything else:
-    ``("", [])``). ``reason="no_key"`` words the onboarding card for a profile that lacks its API key. ``returned``
+    ``("", [])``). ``reason="no_key"`` words the onboarding card for a profile that lacks its API key;
+    ``reason="declined"`` the ``consent`` card after the user left the Terms box unticked. ``returned``
     says the message the user sent is back in the input (its very first request failed). ``trial``: a trial account,
     which gets more credits with a plan (packs are for subscribers)."""
     back = " Your message is back in the input: send it again when you are ready." if returned else ""
@@ -1437,6 +1451,15 @@ def account_card(kind: str, *, reason: str = "", returned: bool = False,
         return ("**This Oscar is too old for your OriginShape account.** Update Oscar from FreeCAD's Addon Manager or "
                 "the download page, then restart FreeCAD." + back,
                 [("oscar://account/download", "Get the update"), ("oscar://account/refresh", "Check again"), own_key])
+    if kind == "consent":
+        review = ("oscar://account/consent", "Review and accept")
+        if reason == "declined":
+            return ("**Your OriginShape account can't be used for chat until you accept the Terms and the Privacy "
+                    "Policy.** Your own API key, or a local model such as Ollama, still works: pick its profile in the "
+                    "header, or add one in ⚙ Settings." + back, [review, own_key])
+        return ("**Accept OriginShape's Terms to chat with your account.** OriginShape keeps your chats, prompts, "
+                "files and feedback to run and improve the service. They are never used to train AI models." + back,
+                [review, own_key])
     return "", []
 
 

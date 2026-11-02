@@ -3,7 +3,8 @@
 Now and then, after a substantial turn, the panel asks "How did Oscar do on this one?" with five stars. A rating
 the user chooses to send goes to the OriginShape feedback endpoint (``POST /v1/feedback``, kind ``rating``) with
 what it rates: the prompt, Oscar's answer, the steps Oscar took (tool, title, whether it worked, how long it took)
-and, if the user leaves it ticked, a picture of the model. Nothing is sent unless the user presses Send.
+and, if the user leaves it ticked, a picture of the model. Nothing is sent unless the user presses Send. Its
+``context`` names the chat and the turn (``turn_context``), so the rating can be matched to the turn's record.
 
 When to ask (``should_ask``):
 
@@ -95,6 +96,19 @@ def step_record(name: str, title: str, ok: bool | None, seconds: float | None) -
     if seconds:
         record["seconds"] = round(max(0.0, float(seconds)), 1)
     return record
+
+
+_CHAT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}")
+
+
+def turn_context(chat_id: Any, turn: Any) -> dict[str, Any]:
+    """``{"chat_id", "turn"}`` for a rating's ``context``: the chat and the turn it rates, as the turn's record on the
+    OriginShape account names them (``oscar.records``). Empty when either is unknown."""
+    if not isinstance(chat_id, str) or not _CHAT_ID.fullmatch(chat_id):
+        return {}
+    if isinstance(turn, bool) or not isinstance(turn, int) or turn < 0:
+        return {}
+    return {"chat_id": chat_id, "turn": turn}
 
 
 def payload(facts: TurnFacts, stars: int, *, comment: str = "", image_png: str = "",

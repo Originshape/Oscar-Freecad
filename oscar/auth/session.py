@@ -13,7 +13,8 @@ token in memory only) or a personal API key (in the keystore, sent as the bearer
 * ``complete_sign_in(tokens)`` (after ``LoopbackSignIn`` / ``DeviceSignIn``), ``use_api_key(key)`` (checked with
   ``/v1/me`` before it is kept), ``sign_out()`` (best-effort revocation with a short timeout, then forget).
 * ``account(force=False)`` is the ``/v1/me`` snapshot, cached for ``SNAPSHOT_TTL_S``; a 401 refreshes and retries
-  once. ``cached_snapshot()`` never touches the network.
+  once. ``cached_snapshot()`` never touches the network. ``note_consent(consent)`` puts the answer of
+  ``POST /v1/me/consent`` into the cached snapshot (``oscar.auth.consent``), without asking ``/v1/me`` again.
 
 The module-level ``on_change`` hook (a callable or None, the same shape as ``netguard.on_permission_wait``) is
 called with one JSON string whenever the sign-in state or the snapshot changes. It is called on whichever thread
@@ -24,6 +25,7 @@ Network work blocks, so it belongs on a worker thread. ``has_session()`` and ``c
 first ``has_session()`` reads the keystore once (on macOS a short ``security`` subprocess).
 """
 
+import dataclasses
 import json
 import threading
 import time
@@ -31,7 +33,7 @@ from typing import Any, Callable
 
 from .. import turnlog as _turnlog
 from . import config, discovery, keystore
-from .account import AccountSnapshot, parse_me
+from .account import AccountSnapshot, consent_fields, parse_me
 from .keystore import KeystoreError, StoredCredential
 from .transport import (CLIENT_ID, SUSPENDED_MESSAGE, AuthError, Reply, Saved, SignedOut, TimeoutSpec, TokenSet,
                         api_error, clean_token, download, is_unavailable, oauth_error, request, revoke_quietly,
@@ -442,6 +444,23 @@ class AuthSession:
                 self._cred = StoredCredential(cred.kind, cred.secret, snapshot.email)
         if renamed:
             self._sync_store()
+        if not snapshot.same_state(previous):
+            self._changed("account")
+        return snapshot
+
+    def note_consent(self, consent: Any, *, email: str = "") -> AccountSnapshot | None:
+        """The cached snapshot with the account's ``consent`` object (the answer of ``POST /v1/me/consent``) in it; the
+        current Terms (``legal``) stay as they were. With ``email``, only that account's snapshot changes (a sign-in
+        as someone else meanwhile is left alone). No network; tells ``on_change`` when something changed. None without
+        a snapshot to change."""
+        if not isinstance(consent, dict):
+            return None
+        with self._state:
+            previous = self._snapshot
+            if previous is None or (email and previous.email != email):
+                return None
+            snapshot = dataclasses.replace(previous, **consent_fields(consent))
+            self._snapshot = snapshot
         if not snapshot.same_state(previous):
             self._changed("account")
         return snapshot

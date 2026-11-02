@@ -18,9 +18,10 @@ Every anchor the chat can contain goes through ``_on_anchor`` (the log browser n
   offered; the stars open a dialog and nothing is sent until the user presses Send;
 - ``oscar://account/<action>`` (the ``ACCOUNT`` cards): ``signin`` and ``device`` open Settings and start that
   sign-in (the user still approves it in the browser), ``buy`` / ``subscribe`` / ``manage`` / ``waitlist`` /
-  ``download`` open the account's own pages, ``refresh`` checks the account again; ``oscar://settings`` opens Settings. Which page opens comes
-  from the account's configuration, never from the link, and no link does anything destructive (signing out is a menu
-  entry only), so these are safe when the model writes them too.
+  ``download`` open the account's own pages, ``refresh`` checks the account again, ``consent`` opens the Terms
+  prompt (nothing is accepted until the user presses its Continue); ``oscar://settings`` opens Settings. Which page
+  opens comes from the account's configuration, never from the link, and no link does anything destructive (signing
+  out is a menu entry only), so these are safe when the model writes them too.
 
 The mixin relies on the host panel for ``blocks``, ``_busy``, ``_send_text``, ``_resume_text``, ``_artifacts``,
 ``_plan_collapsed``, ``_refresh_plan_strip``, ``_on_notice``, ``_flash_status``, ``_open_settings`` and
@@ -39,7 +40,8 @@ from .panel_render import classify_file_link, parse_artifact_anchor
 
 _ARTIFACT_KINDS = {"open-doc": "fcstd", "open-notes": "notes", "open-rebuild": "rebuild",
                    "open-provenance": "provenance"}
-_ACCOUNT_ACTIONS = frozenset({"signin", "device", "buy", "subscribe", "manage", "waitlist", "download", "refresh"})
+_ACCOUNT_ACTIONS = frozenset({"signin", "device", "buy", "subscribe", "manage", "waitlist", "download", "refresh",
+                              "consent"})
 _MAX_COPY_BYTES = 2_000_000
 
 

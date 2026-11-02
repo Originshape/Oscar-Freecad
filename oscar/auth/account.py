@@ -4,6 +4,8 @@
   snapshot (``AuthSession.account``). ``plugin_update(snapshot)`` compares this Oscar with the server's
   ``latest_version`` / ``min_version``: an update is ``"available"``, or ``"required"`` (the server no
   longer works with this Oscar; ``require_supported`` raises ``AuthError`` with code ``PLUGIN_OUTDATED``).
+  ``consent`` / ``legal`` (which Terms the account accepted, which are current, and their pages) become the
+  ``consent_known`` ... ``link_privacy`` fields (``consent_fields``); ``oscar.auth.consent`` reads them.
 * ``ModelCatalog``: parsed from ``GET /v1/models``. ``fetch_models()`` fetches and caches it per API URL;
   the pickers, the capability table (``oscar.models``) and workspace jobs read it, so a model the server adds works
   in FreeCAD without a new Oscar.
@@ -85,6 +87,13 @@ class AccountSnapshot:
     link_download: str = ""
     plugin_latest_version: str = ""
     plugin_min_version: str = ""
+    consent_known: bool = False      # /v1/me said which Terms the account accepted (a server from before them doesn't)
+    terms_version: str = ""          # the version of the Terms the account accepted ("" = none)
+    terms_accepted_at: str = ""
+    terms_current: bool = False      # the account accepted the current version (legal_terms_version)
+    legal_terms_version: str = ""    # the current version of the Terms
+    link_terms: str = ""
+    link_privacy: str = ""
     fetched_at: float = 0.0
 
     @property
@@ -164,8 +173,28 @@ def parse_me(data: Any, *, fetched_at: float | None = None) -> AccountSnapshot:
         link_download=_link(links.get("download")),
         plugin_latest_version=_text(plugin.get("latest_version"), 32),
         plugin_min_version=_text(plugin.get("min_version"), 32),
+        **consent_fields(data.get("consent"), data.get("legal")),
         fetched_at=time.time() if fetched_at is None else fetched_at,
     )
+
+
+def consent_fields(consent: Any, legal: Any = None) -> dict[str, Any]:
+    """The ``AccountSnapshot`` fields of ``/v1/me``'s ``consent`` and ``legal`` objects. A missing or mistyped
+    ``consent`` is a server from before the Terms: ``consent_known`` is False. ``legal=None`` with a ``consent``
+    leaves the legal fields out (the answer of ``POST /v1/me/consent`` carries ``consent`` only)."""
+    known = isinstance(consent, dict)
+    consent = consent if known else {}
+    values: dict[str, Any] = {
+        "consent_known": known,
+        "terms_version": _text(consent.get("terms_version"), 64),
+        "terms_accepted_at": _text(consent.get("terms_accepted_at"), 64),
+        "terms_current": consent.get("terms_current") is True,
+    }
+    if legal is not None or not known:
+        legal = legal if isinstance(legal, dict) else {}
+        values.update(legal_terms_version=_text(legal.get("terms_version"), 64),
+                      link_terms=_link(legal.get("terms_url")), link_privacy=_link(legal.get("privacy_url")))
+    return values
 
 
 # -- this Oscar against the server's versions ---------------------------------------------------------------------

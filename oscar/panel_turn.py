@@ -18,6 +18,10 @@ additive ones feed a ``panel_render.TurnView`` and the widgets built here:
   matching ``ACCOUNT`` card replaces the raw "Provider error: ..." line (``panel_render.account_problem_card``), and
   when the turn's very first request failed the message goes back into the input (``_give_back_turn``).
 
+When the turn has ended (answered, failed or stopped; not when its message went back to the input) and it ran on the
+OriginShape account, ``_record_turn`` hands it to ``oscar.records`` (``records.applies``: only once the account
+accepted the current Terms, never for another provider or a workspace turn).
+
 Thumbnails: each snapshot PNG is decoded once into ``self._thumbs`` and served to the log document by URL
 (``panel_blocks.LogBrowser``); the registration is repeated after every ``setHtml``.
 
@@ -68,7 +72,8 @@ class TurnMixin:
         self._act_now_armed = True
         self._carry_images: list[str] = []              # images of a steered message that could not be delivered
         self._turn_account: dict | None = None           # this turn's account_problem payload, decoded
-        self._turn_sent: dict | None = None              # what _send put in (for _give_back_turn)
+        self._turn_sent: dict | None = None              # what _send put in (for _give_back_turn and the record)
+        self._turn_ref: dict | None = None               # {"chat_id", "turn"} of the turn that ended last (ratings)
 
     def _build_flow_widgets(self) -> None:
         """The plan strip, the artifacts strip, the heartbeat row (the host places them in its layout)."""
@@ -740,13 +745,63 @@ class TurnMixin:
         self._update_revert_flags()
         self._set_status("")
         self._set_busy(False)
+        queued = list(self._queued_blocks)
         self._settle_queued(unsent, ok)
         self._finish_turn_widgets()
+        # the turn a rating of it names (rating_gui), and its record on the OriginShape account (records)
+        self._turn_ref = None if given_back or not sent else {"chat_id": sent.get("chat_id"), "turn": sent.get("turn")}
+        if not given_back:
+            steered = [b.steer_text or b.text for b in queued if b in self.blocks]   # delivered while the turn ran
+            self._record_turn(sent, ok, text, outcome, card, steered)
         if ok and answer and not given_back:
             self._maybe_offer_rating(answer, outcome, card)
         self._render()
         if problem or (sent and sent.get("account")):
             self._refresh_account(force=True)   # credits were spent, or the account is why the turn failed
+
+    def _record_turn(self, sent: dict | None, ok: bool, text: str, outcome: str, card: Block | None,
+                     steered: list[str]) -> None:
+        """Hand the finished turn to ``oscar.records`` (sent on its own thread) when it ran on the OriginShape account
+        and the account accepted the current Terms (``records.applies``): the prompt as typed (and what was typed to
+        steer it), the reply, the steps, the files attached to the message and those the turn wrote in the project
+        folder. Never raises: a record is never a reason for the chat to fail."""
+        if not sent:
+            return
+        try:
+            from . import records
+
+            state = self._account_state()
+            if not records.applies(account_profile=bool(sent.get("account")), workspace=bool(sent.get("workspace")),
+                                   state=state):
+                return
+            session = self._current_session()
+            project = self._project_of(session)
+            root = str(getattr(project, "root", "") or "")
+            root = root if root and os.path.isdir(root) else ""
+            started = float(sent.get("started_at") or 0.0)
+            prompt = "\n\n".join(t.strip() for t in [str(sent.get("typed") or ""), *steered] if t and t.strip())
+            record = records.TurnRecord(
+                chat_id=str(sent.get("chat_id") or ""), turn=sent.get("turn"), prompt=prompt, reply=text or "",
+                steps=self._record_steps(card), model=str(sent.get("model") or ""),
+                project=os.path.basename(root) if root else "",
+                title=str(session.get("title") or "") if session is not None else "", ok=bool(ok),
+                stopped=outcome == "stopped", started_at=started, finished_at=time.time(),
+                attachments=list(sent.get("pending") or []),
+                outputs=records.output_files(root, started) if root else [])
+            records.record_turn(record, account_profile=True, workspace=False, state=state)
+        except Exception as e:  # noqa: BLE001
+            self._log_panel_error("record_turn", e)
+
+    def _record_steps(self, card: Block | None) -> list:
+        """The turn's steps for its record: the step rows the worker described (``TurnView``), else the card's rows."""
+        from . import records
+
+        view = self._turn_view
+        if view is not None and view.steps:
+            return [records.Step(v.name or "tool", v.title or v.name, None if v.running else bool(v.ok), v.code,
+                                 v.script_path, v.text) for v in view.steps]
+        rows = [s for s in card.steps if not s.is_thought and not s.plain] if card is not None else []
+        return [records.Step(s.name or "tool", s.summary, s.ok, "", "", s.detail) for s in rows]
 
     def _maybe_offer_rating(self, answer: str, outcome: str, card: Block | None) -> None:
         """Now and then, after a substantial turn, the "How did Oscar do?" card (``rating_gui``)."""

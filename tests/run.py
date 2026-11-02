@@ -60,6 +60,8 @@ PURE_MODULES = (
     "test_context_guard",
     # sampled star ratings of turns
     "test_rating",
+    # OriginShape's Terms (the consent prompt's logic) and the FreeCAD chat records kept on the account
+    "test_consent", "test_records",
     # is there a newer Oscar? (the public update check)
     "test_updates",
     # the pen's region line and the chat search

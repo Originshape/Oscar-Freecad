@@ -13,6 +13,8 @@ lazily and only to read the Server preference and to find the settings folder.
 * ``session``: ``AuthSession`` / ``get_session()``, with access tokens on demand, API keys, sign-out and ``/v1/me``.
 * ``account``: ``AccountSnapshot``, ``fetch_me()``, ``fetch_models()``, ``cached_model()``, and
   ``plugin_update()`` (this Oscar against the server's latest and minimum versions).
+* ``consent``: has the account accepted OriginShape's current Terms and Privacy Policy, the prompt's logic, and
+  ``accept()`` (``POST /v1/me/consent``).
 * ``transport``: the shared HTTP door, the error types, ``TokenSet``, and ``error_details()`` /
   ``LLM_NOT_CONFIGURED_MESSAGE`` for the API's error envelope.
 

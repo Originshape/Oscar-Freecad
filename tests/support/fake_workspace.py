@@ -141,7 +141,7 @@ class FakeWorkspace(FakeOriginShape):
                     ("POST", "done"): "route_connect_model_done"}.get((method, delivery["what"]))
         match = _TASK_PATH.match(path)
         if match is None:
-            return None
+            return super().route_for(method, path)   # the chat records
         return {("POST", "events"): "route_connect_events", ("PUT", "files"): "route_connect_upload",
                 ("POST", "finish"): "route_connect_finish"}.get((method, match["what"]))
 

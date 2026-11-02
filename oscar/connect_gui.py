@@ -78,6 +78,7 @@ BLOCKER_TEXT = {
     "server": "The OriginShape server set in Oscar’s settings can’t be used.",
     "no_profile": "Oscar in FreeCAD has no chat profile.",
     "outdated": "Oscar in FreeCAD is older than OriginShape supports. Update Oscar, then restart FreeCAD.",
+    "consent": "Accept OriginShape’s Terms and Privacy Policy before Oscar can build: in FreeCAD, or on the website.",
 }
 
 _current: WorkspaceConnector | None = None

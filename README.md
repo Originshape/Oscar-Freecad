@@ -109,8 +109,12 @@ Create an account at [app.originshape.design](https://app.originshape.design), t
    account…**, **Refresh** and **Sign out**. Signing in makes the **OriginShape** profile the active one; pick its
    model in Settings → AI model, from the models your account offers (such as **Origin1**, recommended for most
    work, and **Origin1 Super**, the most capable model for CAD work), each with a line on what it is for.
+4. Oscar then asks you to accept OriginShape's **Terms** and **Privacy Policy** (the box is ticked; **Continue**
+   accepts). Until you accept, the OriginShape account can't be used for chat; your own providers keep working.
 
-Every request goes to OriginShape's server, which forwards it to the AI model and counts the credits it costs. A new
+When you use an OriginShape account, OriginShape keeps your chats, prompts, files and feedback to run and improve the
+service. They are never used to train AI models. Every request goes to OriginShape's server, which forwards it to the
+AI model and counts the credits it costs. A new
 account may start on the waitlist: Oscar then shows a waitlist card instead of starting a chat turn, and you can use
 your own provider meanwhile. When the credits run out, Oscar shows a card with **Buy credits**; when that happens
 before the turn did anything, your message goes back in the input.

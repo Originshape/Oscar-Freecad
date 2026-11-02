@@ -78,18 +78,32 @@ def chats_dir() -> str:
 
 def new_session(title: str = "") -> dict[str, Any]:
     """A fresh, empty session dict: ``id`` (``YYYYmmdd-HHMMSS-<6 hex>``), ``title`` (``New chat`` by default),
-    ``created`` / ``updated``, an empty ``history`` and the optional keys ``project_dir`` / ``ledger`` (None) and
-    ``blocks_meta`` (``[]``) that the panel fills."""
+    ``created`` / ``updated``, an empty ``history``, ``turns`` (0) and the optional keys ``project_dir`` / ``ledger``
+    (None) and ``blocks_meta`` (``[]``) that the panel fills."""
     return {
         "id": time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
         "title": title or "New chat",
         "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "history": [],
+        "turns": 0,            # turns sent in this chat so far (next_turn)
         "project_dir": None,   # absolute folder of the chat's Project (oscar.project), set by the panel
         "ledger": None,        # the C5 ledger dict, set by the panel from plan_changed / the turn result
         "blocks_meta": [],     # compact JSON list of the rendered cards for the restore card
     }
+
+
+def next_turn(session: dict[str, Any]) -> int:
+    """The index (0, 1, 2 ...) of the turn the user is sending now in ``session``, counted for good: ``turns`` is
+    saved with the chat, so an index is never given twice, also after the chat was cleared or a turn reverted (an
+    OriginShape chat record is keyed by it, ``oscar.records``). A chat saved before the count existed starts after the
+    prompts its history holds. Call it before the new message joins the history."""
+    count = session.get("turns")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        count = sum(1 for m in session.get("history") or ()
+                    if getattr(m, "role", "") == "user" and not getattr(m, "tool_results", None))
+    session["turns"] = count + 1
+    return count
 
 
 def _clip_result(content: str) -> str:
@@ -226,6 +240,9 @@ def _payload_of(session: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]
         payload["blocks_meta"] = session["blocks_meta"]
     if session.get("named"):
         payload["named"] = True   # the user named the chat (panel_chats.rename): nothing renames it again
+    turns = session.get("turns")
+    if isinstance(turns, int) and not isinstance(turns, bool) and turns > 0:
+        payload["turns"] = turns   # next_turn: never reset, so a turn index is never given twice
     meta = {"id": session["id"], "title": session["title"], "updated": session["updated"],
             "messages": len(messages)}
     return payload, meta
@@ -238,7 +255,7 @@ def save(session: dict[str, Any]) -> None:
     two saves never interleave and an older snapshot can never be written AFTER a newer one (the file only
     moves forward), and every write goes to its own temp file. The history is serialized from a copy, so a
     concurrent append cannot raise "list changed size during iteration". Besides id / title / created / updated /
-    messages the optional keys ``project_dir``, ``ledger`` and ``blocks_meta`` are stored when set. Only the
+    messages the optional keys ``project_dir``, ``ledger``, ``blocks_meta`` and ``turns`` are stored when set. Only the
     newest 4 tool-result images are written and tool results over 12000 characters are clipped in the FILE;
     ``session["history"]`` itself is never modified (apart from ``session["updated"]``).
     """
@@ -277,8 +294,8 @@ def load(session_id: str) -> dict[str, Any] | None:
     decoded: that is a damaged file, not an empty chat; with at least one readable message the readable ones are kept).
 
     The result carries ``project_dir`` (None when absent), ``ledger`` (None when absent),
-    ``blocks_meta`` (``[]`` when absent) and ``named`` (the user named the chat; False when absent); chat files
-    written by older builds load unchanged. Every field is
+    ``blocks_meta`` (``[]`` when absent), ``named`` (the user named the chat; False when absent) and ``turns`` (only
+    when stored: see ``next_turn``); chat files written by older builds load unchanged. Every field is
     type-checked: a hand-edited or damaged file gives the default for a wrong-typed value instead of an error
     later in the panel, and an ``id`` that is not a plain file name (a path, ``..``) is replaced by the name of
     the file it was read from, so ``save`` / ``delete`` can never leave the chats folder.
@@ -302,7 +319,8 @@ def load(session_id: str) -> dict[str, Any] | None:
     project_dir = data.get("project_dir")
     ledger = data.get("ledger")
     meta = data.get("blocks_meta")
-    return {
+    turns = data.get("turns")
+    loaded = {
         "id": session_id,   # the file name is the identity: a copied chat file must not alias another chat's file
         "title": _text_field(data.get("title"), "Chat"),
         "created": data.get("created") if isinstance(data.get("created"), str) else "",
@@ -313,6 +331,9 @@ def load(session_id: str) -> dict[str, Any] | None:
         "blocks_meta": meta if isinstance(meta, list) else [],
         "named": data.get("named") is True,
     }
+    if isinstance(turns, int) and not isinstance(turns, bool) and turns >= 0:
+        loaded["turns"] = turns   # absent from older chats: next_turn counts their prompts
+    return loaded
 
 
 def is_unused(session_id: str) -> bool:

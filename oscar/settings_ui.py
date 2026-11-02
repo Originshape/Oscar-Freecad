@@ -95,7 +95,7 @@ from .auth import session as _auth_session
 from .auth.device import DeviceSignIn
 from .auth.loopback import LoopbackSignIn
 from .auth.transport import AuthError, SignedOut
-from .panel_render import account_balance, format_credits, on_trial
+from .panel_render import account_balance, format_credits, on_trial, terms_pending
 from .params import Profile
 
 # Personal OriginShape API keys are turned off on the server for now (API_KEYS_ENABLED): the "Use an OriginShape API
@@ -1553,6 +1553,9 @@ class SettingsDialog(QtWidgets.QDialog):
                 latest = str(state.get("latest_version") or "")
                 notice, tone = (f"Oscar {latest} is available (this is {__version__}). Update it from "
                                 "FreeCAD's Addon Manager."), "muted"
+            if update != "required" and terms_pending(snapshot):   # the panel asks (consent_gui), once this is closed
+                notice, tone = ("Accept OriginShape's Terms and Privacy Policy to chat with your account: the Oscar "
+                                "panel asks you for it."), "error"
             label = self._account_form.labelForField(self.account_credits)
             for widget in (label, self.account_credits):
                 if widget is not None:

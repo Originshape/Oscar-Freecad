@@ -66,6 +66,8 @@ def _context(panel: Any) -> dict[str, Any]:
         context["source"] = "workspace"
     else:
         context["source"] = "freecad"
+    ref = getattr(panel, "_turn_ref", None) or {}   # the turn that just ended (panel_turn._on_turn_finished)
+    context.update(rating.turn_context(ref.get("chat_id"), ref.get("turn")))
     return context
 
 

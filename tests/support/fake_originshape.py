@@ -39,6 +39,16 @@ ROUTES
   GET  /v1/models                                 ``models`` (the /v1/models shape) for a valid bearer, else 401 envelope
   GET  /v1/plugin                                 ``plugin`` (latest / min version, download link): public, no bearer
   POST /v1/llm/anthropic/v1/messages              the gateway (below): the checks, then the scripted replies
+  POST /v1/me/consent                             accept the Terms: 403 forbidden for a personal API key (only Oscar's
+                                                  own sign-in or the website may), 400 invalid_request unless ``accept_terms`` is
+                                                  true, 409 conflict for a ``terms_version`` that isn't the current one,
+                                                  else 200 {"consent"}; ``me`` follows (``consent_posts``: the bodies)
+  PUT  /v1/freecad/chats/{id}/turns/{n}           a chat record (``chat_turns[(id, n)]``, replaced when sent again) |
+  PUT  /v1/freecad/chats/{id}/files?name&kind&turn   a file (``chat_files``; 201, or 200 for bytes already kept; 411
+                                                  without Content-Length, 413 past ``file_limit`` / ``stl_limit``).
+                                                  Both: 404 while ``me`` has no ``consent`` (a server from before the
+                                                  Terms), 403 terms_required until the current Terms are accepted,
+                                                  422 for an id, a turn, a name or a kind out of range
   anything else                                   404 with the API's error envelope
 
 A valid bearer is an issued, unexpired access token whose grant is not revoked, or a key in ``api_keys`` (as
@@ -56,7 +66,8 @@ SCRIPTING (plain attributes; change them at any time)
   device_auto = None | "approve" | "deny"     decide automatically after ``device_auto_after`` pending polls
   me = {...}                                  the /v1/me body; ``set_account(status=, balance=, available=, low=,
                                               email=, plan=, plan_name=)`` edits the usual fields (the gateway
-                                              obeys them, see GATEWAY)
+                                              obeys them, see GATEWAY). It has no ``consent`` / ``legal`` (a server
+                                              from before the Terms) until ``set_consent(accepted=, current=)``
   models = {...}                              the /v1/models body
   metadata_overrides = {}                     merged over the discovery document (a value of None deletes the key)
   delays = {"/oauth/token": 0.3}              sleep BEFORE handling a path (to overlap concurrent requests)
@@ -95,11 +106,13 @@ GATEWAY  (POST /v1/llm/anthropic/v1/messages)
 STATE you can assert on
   calls, calls_to(path), gateway_requests, counts, grants (id -> Grant), revoked_tokens, api_keys,
   devices (user_code -> Device), refresh_state(token) -> "active" | "used" | "revoked" | "unknown",
-  grant_of(refresh_token) -> Grant | None
+  grant_of(refresh_token) -> Grant | None, consent_posts (bodies), chat_turns ((chat id, turn) -> body),
+  chat_files (dicts: chat, name, kind, turn, size, sha256, content_length, stored)
 
 COUNTER KEYS
   "discovery", "jwks", "authorize", "token:authorization_code", "token:refresh_token", "token:device_code",
-  "token:other", "device_authorization", "revoke", "me", "models", "gateway", "unauthorized", "not_found", "fault"
+  "token:other", "device_authorization", "revoke", "me", "models", "gateway", "unauthorized", "not_found", "fault",
+  "consent", "chat_turn", "chat_file"
 """
 
 import base64
@@ -133,10 +146,13 @@ _ERROR_TYPES = {
     "suspended": "permission_error", "insufficient_credits": "billing_error", "rate_limited": "rate_limit_error",
     "not_found": "not_found_error", "invalid_request": "invalid_request_error",
     "model_unavailable": "invalid_request_error", "conflict": "invalid_request_error", "upstream_error": "api_error",
-    "llm_not_configured": "api_error",
+    "llm_not_configured": "api_error", "terms_required": "permission_error",
 }
-_REASONS = {200: "OK", 302: "Found", 400: "Bad Request", 401: "Unauthorized", 402: "Payment Required",
-            403: "Forbidden", 404: "Not Found", 409: "Conflict", 429: "Too Many Requests",
+_CHAT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}")
+_CHAT_PATH_RE = re.compile(r"^/v1/freecad/chats/(?P<chat>[^/]+)/(?:turns/(?P<turn>[^/]+)|(?P<files>files))$")
+_REASONS = {200: "OK", 201: "Created", 302: "Found", 400: "Bad Request", 401: "Unauthorized", 402: "Payment Required",
+            403: "Forbidden", 404: "Not Found", 409: "Conflict", 411: "Length Required", 413: "Payload Too Large",
+            422: "Unprocessable Entity", 429: "Too Many Requests",
             500: "Internal Server Error", 501: "Not Implemented", 502: "Bad Gateway", 503: "Service Unavailable",
             529: "Overloaded"}
 LLM_NOT_CONFIGURED_MESSAGE = "The OriginShape server has no AI model configured."
@@ -365,6 +381,8 @@ class FakeOriginShape:
         self.me: dict = {}
         self.models: dict = default_models()
         self.plugin: dict = {"latest_version": "0.1.0", "min_version": "0.1.0", "download_url": ""}
+        self.file_limit = 50_000_000      # PUT .../files: 413 past this (an .stl: past stl_limit)
+        self.stl_limit = 100_000_000
         # state
         self.calls: list[RecordedCall] = []
         self.gateway_requests: list[RecordedCall] = []
@@ -373,6 +391,9 @@ class FakeOriginShape:
         self.devices: dict[str, Device] = {}
         self.revoked_tokens: list[str] = []
         self.api_keys: set[str] = set()
+        self.consent_posts: list = []
+        self.chat_turns: dict[tuple[str, int], dict] = {}
+        self.chat_files: list[dict] = []
         self._codes: dict[str, _Code] = {}
         self._refresh: dict[str, _Refresh] = {}
         self._access: dict[str, tuple[str, float]] = {}
@@ -469,6 +490,22 @@ class FakeOriginShape:
                 self.me["org"]["plan"] = plan
             if plan_name is not None:
                 self.me["org"]["plan_name"] = plan_name
+
+    def set_consent(self, *, accepted: str | None = "2026-11-02", current: str = "2026-11-02",
+                    marketing: bool | None = None) -> None:
+        """Give /v1/me the ``consent`` and ``legal`` objects of a server that knows the Terms: the account accepted
+        version ``accepted`` (None: none yet) and ``current`` is the version in force."""
+        with self.lock:
+            self.me["consent"] = {"terms_version": accepted, "terms_accepted_at": "2026-11-01T09:00:00Z" if accepted
+                                  else None, "terms_current": accepted is not None and accepted == current,
+                                  "marketing_emails": marketing}
+            self.me["legal"] = {"terms_version": current, "terms_url": self.url + "/terms",
+                                "privacy_url": self.url + "/privacy"}
+
+    def _terms_current(self) -> bool:
+        consent = self.me.get("consent") or {}
+        return consent.get("terms_version") == (self.me.get("legal") or {}).get("terms_version") and bool(
+            consent.get("terms_version"))
 
     def fail(self, path: str, status: int, body: Any = None, *, method: str | None = None,
              headers: dict | None = None, times: int = 1) -> None:
@@ -774,6 +811,83 @@ class FakeOriginShape:
         body["download_url"] = body["download_url"] or self.url + "/download"
         return self._json(200, body)
 
+    def route_consent(self, call: RecordedCall) -> tuple:
+        self.counts["consent"] += 1
+        if not self._bearer(call.headers):
+            return self._unauthorized()
+        body = call.json if isinstance(call.json, dict) else {}
+        self.consent_posts.append(copy.deepcopy(call.json))
+        auth = call.headers.get("authorization", "")
+        token = auth[7:].strip() if auth.lower().startswith("bearer ") else call.headers.get("x-api-key", "").strip()
+        if token in self.api_keys:
+            return self._json(403, envelope("forbidden", "An API key can't accept the Terms. Accept them on the "
+                                            "OriginShape website, or sign in to Oscar with your OriginShape account."))
+        if "consent" not in self.me:
+            return self._json(404, envelope("not_found", "Not found."))
+        if body.get("accept_terms") is not True:
+            return self._json(400, envelope("invalid_request", "accept_terms must be true."))
+        current = (self.me.get("legal") or {}).get("terms_version")
+        if body.get("terms_version") != current:
+            return self._json(409, envelope("conflict", "These are not the current Terms."))
+        consent = self.me["consent"]
+        consent.update(terms_version=current, terms_accepted_at="2026-11-02T10:00:00Z", terms_current=True)
+        if body.get("marketing_emails") is not None:
+            consent["marketing_emails"] = bool(body["marketing_emails"])
+        return self._json(200, {"consent": copy.deepcopy(consent)})
+
+    def _records_refusal(self, call: RecordedCall) -> tuple | None:
+        """The answer of the first check of a chat record route that fails, or None."""
+        if not self._bearer(call.headers):
+            return self._unauthorized()
+        if "consent" not in self.me:   # a server from before the Terms has no such route
+            self.counts["not_found"] += 1
+            return self._json(404, envelope("not_found", "Not found."))
+        status = (self.me.get("user") or {}).get("status")
+        if status in ("waitlisted", "suspended"):
+            return self._json(403, envelope(status, f"Your account is {status}."))
+        if not self._terms_current():
+            return self._json(403, envelope("terms_required", "Accept the current Terms first."))
+        return None
+
+    def route_chat_turn(self, call: RecordedCall) -> tuple:
+        self.counts["chat_turn"] += 1
+        refusal = self._records_refusal(call)
+        if refusal is not None:
+            return refusal
+        match = _CHAT_PATH_RE.match(call.path)
+        chat, turn = match["chat"], match["turn"]
+        if not _CHAT_ID_RE.fullmatch(chat) or not turn.isdigit() or int(turn) > 100_000:
+            return self._json(422, envelope("invalid_request", "chat id or turn out of range"))
+        body = call.json
+        if not isinstance(body, dict) or not isinstance(body.get("prompt"), str) or len(body["prompt"]) > 100_000:
+            return self._json(422, envelope("invalid_request", "bad record"))
+        self.chat_turns[(chat, int(turn))] = copy.deepcopy(body)
+        return self._json(200, {"ok": True})
+
+    def route_chat_file(self, call: RecordedCall) -> tuple:
+        self.counts["chat_file"] += 1
+        refusal = self._records_refusal(call)
+        if refusal is not None:
+            return refusal
+        chat = _CHAT_PATH_RE.match(call.path)["chat"]
+        name, kind = call.query.get("name", ""), call.query.get("kind", "")
+        if not _CHAT_ID_RE.fullmatch(chat) or not 1 <= len(name) <= 255 or kind not in ("attachment", "output"):
+            return self._json(422, envelope("invalid_request", "chat id, name or kind out of range"))
+        if "content-length" not in call.headers:
+            return self._json(411, envelope("length_required", "Send a Content-Length."))
+        limit = self.stl_limit if name.lower().endswith(".stl") else self.file_limit
+        if len(call.raw) > limit:
+            return self._json(413, envelope("too_large", "The file is too large."))
+        digest = hashlib.sha256(call.raw).hexdigest()
+        known = next((f for f in self.chat_files if f["sha256"] == digest and f["stored"]), None)
+        turn = call.query.get("turn")
+        self.chat_files.append({"chat": chat, "name": name, "kind": kind, "turn": int(turn) if turn else None,
+                                "size": len(call.raw), "sha256": digest, "stored": known is None,
+                                "content_length": int(call.headers["content-length"])})
+        answer = {"id": (known or {}).get("id") or secrets.token_hex(8), "sha256": digest, "size": len(call.raw)}
+        self.chat_files[-1]["id"] = answer["id"]
+        return self._json(200 if known else 201, answer)
+
     def _gateway_refusal(self, call: RecordedCall) -> tuple | None:
         """The answer of the first server check that fails (after the bearer), or None."""
         user, links = self.me.get("user") or {}, self.me.get("links") or {}
@@ -829,9 +943,12 @@ class FakeOriginShape:
         return item.status, headers, item.body, item.content_type
 
     def route_for(self, method: str, path: str) -> str | None:
-        """The route of a path that ``ROUTES`` can't name exactly (one with an id in it); a subclass adds them
-        (``fake_workspace.FakeWorkspace``). None: 404."""
-        return None
+        """The route of a path that ``ROUTES`` can't name exactly (one with an id in it): the chat records here, more
+        in a subclass (``fake_workspace.FakeWorkspace``, which falls back to this one). None: 404."""
+        match = _CHAT_PATH_RE.match(path) if method == "PUT" else None
+        if match is None:
+            return None
+        return "route_chat_file" if match["files"] else "route_chat_turn"
 
     ROUTES = {
         ("GET", "/.well-known/oauth-authorization-server"): "route_discovery",
@@ -841,6 +958,7 @@ class FakeOriginShape:
         ("POST", "/oauth/device_authorization"): "route_device_authorization",
         ("POST", "/oauth/revoke"): "route_revoke",
         ("GET", "/v1/me"): "route_me",
+        ("POST", "/v1/me/consent"): "route_consent",
         ("GET", "/v1/models"): "route_models",
         ("GET", "/v1/plugin"): "route_plugin",
         ("POST", GATEWAY_PATH): "route_gateway",

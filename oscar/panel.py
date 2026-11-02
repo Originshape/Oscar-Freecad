@@ -25,9 +25,12 @@ The OriginShape account: the badge before ⚙ reads *Sign in* / *42 credits* / *
 process-wide ``settings_ui.AccountHub`` (``on_change`` of the sign-in plus a coalesced background ``/v1/me``), refreshed
 when the panel opens, on a profile change, after Settings closes, at the end of a turn and on sign-in; nothing here
 touches the network. The send gate uses local facts only: the account profile without a sign-in gets the onboarding
-card instead of a turn, a waitlisted account (fresh snapshot) the waitlist card; everything else goes to the server,
-which decides about credits. A failed turn's ``account_problem`` (``AgentWorker``) shows the matching card instead of
-the raw provider error, and when the turn's very first request failed the typed message goes back to the input.
+card instead of a turn, a waitlisted account (fresh snapshot) the waitlist card, an account that has not accepted the
+current Terms the consent card and prompt (``consent_gui``, which also asks once after a sign-in); everything else goes
+to the server, which decides about credits. A failed turn's ``account_problem`` (``AgentWorker``) shows the matching
+card instead of the raw provider error, and when the turn's very first request failed the typed message goes back to
+the input. A finished turn on the account is recorded on OriginShape once the Terms are accepted
+(``panel_turn._record_turn``, ``oscar.records``).
 
 Dock geometry follows the Help workbench pattern: persisted into user
 parameters on dockLocationChanged, restored on creation, deduplicated by
@@ -48,10 +51,11 @@ from PySide import QtCore, QtGui, QtWidgets
 
 from . import __version__
 from . import attachments as _attach
-from . import panel_chats, panel_markup, paths
+from . import consent_gui, panel_chats, panel_markup, paths
 from . import params as _params
 from . import settings_ui
 from .agent import AgentWorker
+from .auth import consent as _consent
 from .panel_anchors import AnchorMixin
 from .panel_blocks import (  # noqa: F401 - re-exported: tests and gui_smoke import these from oscar.panel
     _BLOCK_SEQ, _DETAIL_LIMIT, Block, LogBrowser, Step, ThumbCache, _accent, _font_size, _fg, _muted, _text_color)
@@ -584,7 +588,12 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
                               if newer else "copilot")
         self.subtitle.setToolTip(f"A newer Oscar is available (this is {__version__}). Click to get it."
                                  if newer else "")
-        if self._sync_onboarding(profile, state) and render:
+        changed = self._sync_onboarding(profile, state)
+        try:
+            changed = consent_gui.sync(self, state) or changed   # the Terms: the card and the prompt, or neither
+        except Exception as e:  # noqa: BLE001 - the prompt is never a reason for the panel to fail
+            self._log_panel_error("consent", e)
+        if changed and render:
             self._render()
 
     def _rebuild_account_menu(self, state: dict) -> None:
@@ -603,10 +612,12 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
 
     def _on_account_action(self, action: str) -> None:
         """A badge menu entry or an account link: ``signin``, ``device``, ``buy``, ``subscribe``, ``manage``,
-        ``waitlist``, ``download``, ``refresh``, ``signout``. Pages come from the account's own links, never from a
-        link's text."""
+        ``waitlist``, ``download``, ``refresh``, ``consent`` (the Terms prompt), ``signout``. Pages come from the
+        account's own links, never from a link's text."""
         if action in ("signin", "device"):
             self._open_settings(account_action=action)
+        elif action == "consent":
+            consent_gui.open_dialog(self)
         elif action in ("buy", "subscribe", "manage", "waitlist", "download"):
             links = settings_ui.account_hub().links()
             page = {"manage": "manage", "waitlist": "waitlist", "download": "download"}.get(action, "billing")
@@ -687,7 +698,8 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
     def _send_blocker(self, profile) -> str:
         """Why a send must not start a turn, from LOCAL facts only (no network): ``no_profile``, ``no_key``, ``server``
         (the configured OriginShape server is refused), ``signed_out``, ``waitlisted``, ``outdated`` (this Oscar is
-        older than the server's minimum version); ``""`` lets the turn go. The
+        older than the server's minimum version), ``consent`` (the account has not accepted OriginShape's current
+        Terms: never for another provider); ``""`` lets the turn go. The
         server stays authoritative: credits are never judged here (a stale "0" must not block someone who just bought
         some), and a sign-in that is not known yet (the OS keychain is still being read) is left to the turn."""
         if profile is None:
@@ -712,6 +724,9 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         # at once: the card's send forces a refresh (_block_send), and so does the connect loop on each reconnect.
         if state.get("update") == "required":
             return "outdated"
+        # Believed at any age too: accepting again is harmless, and the card's send refreshes the account.
+        if _consent.blocks_chat(snapshot, account_profile=True):
+            return "consent"
         return ""
 
     def _block_send(self, blocker: str) -> None:
@@ -733,6 +748,10 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         elif blocker == "outdated":
             self._show_account_card("outdated")
             self._refresh_account(force=True)     # the server may have lowered its minimum
+        elif blocker == "consent":
+            consent_gui.show_card(self)
+            self._render()
+            self._refresh_account(force=True)     # accepted on the website meanwhile? the next send will know
 
     # -- conversation --------------------------------------------------------
 
@@ -1027,6 +1046,8 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
             self._block_send(blocker)
             if workspace is not None:
                 workspace.turn.refuse(blocker)
+            elif blocker == "consent":   # the user is here and wants to chat: the prompt, at once
+                QtCore.QTimer.singleShot(0, lambda: consent_gui.open_dialog(self))
             return
         typed = text
 
@@ -1068,6 +1089,13 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
 
         bubble = self._append(Block.USER, display)
         message = Message(role="user", content=content, images=images)
+        started = time.time()
+        chat = self._current_session()
+        turn_index = None
+        if chat is not None:
+            from . import chats as _chats
+
+            turn_index = _chats.next_turn(chat)   # this turn's index in the chat, saved with it just below
         self.history.append(message)
         self._title_current_from(text)
         self._persist_current()
@@ -1084,7 +1112,11 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
                            # the workspace message this turn answers: its card is reverted by it
                            "workspace_message": _workspace_message_id(workspace),
                            "ledger": copy.deepcopy(session.get("ledger")) if session is not None else None,
-                           "account": _params.is_account_profile(profile)}
+                           "account": _params.is_account_profile(profile),
+                           # what the turn's record says (panel_turn._record_turn)
+                           "chat_id": str(session.get("id") or "") if session is not None else "",
+                           "turn": turn_index, "started_at": started,
+                           "model": _params.account_model_alias(getattr(profile, "model", "") or "")}
         if workspace is not None and session is not None and self._turn_sent["workspace_message"]:
             # The workspace turns this FreeCAD run holds (runtime only, never saved: a restart forgets them, as it
             # forgets the cards and the undo stack). A revert from the browser can only reach these (§14).
