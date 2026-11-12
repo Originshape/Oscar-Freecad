@@ -780,18 +780,23 @@ class RealWorkerReviewTest(FlowTestCase):
             calls(call("create_object", doc_name="D", obj_type="Part::Box")), say("Done.")])
         self.assertTrue(self.wait_until(self.in_tool.is_set))
         count = len(p.sessions)
+        # a new chat and switching are ALLOWED mid-turn now: the running turn keeps writing to its own
+        # chat (chats are independent). Only the destructive actions stay refused.
+        p._new_chat()
+        self.assertEqual(len(p.sessions), count + 1)
+        self.assertIsNot(p._current_session(), first)
+        p._on_chat_picked(next(i for i, s in enumerate(p.sessions) if s is first))   # and back to the turn's chat
+        self.assertIs(p._current_session(), first)
         with mock.patch.object(QtWidgets.QMessageBox, "question", return_value=QtWidgets.QMessageBox.Yes) as ask:
-            p._on_chat_picked(0)
-            p._new_chat()
-            p._clear_chat()
+            p._clear_chat()                                                  # refused while the turn runs
             p._delete_chat()
         ask.assert_not_called()                                              # refused before any dialog
+        self.assertEqual(len(p.sessions), count + 1)
         self.assertIs(p._current_session(), first)
-        self.assertEqual(len(p.sessions), count)
-        self.assertEqual(p.chat_combo.currentIndex(), next(i for i, s in enumerate(p.sessions) if s is first))
-        self.assertTrue(first["history"])
+        self.assertTrue(first["history"])                                    # the running turn's chat is untouched
         self.release.set()
         self.assertTrue(self.wait_until(lambda: p.worker is None))
+        self.assertTrue(any("Done." in (b.text or "") for b in first["blocks"]))   # its answer landed in IT
 
     def test_the_chat_file_is_saved_after_every_round_and_stays_readable(self):
         from support.scripted_llm import call, calls, say
