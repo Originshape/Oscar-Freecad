@@ -313,6 +313,33 @@ class ChatIsolationTest(FlowTestCase):
         self.assertEqual(session1["history"][-1].images, ["B64IMG"])
         self.assertEqual(p._carry_images, [])
 
+    def test_an_stl_attached_near_another_chat_never_crosses_over(self):
+        """The report's literal scenario: an STL pending while another chat runs a turn — it never rides the
+        other chat's message, and it goes out with ITS chat's next one, into its own project folder."""
+        p = self.p
+        worker1 = self.send("Build the box")            # chat 1's turn runs
+        session1 = p._current_session()
+        stl = os.path.join(self.tmp, "bracket.stl")
+        with open(stl, "w") as f:
+            f.write("solid bracket\nendsolid bracket\n")
+        p.add_attachments([stl])                        # the STL waits in chat 1
+
+        p._new_chat()                                   # a new chat while the turn runs
+        p.input.setPlainText("import this other part")
+        p._send()                                       # queues there (chat 1 still running)
+        self.end_turn(worker1, text="done")
+        self.app.processEvents()                        # the queued send runs as chat 2's own turn
+        worker2 = IsolationWorker.instances[-1]
+        self.assertEqual(worker2.kw["attachments"], [])                    # chat 1's STL did not ride it
+        self.assertIsNone(worker2.kw["ledger"])                            # nor chat 1's plan
+        self.assertNotEqual(worker2.kw["project"].root, worker1.kw["project"].root)   # nor its folder
+
+        p._on_chat_picked(p.sessions.index(session1))   # back in chat 1
+        self.end_turn(worker2, text="ok")
+        worker3 = self.send("now use the bracket")
+        self.assertEqual(worker3.kw["attachments"], [stl])                 # it goes out with its own chat
+        self.assertEqual(worker3.kw["session_id"], session1["id"])
+
     def test_a_send_while_busy_in_the_same_chat_still_stears(self):
         p = self.p
         worker1 = self.send("Build the box")
