@@ -49,10 +49,13 @@ class RevertMixin:
         return next((b for b in reversed(self.blocks)
                      if b.kind == Block.TOOL and b.revertible and not b.reverted), None)
 
-    def _update_revert_flags(self) -> None:
-        """Offer "revert changes" on the latest revertible card only."""
-        latest = self._latest_revertible()
-        for block in self.blocks:
+    def _update_revert_flags(self, blocks: list | None = None) -> None:
+        """Offer "revert changes" on the latest revertible card only (``blocks``: the finished turn's chat,
+        not the one shown, when a turn ends while another chat is displayed)."""
+        blocks = self.blocks if blocks is None else blocks
+        latest = next((b for b in reversed(blocks)
+                       if b.kind == Block.TOOL and b.revertible and not b.reverted), None)
+        for block in blocks:
             if block.kind == Block.TOOL and block.revertible:
                 block.revert_enabled = block is latest
 
