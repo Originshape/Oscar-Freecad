@@ -1451,8 +1451,10 @@ class Project(SummaryMixin, RewindMixin):
         is used (the Summary never claims what no check recorded). ``export=None`` means True for the ledger
         intents enclosure / fixture / bracket / generic_part / deliver: when ``exports/`` holds no file yet, STEP +
         STL of the visible solid tips are exported with the spec's print orientation (one file per part, the SAME
-        code as the ``export_model`` tool); a failure becomes a NOTES "Unresolved" note and never an exception. ``export=True`` forces the export, ``False`` skips it. A disk failure while writing
-        the files is logged and the Summary is still returned (the turn must not die because the dossier failed);
+        code as the ``export_model`` tool); a failure becomes a NOTES "Unresolved" note and never an exception. ``export=True`` forces the export, ``False`` skips it. Before the files are written the
+        imported source meshes of the active document are hidden once a visible solid tip exists
+        (``_hide_source_meshes``, recorded as a decision note). A disk failure while writing the
+        files is logged and the Summary is still returned (the turn must not die because the dossier failed);
         only a wrongly typed ``ledger`` / ``validation`` raises ``ProjectError``."""
         ledger_dict = _as_dict(ledger)
         validation_dict = _as_dict(validation)   # a wrongly typed argument is the caller's bug: raise before anything is written
@@ -1461,6 +1463,7 @@ class Project(SummaryMixin, RewindMixin):
             if validation_dict is not None:
                 # validation.json first: NOTES.md and the Summary then read the same (merged) record
                 effective = self._store_validation(validation_dict)
+            self._hide_source_meshes()
             self._finalize_files(ledger_dict, outcome, export)
         except (OSError, ProjectStorageError) as exc:
             log_event("project_error", where="finalize", error=f"{type(exc).__name__}: {exc}"[:200])
@@ -1492,4 +1495,27 @@ class Project(SummaryMixin, RewindMixin):
         with self._lock:
             self.manifest["finalized"] = {"turn_id": self._turn_id, "outcome": outcome, "ts": self._now()}
             self._save_manifest()
+
+    def _hide_source_meshes(self) -> None:
+        """Hide the imported source meshes of the active document once a rebuilt body exists (Issue 002: the
+        source STL stayed visible next to the Body it was rebuilt into). GUI work first (no lock), then the
+        note under the lock; runs before the autosave so the saved FCStd carries the hidden state; a failure
+        is logged and never breaks ``finalize``."""
+        doc_name = self.manifest.get("active_doc") or ""
+        if not doc_name:
+            return
+        ctx = current_context()
+
+        def task() -> list:
+            found = gui.resolve_doc(doc_name)
+            return gui.hide_source_meshes(found) if found is not None else []
+
+        names, error = gui.gui_call(task, 10.0, "project_hide_source_meshes", ctx.should_stop)
+        if error:
+            log_event("project_error", where="hide_source_meshes", error=error[:200])
+            return
+        for name in names or []:
+            self.note("decision",
+                      f"source mesh '{name}' hidden: the rebuilt body is the deliverable "
+                      "(the mesh stays in the tree)")
 
