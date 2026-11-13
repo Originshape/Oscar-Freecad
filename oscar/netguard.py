@@ -29,6 +29,7 @@ import hashlib
 import itertools
 import os
 import re
+import stat
 import sys
 import threading
 import time
@@ -802,8 +803,8 @@ def _spawn_executable(event: str, args) -> str:
 
 
 def _is_system_binary(path: str) -> bool:
-    """True only for an absolute path (as looked up AND after symlinks) inside a system directory the current user cannot
-    write: a file the script could have planted is never one of these."""
+    """True only for an absolute path (as looked up AND after symlinks) inside a system directory not writable by ordinary
+    users: a file the script could have planted is never one of these."""
     try:
         if not path or not os.path.isabs(path):
             return False
@@ -817,7 +818,8 @@ def _is_system_binary(path: str) -> bool:
         # the lookup path AND the real file (after symlinks; merged-/usr links such as /bin -> /usr/bin stay inside the set)
         if norm(os.path.dirname(path)) not in trusted or norm(os.path.dirname(real)) not in trusted:
             return False
-        return not os.access(os.path.dirname(real), os.W_OK)
+        mode = os.stat(os.path.dirname(real)).st_mode
+        return not (mode & (stat.S_IWGRP | stat.S_IWOTH))
     except Exception:  # noqa: BLE001
         return False
 
