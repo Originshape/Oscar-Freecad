@@ -16,8 +16,33 @@ jobs:
         with: { python-version: "3.11" }   # FreeCAD 1.1.x bundles Python 3.11
       # FreeCAD bundles requests/urllib3; a plain setup-python interpreter does not, and oscar.providers imports it
       - run: python -m pip install requests urllib3
-      - run: python tests/run.py --pure
-        env: { OSCAR_TEST_ALLOW_REAL_HOME: "1" }
+      - name: Create isolated non-root test identity
+        run: |
+          sudo useradd --create-home --shell /bin/bash oscar-ci
+          sudo mkdir -p "$RUNNER_TEMP/oscar-home" "$RUNNER_TEMP/oscar-tmp"
+          sudo chown -R oscar-ci:oscar-ci "$RUNNER_TEMP/oscar-home" "$RUNNER_TEMP/oscar-tmp"
+      - name: Run pure tests as non-root
+        run: |
+          sudo -u oscar-ci env \
+            HOME="$RUNNER_TEMP/oscar-home" \
+            TMPDIR="$RUNNER_TEMP/oscar-tmp" \
+            PATH="$PATH" \
+            OSCAR_TEST_ALLOW_REAL_HOME=1 \
+            python - <<'PY'
+          import os
+          import stat
+          print("uid:", os.getuid())
+          print("executable:", __import__("sys").executable)
+          print("echo realpath:", os.path.realpath("/bin/echo"))
+          print("bin mode:", oct(stat.S_IMODE(os.stat("/bin").st_mode)))
+          print("bin writable:", os.access("/bin", os.W_OK))
+          PY
+          sudo -u oscar-ci env \
+            HOME="$RUNNER_TEMP/oscar-home" \
+            TMPDIR="$RUNNER_TEMP/oscar-tmp" \
+            PATH="$PATH" \
+            OSCAR_TEST_ALLOW_REAL_HOME=1 \
+            python tests/run.py --pure
 
   linux:
     runs-on: ubuntu-24.04

@@ -277,6 +277,10 @@ class ForkExecTest(_GuardCase):
         env = [b"HTTPS_PROXY=https://proxy.example:8080", b"PATH=/usr/bin:/bin"]
         self.assertIsNone(self.fork_exec([b"/bin/echo"], [b"/bin/echo", b"hi"], env))
 
+    @unittest.skipUnless(hasattr(os, "geteuid") and os.geteuid() == 0, "root-only security regression")
+    def test_root_is_not_treated_as_an_unprivileged_system_binary_user(self):
+        self.assertFalse(netguard._is_system_binary("/bin/echo"))
+
     def test_the_hook_lets_the_event_through_to_the_guard(self):
         with mock.patch.object(netguard, "_audit") as audit:
             netguard._audit_hook("_posixsubprocess.fork_exec", ((b"/bin/echo",), [b"echo"], None))
