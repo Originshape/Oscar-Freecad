@@ -19,10 +19,12 @@ jobs:
       - name: Create isolated non-root test identity
         run: |
           sudo useradd --create-home --shell /bin/bash oscar-ci
-          sudo mkdir -p "$RUNNER_TEMP/oscar-home" "$RUNNER_TEMP/oscar-tmp"
-          sudo chown -R oscar-ci:oscar-ci "$RUNNER_TEMP/oscar-home" "$RUNNER_TEMP/oscar-tmp"
+          sudo mkdir -p "$RUNNER_TEMP/oscar-home" "$RUNNER_TEMP/oscar-tmp" "$RUNNER_TEMP/oscar-workspace"
+          sudo cp -a "$GITHUB_WORKSPACE/." "$RUNNER_TEMP/oscar-workspace/"
+          sudo chown -R oscar-ci:oscar-ci "$RUNNER_TEMP/oscar-home" "$RUNNER_TEMP/oscar-tmp" "$RUNNER_TEMP/oscar-workspace"
       - name: Run pure tests as non-root
         run: |
+          cd "$RUNNER_TEMP/oscar-workspace"
           sudo -u oscar-ci env \
             HOME="$RUNNER_TEMP/oscar-home" \
             TMPDIR="$RUNNER_TEMP/oscar-tmp" \
