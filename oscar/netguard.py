@@ -748,7 +748,7 @@ _BENIGN_PROGRAMS = frozenset({"echo", "ls", "pwd", "true", "false", "sleep", "da
 _SHELL_META_RE = re.compile(r"[;&|`$<>()\n\\]")
 
 
-_SYSTEM_BIN_DIRS = ("/bin", "/usr/bin", "/sbin", "/usr/sbin")
+_SYSTEM_BIN_DIRS = ("/bin", "/usr/bin", "/sbin", "/usr/sbin", "/usr/lib/cargo/bin/coreutils")
 
 
 def _spawn_executable(event: str, args) -> str:
