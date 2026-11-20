@@ -10,15 +10,17 @@ server that forgot its settings, another account; a pull never replacing a key, 
 local base URL, and a key set aside when the account moves its profile to another host; the ``Syncer`` against the
 fake (signed out and API-key sign-ins send nothing, a first push, a pull, nothing to push, a 409 merged and pushed
 once more, a second 409, a server without the route); the dialog's Save merge; the thread (``request``,
-``pull_if_stale``) and the off switch. The website's Test in FreeCAD: an unknown profile, a failing or slow test; the
-message is scrubbed of the key (plain, masked, in pieces) and of a local base URL's secrets, and clipped to 500
-characters.
+``pull_if_stale``) and the off switch. Connect: ``hello`` announces ``ai_settings`` only with a handler, a
+``profile_test`` runs and its result is posted, an unknown profile and a failing handler; the message is scrubbed of the
+key (plain, masked, in pieces) and of a local base URL's secrets, and clipped to 500 characters.
 Pure python (stdlib + requests); the keystore runs in memory.
 """
 import copy
 import json
 import os
+import shutil
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -31,7 +33,7 @@ from support import isolation  # noqa: E402
 
 isolation.isolate_process()   # temp settings / projects / logs / cache / downloads BEFORE importing oscar (HOME is NOT touched)
 
-from oscar import settings_sync  # noqa: E402
+from oscar import connect, settings_sync  # noqa: E402
 from oscar.auth import account, discovery, keystore, session  # noqa: E402
 from oscar.auth.transport import TokenSet  # noqa: E402
 from support.fake_workspace import FakeWorkspace  # noqa: E402
@@ -744,6 +746,77 @@ class ProfileTestTest(unittest.TestCase):
             raise StopRequested()
         passed, message, _ = settings_sync.run_profile_test("c", store=self.store(), run=slow, timeout=-1)
         self.assertEqual((passed, message), (False, "The test took too long in FreeCAD and was stopped."))
+
+
+class ConnectProfileTestTest(_FakeCase):
+    def setUp(self):
+        super().setUp()
+        for name, value in {"BACKOFF_S": (0.01, 0.01, 0.01), "SIGNED_OUT_RETRY_S": 0.02, "KEEPALIVE_S": 0.05}.items():
+            fast = mock.patch.object(connect, name, value)
+            fast.start()
+            self.addCleanup(fast.stop)
+        self.sign_in()
+        self.files_dir = tempfile.mkdtemp(prefix="oscar-sync-connect-")
+        self.addCleanup(shutil.rmtree, self.files_dir, True)
+
+    def loop(self, **extra):
+        loop = connect.Loop(lambda: self.session, start_turn=lambda job, files: self.fail("no turn"),
+                            is_idle=lambda: True, on_state=lambda *a: None, versions=connect.versions("1.1.3"),
+                            files_dir=lambda: self.files_dir, **extra)
+        self.addCleanup(loop.stop, 2.0)
+        return loop
+
+    def wait_until(self, predicate, timeout=5.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and not predicate():
+            time.sleep(0.01)
+        return predicate()
+
+    def test_only_an_oscar_that_can_test_profiles_says_so(self):
+        self.loop().start()
+        self.assertTrue(self.wait_until(lambda: self.fake.hellos))
+        self.assertNotIn("ai_settings", self.fake.hellos[-1].get("capabilities") or [])
+        self.fake.hellos.clear()
+        self.loop(test_profile=lambda test: (True, "", {})).start()
+        self.assertTrue(self.wait_until(lambda: self.fake.hellos))
+        self.assertIn("ai_settings", self.fake.hellos[-1]["capabilities"])
+
+    def test_a_profile_test_runs_here_and_only_its_outcome_goes_back(self):
+        asked = []
+
+        def test_profile(test):
+            asked.append(test)
+            report = Report(True, [Line(step="connect", ok=True, text=f"ready ({KEY})"),
+                                   Line(step="tools", ok=True, text="tool calling works natively")],
+                            tools="native", vision=True)
+            return settings_sync.run_profile_test(test.profile_id, store=profile_store(),
+                                                  run=lambda profile, should_stop: report)
+        known = self.fake.add_profile_test("c")
+        unknown = self.fake.add_profile_test("nobody")
+        self.loop(test_profile=test_profile).start()
+        self.assertTrue(self.wait_until(lambda: len(self.fake.profile_test_results) == 2))
+        self.assertEqual([(t.id, t.profile_id) for t in asked], [(known, "c"), (unknown, "nobody")])
+        good, bad = self.fake.profile_test_results[known], self.fake.profile_test_results[unknown]
+        self.assertEqual((good["passed"], good["checks"]), (True, {"reply": True, "tools": True, "image": True}))
+        self.assertNotIn(KEY, json.dumps(good))
+        self.assertEqual((bad["passed"], bad["message"]), (False, settings_sync.UNKNOWN_PROFILE_TEXT))
+        self.assertEqual(bad["checks"], {"reply": None, "tools": None, "image": None})
+
+    def test_a_handler_that_fails_still_answers(self):
+        def broken(test):
+            raise ValueError(f"oops {KEY}")
+        test_id = self.fake.add_profile_test("c")
+        self.loop(test_profile=broken).start()
+        self.assertTrue(self.wait_until(lambda: test_id in self.fake.profile_test_results))
+        body = self.fake.profile_test_results[test_id]
+        self.assertEqual((body["passed"], body["message"]), (False, "FreeCAD couldn’t run the test (ValueError)."))
+
+    def test_a_profile_test_job_is_parsed(self):
+        test = connect.ProfileTest.parse({"id": "0b7c0a3e-1111-4222-8333-444455556666", "profile_id": "p-1"})
+        self.assertEqual(test.profile_id, "p-1")
+        for bad in ({"id": "../x", "profile_id": "p"}, {"id": "t"}, {"id": "t", "profile_id": ""}, "nope"):
+            with self.subTest(bad=bad), self.assertRaises(connect.ConnectError):
+                connect.ProfileTest.parse(bad)
 
 
 if __name__ == "__main__":
