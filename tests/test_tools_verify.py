@@ -574,9 +574,11 @@ class RunValidationTest(VerifyCase):
         self.assertEqual(result.doc, doc.Name)
         self.assertEqual((result.gate_errors, result.fail_rows, result.fit_rows, result.fit_ran), ([], [], [], False))
         self.assertEqual(result.ran, ["health"])
+        # step_collision left the not_validated ledger on the 003 lineage (its catalog entry
+        # remains, but run_validation no longer lists it for this model kind)
         self.assertEqual(result.not_validated, ["fit.interference", "fit.clearance", "fit.ports", "fit.retention",
                                                 "dfm", "editability", "reference.deviation", "recon.deviation", "rebuild",
-                                                "step_collision", "physical"])
+                                                "physical"])
         self.assertTrue(result.health["valid"])
         self.assertEqual(result.health["doc"], doc.Name)
         self.assertTrue(result.text.startswith("[health] doc "))

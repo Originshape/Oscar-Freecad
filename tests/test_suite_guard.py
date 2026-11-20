@@ -49,11 +49,24 @@ def _base_name(node):
     return ""
 
 
+def _read_source(path):
+    """Decode ``path`` as UTF-8. Undecodable bytes become U+FFFD and the caller is told:
+    a corrupt or foreign-encoding ``.py`` in the tree is a hygiene problem to REPORT
+    (NON_UTF8, with the file named), never a stage crash — the strict-UTF-8 platforms
+    (Linux CI) used to die with a bare UnicodeDecodeError that named no file."""
+    with open(path, "rb") as f:
+        raw = f.read()
+    try:
+        return raw.decode("utf-8"), False
+    except UnicodeDecodeError:
+        return raw.decode("utf-8", errors="replace"), True
+
+
 def analyse(path):
     """``{"classes": {name: {"tc": bool, "tests": [names], "bases": [names]}}, "module_tests": [...], "dups": [...]}``
     for one source file (a syntax error raises ``SyntaxError`` with the file name)."""
-    with open(path, encoding="utf-8") as f:
-        tree = ast.parse(f.read(), filename=path)
+    src, _bad = _read_source(path)
+    tree = ast.parse(src, filename=path)
     classes = {}
     dups = []
     for node in tree.body:
@@ -111,6 +124,11 @@ def scan_tests_dir(tests_dir, *, legacy=LEGACY_UNISOLATED):
             path = os.path.join(root, name)
             rel = os.path.normpath(os.path.join(rel_root, name)) if rel_root != "." else name
             try:
+                _src_probe, _bad = _read_source(path)
+                if _bad:
+                    problems.append(("NON_UTF8", rel, "the file is not valid UTF-8 "
+                                     "(decoded with replacement so the scan continues)"))
+                    continue
                 info = analyse(path)
             except SyntaxError as e:
                 problems.append(("SYNTAX_ERROR", rel, str(e)))
@@ -154,8 +172,9 @@ _INJECTED = {"InitGui.py": {"Workbench"}}
 def undefined_names(path, injected=()):
     """``[(name, line)]`` of names ``path`` uses that no scope defines (module-level assignments, imports, defs and
     classes, ``global`` assignments inside functions, builtins). Skips files with ``from x import *``."""
-    with open(path, encoding="utf-8") as f:
-        src = f.read()
+    src, bad_utf8 = _read_source(path)
+    if bad_utf8:
+        return [("�", 0)]          # the caller turns this into a NON_UTF8 row
     tree = ast.parse(src, path)
     if any(isinstance(n, ast.ImportFrom) and any(a.name == "*" for a in n.names) for n in ast.walk(tree)):
         return []
@@ -202,6 +221,10 @@ def scan_undefined(root):
                     hits = undefined_names(path, _INJECTED.get(name, ()))
                 except SyntaxError as e:
                     out.append((os.path.relpath(path, root), getattr(e, "lineno", 0) or 0, "SyntaxError"))
+                    continue
+                if hits and hits[0] == ("�", 0):
+                    out.append((os.path.relpath(path, root), 0,
+                                "NON_UTF8: the file is not valid UTF-8 (decoded with replacement)"))
                     continue
                 out += [(os.path.relpath(path, root), line, n) for n, line in hits]
     return out
@@ -518,6 +541,31 @@ class WorkflowAndScriptTest(unittest.TestCase):
                       "OSCAR_PROJECTS_DIR", "OSCAR_AI_SETTINGS", "OSCAR_DOWNLOAD_DIR", "OSCAR_TEST_MODULES"):
             self.assertIn(token, text)
         self.assertNotRegex(text, r"(^|\s)HOME=", "scripts/test.sh must never override HOME (the geometry tests need it)")
+
+
+class MalformedUtf8Test(unittest.TestCase):
+    """A corrupt or foreign-encoding .py in the tree is REPORTED (NON_UTF8, file named),
+    never a stage crash - the 2026-11-20 Linux CI UnicodeDecodeError named no file."""
+
+    def test_scan_tests_dir_reports_non_utf8_without_crashing(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = os.path.join(tmp, "test_bad_bytes.py")
+            with open(bad, "wb") as fh:
+                fh.write(b"# " + bytes([0xFF, 0xFE]) + b" not utf-8" + bytes([10])
+                         + b"import unittest" + bytes([10]))
+            problems = scan_tests_dir(tmp)
+        self.assertTrue(any(code == "NON_UTF8" and "test_bad_bytes.py" in rel
+                            for code, rel, _ in problems), problems)
+
+    def test_undefined_names_flags_non_utf8_instead_of_raising(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = os.path.join(tmp, "weird.py")
+            with open(bad, "wb") as fh:
+                fh.write(b"x = 1  # " + bytes([0xFF]) + b" bad byte" + bytes([10]))
+            hits = undefined_names(bad)
+        self.assertEqual(hits, [(chr(0xFFFD), 0)])
 
 
 if __name__ == "__main__":

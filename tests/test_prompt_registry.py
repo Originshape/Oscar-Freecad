@@ -78,8 +78,9 @@ class FullRegistryLintTest(unittest.TestCase):
         never get its sentence dropped when it is hidden."""
         self.assertFalse(registry() - prompt.KNOWN_TOOLS, sorted(registry() - prompt.KNOWN_TOOLS))
 
-    def test_the_lite_set_is_the_twentyone_tools_the_prompt_assumes(self):
-        self.assertEqual(len(toolrun.LITE_TOOLS), 21)
+    def test_the_lite_set_is_the_twentytwo_tools_the_prompt_assumes(self):
+        # 22 since the 003 lineage added compare_to_reference to the lite set
+        self.assertEqual(len(toolrun.LITE_TOOLS), 22)
         self.assertEqual({s.name for s in tools.specs(lite=True)}, set(toolrun.LITE_TOOLS))
         self.assertLessEqual(set(named(prompt.LITE)), set(toolrun.LITE_TOOLS))
 
@@ -104,11 +105,12 @@ class FullRegistryLintTest(unittest.TestCase):
                 self.assertLessEqual(context.estimate_tokens_text(base), 500 if lite else 1100, (intent, lite))
 
     def test_ultra_lite_keeps_the_enclosure_story(self):
+        # the 003 lineage moved the story from prompt prose to tool availability: the
+        # ultra-lite floor still OFFERS the enclosure pair (spec + build) and stays a
+        # lean, budgeted prompt without the full stage prose or validation tools
+        self.assertTrue({"enclosure_spec", "build_enclosure"} <= set(context.ULTRA_LITE_TOOLS))
         text = prompt.build_system_prompt(lite=True, tool_names=context.ULTRA_LITE_TOOLS)
-        self.assertIn("`enclosure_spec`", text)
-        self.assertIn("`build_enclosure`", text)
-        for stage in STAGE_NAMES:
-            self.assertIn(stage, text)
+        self.assertLessEqual(context.estimate_tokens_text(text), 500)
         self.assertNotIn("validate_model", text)   # not offered in the 9-tool floor set
 
 
