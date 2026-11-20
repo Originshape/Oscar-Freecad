@@ -97,7 +97,7 @@ def projects_dir(*, probe: bool = True) -> str:
     global PROJECTS_FALLBACK
     override = os.environ.get("OSCAR_PROJECTS_DIR")
     if override:
-        override = os.path.expanduser(override)   # a quoted ``~/Projects`` in a shell profile is not expanded by the shell
+        override = os.path.normpath(os.path.expanduser(override))   # a quoted ``~/Projects`` in a shell profile is not expanded by the shell
         if probe:
             os.makedirs(override, exist_ok=True)
         return override

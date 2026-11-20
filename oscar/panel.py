@@ -109,6 +109,29 @@ def _mutating_tool_names() -> set[str]:
     return names
 
 
+class _ModelCatalogSignals(QtCore.QObject):
+    loaded = QtCore.Signal(int, str, object, str)
+
+
+class _ModelCatalogJob(QtCore.QRunnable):
+    """Fetch one provider's model catalog away from FreeCAD's GUI thread."""
+
+    def __init__(self, generation: int, profile, signals):
+        super().__init__()
+        self.generation = generation
+        self.profile = profile
+        self.signals = signals
+
+    def run(self):
+        try:
+            from .providers import list_models
+
+            models, error = list_models(self.profile)
+            self.signals.loaded.emit(self.generation, self.profile.name, models or [], str(error or ""))
+        except Exception as exc:  # noqa: BLE001 - provider metadata is untrusted UI input
+            self.signals.loaded.emit(self.generation, self.profile.name, [], f"{type(exc).__name__}: {exc}")
+
+
 class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin, FollowMixin, QtWidgets.QWidget):
     """Chat content of the dock; the dock wrapper lives below."""
 
@@ -161,6 +184,10 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         # reverted a turn — otherwise it would keep building on objects
         # that no longer exist). Kept PER SESSION (see ``_pending_notes``).
         self._orphan_notes: list[str] = []
+        self._profiles: list = []
+        self._model_catalogs: dict[str, dict] = {}
+        self._catalog_generation = 0
+        self._catalog_jobs = {}
 
         self._build_ui()
         self._register_netguard_hook()
@@ -433,15 +460,26 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         self.templates_btn.clicked.connect(self._show_templates)
         controls.addWidget(self.templates_btn)
 
-        self.profile_combo = QtWidgets.QComboBox()
-        self.profile_combo.setMinimumWidth(110)
-        self.profile_combo.currentIndexChanged.connect(self._on_profile_picked)
-        controls.addWidget(self.profile_combo)
-        controls.addStretch(1)
-        # The model of the active profile sits where a hint used to be.
-        self.model_label = QtWidgets.QLabel("")
-        self.model_label.setStyleSheet(f"color:{_muted()};font-size:small;")
-        controls.addWidget(self.model_label)
+        self.profile_button = QtWidgets.QToolButton()
+        self.profile_button.setObjectName("oscarProfileSelector")
+        self.profile_button.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.profile_button.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        self.profile_menu = QtWidgets.QMenu(self.profile_button)
+        self.profile_menu.aboutToShow.connect(self._rebuild_profile_menu)
+        self.profile_button.setMenu(self.profile_menu)
+        self.profile_button.setMaximumWidth(126)
+        controls.addWidget(self.profile_button)
+
+        self.model_button = QtWidgets.QToolButton()
+        self.model_button.setObjectName("oscarModelSelector")
+        self.model_button.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.model_button.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        self.model_menu = QtWidgets.QMenu(self.model_button)
+        self.model_menu.aboutToShow.connect(self._rebuild_model_menu)
+        self.model_button.setMenu(self.model_menu)
+        self.model_button.setMaximumWidth(140)
+        self.model_label = self.model_button   # compatibility for the workspace's temporary model display
+        controls.addWidget(self.model_button)
 
         # Stop: visible only while a turn runs; same
         # effect as Esc.
@@ -497,31 +535,196 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
     # -- profile / settings --------------------------------------------------
 
     def _reload_profiles(self):
-        self.profile_combo.blockSignals(True)
-        self.profile_combo.clear()
-        names = [p.name for p in _params.load_profiles()]
-        self.profile_combo.addItems(names)
-        active = _params.active_profile_name()
-        if active in names:
-            self.profile_combo.setCurrentIndex(names.index(active))
-        self.profile_combo.blockSignals(False)
-        profile = _params.active_profile()
-        self.model_label.setText(_params.model_display_name(profile))
+        old = {p.name: p for p in self._profiles}
+        old_default = getattr(self, "_profile_default_name", _params.active_profile_name())
+        self._profiles = list(_params.load_profiles())
+        fresh = {p.name: p for p in self._profiles}
+        new_default = _params.active_profile_name()
+        for session in getattr(self, "sessions", []):
+            if not session.get("profile_selection_explicit") and session.get("profile_name") in ("", old_default):
+                default_profile = fresh.get(new_default)
+                if default_profile is not None:
+                    session["profile_name"] = new_default
+                    session["model"] = default_profile.model
+                    previous = configured = default_profile
+                else:
+                    previous = configured = None
+            else:
+                previous = old.get(str(session.get("profile_name") or ""))
+                configured = fresh.get(str(session.get("profile_name") or ""))
+            if (not session.get("profile_selection_explicit") and previous is not None and configured is not None
+                    and session.get("model") == previous.model):
+                session["model"] = configured.model
+                if session.get("history"):
+                    try:
+                        from . import chats as _chats
+
+                        _chats.save(session)
+                    except Exception as exc:  # noqa: BLE001 - settings refresh must still update the visible selector
+                        self._log_panel_error("profile_persist", exc)
+        self._profile_default_name = new_default
+        self._catalog_generation += 1
+        self._model_catalogs = {}
+        self._refresh_model_selector()
         self._refresh_account()
 
-    def _on_profile_picked(self, index: int):
-        name = self.profile_combo.itemText(index)
-        if name:
-            try:
-                _params.set_active_profile(name)
-            except OSError as e:   # the settings file is locked right now: nothing was written, show what is active
-                self._log_panel_error("profile", e)
-                self._reload_profiles()
-                self._flash_status(f"Could not switch the profile: {e}", 6000)
-                return
-        profile = _params.active_profile()
-        self.model_label.setText(_params.model_display_name(profile))
+    def _model_catalog_loaded(self, generation: int, name: str, models, error: str) -> None:
+        self._catalog_jobs.pop((generation, name), None)
+        if generation != self._catalog_generation or not any(p.name == name for p in self._profiles):
+            return
+        from .panel_models import catalog_models
+
+        self._model_catalogs[name] = {"models": catalog_models(models), "error": error, "loading": False}
+        self._refresh_model_selector()
+        if self.profile_menu.isVisible():
+            self._rebuild_profile_menu()
+        if self.model_menu.isVisible():
+            self._rebuild_model_menu()
+
+    def _fetch_profile_catalog(self, profile) -> None:
+        key = (self._catalog_generation, profile.name)
+        if key in self._catalog_jobs:
+            return
+        self._model_catalogs[profile.name] = {"models": [], "error": "Loading model catalog…", "loading": True}
+        signals = _ModelCatalogSignals(self)
+        signals.loaded.connect(self._model_catalog_loaded)
+        job = _ModelCatalogJob(self._catalog_generation, copy.deepcopy(profile), signals)
+        self._catalog_jobs[key] = job
+        QtCore.QThreadPool.globalInstance().start(job)
+
+    def _chat_profile(self, session=None):
+        """The selected profile/model for one chat, isolated from other chat sessions."""
+        profiles = self._profiles or list(_params.load_profiles())
+        session = session if session is not None else self._current_session()
+        name = str((session or {}).get("profile_name") or _params.active_profile_name())
+        from .panel_models import selected_profile
+
+        profile = selected_profile(profiles, name) or _params.active_profile()
+        if profile is None:
+            return None
+        profile = copy.deepcopy(profile)
+        if session is not None:
+            before = (session.get("profile_name"), session.get("model"))
+            if not session.get("profile_name") or session.get("profile_name") != profile.name:
+                session["profile_name"] = profile.name
+                session["model"] = profile.model
+            profile.model = str(session.get("model") or profile.model)
+            if before != (session.get("profile_name"), session.get("model")) and session.get("history"):
+                self._persist_current()
+        return profile
+
+    def _refresh_model_selector(self) -> None:
+        profile_button = getattr(self, "profile_button", None)
+        model_button = getattr(self, "model_button", None)
+        if profile_button is None or model_button is None:
+            return
+        profile = self._chat_profile()
+        idle = getattr(self, "worker", None) is None
+        if profile is None:
+            profile_button.setText("Choose profile")
+            profile_button.setToolTip("No configured profiles. Open Settings to add one.")
+            profile_button.setEnabled(idle)
+            model_button.setText("Choose model")
+            model_button.setToolTip("Choose a configured profile first.")
+            model_button.setEnabled(False)
+            return
+        catalog = self._model_catalogs.get(profile.name, {})
+        models = catalog.get("models") or []
+        error = str(catalog.get("error") or "")
+        availability = "Listed by provider" if profile.model in models else (
+            "Loading model catalog…" if catalog.get("loading") else
+            ("Unavailable: " + error if error else "Not verified by provider"))
+        profile_button.setEnabled(idle)
+        profile_button.setText(profile.name)
+        profile_button.setToolTip(f"Profile: {profile.name}\nProvider: {profile.provider}")
+        model_button.setEnabled(idle)
+        model_button.setText(_params.model_display_name(profile) or "Choose model")
+        model_button.setToolTip(f"Profile: {profile.name}\nModel: {profile.model or 'not configured'}\n"
+                                f"Provider: {getattr(profile, 'provider', '') or 'unknown'}\n"
+                                f"Status: {availability}")
+
+    def _select_chat_model(self, profile_name: str, model: str | None = None) -> None:
+        from .panel_models import selected_profile
+
+        profile = selected_profile(self._profiles, profile_name)
+        session = self._current_session()
+        if profile is None or session is None:
+            return
+        keep_model = session.get("model") if session.get("profile_name") == profile_name else ""
+        session["profile_name"] = profile_name
+        session["model"] = str(model if model is not None else keep_model or profile.model or "")
+        session["profile_selection_explicit"] = True
+        self._persist_current()
+        self._refresh_model_selector()
         self._refresh_account()
+
+    def _rebuild_model_menu(self) -> None:
+        menu = self.model_menu
+        menu.clear()
+        selected = self._chat_profile()
+        if selected is None:
+            empty = menu.addAction("Choose a profile first")
+            empty.setEnabled(False)
+            return
+        if selected.name not in self._model_catalogs:
+            self._fetch_profile_catalog(selected)
+        catalog = self._model_catalogs.get(selected.name, {})
+        models = list(catalog.get("models") or [])
+        error = str(catalog.get("error") or "")
+        loading = bool(catalog.get("loading"))
+        if selected.model and selected.model not in models:
+            models.insert(0, selected.model)
+        if not models:
+            status = "Loading model catalog…" if loading else (error or "No models listed by provider")
+            item = menu.addAction(status)
+            item.setEnabled(False)
+        for model in models:
+            from .panel_models import model_availability
+
+            availability = model_availability(model, catalog.get("models") or [], error)
+            action = menu.addAction(f"{model} · {selected.provider} · {availability}")
+            action.setCheckable(True)
+            action.setChecked(selected.model == model)
+            action.setToolTip(f"Model: {model}\nProvider: {selected.provider}\nStatus: {availability}")
+            action.triggered.connect(lambda _checked=False, n=selected.name, m=model:
+                                     self._select_chat_model(n, m))
+        menu.addSeparator()
+        refresh = menu.addAction("Refresh model catalogs")
+        refresh.triggered.connect(self._refresh_model_catalogs)
+
+    def _rebuild_profile_menu(self) -> None:
+        menu = self.profile_menu
+        menu.clear()
+        selected = self._chat_profile()
+        for profile in self._profiles:
+            if profile.name not in self._model_catalogs:
+                self._fetch_profile_catalog(profile)
+            catalog = self._model_catalogs.get(profile.name, {})
+            models = catalog.get("models") or []
+            if catalog.get("loading"):
+                count = "loading…"
+            elif catalog.get("error") and not models:
+                count = "unavailable"
+            else:
+                count = f"{len(models)} model{'s' if len(models) != 1 else ''}"
+            action = menu.addAction(f"{profile.name} — {count}")
+            action.setCheckable(True)
+            action.setChecked(bool(selected and selected.name == profile.name))
+            action.setToolTip(f"Profile: {profile.name}\nProvider: {profile.provider}\n"
+                              f"Configured model: {profile.model or 'none'}")
+            action.triggered.connect(lambda _checked=False, n=profile.name: self._select_chat_model(n))
+        if not self._profiles:
+            empty = menu.addAction("No profiles configured — open Settings")
+            empty.setEnabled(False)
+        menu.addSeparator()
+        refresh = menu.addAction("Refresh model catalogs")
+        refresh.triggered.connect(self._refresh_model_catalogs)
+
+    def _refresh_model_catalogs(self) -> None:
+        self._catalog_generation += 1
+        self._model_catalogs.clear()
+        self._rebuild_profile_menu()
+        self._rebuild_model_menu()
 
     def _open_settings(self, account_action: str = ""):
         """The settings dialog (modal). ``account_action`` (``"signin"`` / ``"device"``) starts that sign-in at once.
@@ -571,7 +774,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
     def _apply_account_state(self, render: bool = True) -> None:
         state = self._account_state()
         try:
-            profile = _params.active_profile()
+            profile = self._chat_profile()
         except Exception:  # noqa: BLE001 - an unreadable settings file reads as "no profile" here
             profile = None
         show = _params.is_account_profile(profile) or bool(state.get("signed_in"))
@@ -654,7 +857,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         state = self._account_state() if state is None else state
         if profile is None:
             try:
-                profile = _params.active_profile()
+                profile = self._chat_profile()
             except Exception:  # noqa: BLE001 - an unreadable settings file reads as "no profile" here
                 profile = None
         reason = self._onboarding_reason(profile, state)
@@ -1038,7 +1241,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         if workspace is not None:
             text, pending, profile = workspace.text.strip(), list(workspace.attachments), workspace.profile
         else:
-            text, pending, profile = self.input.toPlainText().strip(), list(self.pending), _params.active_profile()
+            text, pending, profile = self.input.toPlainText().strip(), list(self.pending), self._chat_profile()
         if not text and not pending:
             return
         blocker = self._send_blocker(profile)
@@ -1141,7 +1344,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
                 attachments=[att.path for att in attachments],
                 on_round=self._round_persister(session) if session is not None else None,
                 session_id=str(session.get("id") or "") if session is not None else "",
-                **({"profile": profile} if workspace is not None else {}))
+                profile=profile)
         except Exception as e:
             self._append(Block.ERROR, str(e))
             self._set_busy(False)
@@ -1246,7 +1449,8 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
             self._set_status("Thinking")
 
     def _set_busy(self, busy: bool):
-        self.profile_combo.setEnabled(not busy)
+        self.profile_button.setEnabled(not busy)
+        self.model_button.setEnabled(not busy)
         self.stop_btn.setVisible(bool(busy))
         self._esc_shortcut.setEnabled(bool(busy))
         if busy:

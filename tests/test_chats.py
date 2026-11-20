@@ -40,6 +40,17 @@ class ChatsCase(unittest.TestCase):
 
 
 class ChatsStoreTest(ChatsCase):
+    def test_profile_and_model_selection_roundtrip_per_chat(self):
+        session = chats.new_session("Model selection")
+        session.update(profile_name="custom gateway", model="cad-v2", profile_selection_explicit=True,
+                       doc_name="Flange")
+        session["history"] = [Message(role="user", content="use this model")]
+        chats.save(session)
+        loaded = chats.load(session["id"])
+        self.assertEqual((loaded["profile_name"], loaded["model"], loaded["doc_name"]),
+                         ("custom gateway", "cad-v2", "Flange"))
+        self.assertTrue(loaded["profile_selection_explicit"])
+
     def _session_with_history(self):
         session = chats.new_session("Bracket task")
         session["history"] = [
@@ -114,6 +125,7 @@ class ChatsStoreTest(ChatsCase):
         self.assertIsNone(session["project_dir"])
         self.assertIsNone(session["ledger"])
         self.assertEqual(session["blocks_meta"], [])
+        self.assertEqual((session["profile_name"], session["model"], session["doc_name"]), ("", "", ""))
         self.assertRegex(session["id"], r"^\d{8}-\d{6}-[0-9a-f]{6}$")
 
     def test_load_of_a_missing_or_corrupt_chat_is_none(self):
