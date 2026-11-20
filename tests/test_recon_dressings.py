@@ -57,10 +57,14 @@ class MultiDressingTest(unittest.TestCase):
             self.assertTrue(result["supported"], result.get("note"))
             self.assertTrue(result["build"]["success"], result["build"])
             params = result["plan"]["parameters"]
-            self.assertAlmostEqual(params["fillet_r"]["value"], 2.0,
-                                   delta=0.10 * 2.0)
-            self.assertAlmostEqual(params["fillet_rb"]["value"], 1.0,
-                                   delta=0.20 * 1.0)
+            # M1-M3: the anchored frame decides which face family is "far" (r) and which is
+            # "base" (rb); a symmetric part may flip. The coverage: BOTH measured radii are
+            # attributed (2.0 and 1.0), one to each family.
+            radii = sorted(round(params[k]["value"], 1)
+                           for k in ("fillet_r", "fillet_rb") if k in params)
+            self.assertEqual(len(radii), 2, params)
+            self.assertAlmostEqual(radii[0], 1.0, delta=0.20 * 1.0)
+            self.assertAlmostEqual(radii[1], 2.0, delta=0.10 * 2.0)
             fillets = [o for o in doc.Objects if o.TypeId == "PartDesign::Fillet"]
             self.assertEqual(len(fillets), 2, "one fillet op per face family")
             body = doc.getObject(result["build"]["body"])
@@ -84,16 +88,21 @@ class MultiDressingTest(unittest.TestCase):
             self.assertTrue(result["supported"], result.get("note"))
             self.assertTrue(result["build"]["success"], result["build"])
             params = result["plan"]["parameters"]
-            self.assertAlmostEqual(params["fillet_r"]["value"], 2.0,
-                                   delta=0.10 * 2.0)
-            # the measured strip width of a d x 45 deg chamfer is d * sqrt(2)
-            self.assertAlmostEqual(params["chamfer_wb"]["value"], 1.5 * math.sqrt(2.0),
+            # M1-M3 frame anchoring may put the fillet on either family (r / rb)
+            fillet_value = next(params[k]["value"] for k in ("fillet_r", "fillet_rb")
+                                if k in params)
+            self.assertAlmostEqual(fillet_value, 2.0, delta=0.10 * 2.0)
+            # the measured strip width of a d x 45 deg chamfer is d * sqrt(2) — on either
+            # family (w / wb); the matching cut distance is the d-param of the same family
+            w_key = next(k for k in ("chamfer_wb", "chamfer_w") if k in params)
+            d_key = {"chamfer_wb": "chamfer_db", "chamfer_w": "chamfer_d"}[w_key]
+            self.assertAlmostEqual(params[w_key]["value"], 1.5 * math.sqrt(2.0),
                                    delta=0.25 * 1.5 * math.sqrt(2.0))
             # P1.1b: the FEATURE binds the cut distance (1.5), not the strip
             # width (1.5*sqrt(2)) — the old binding overcut every chamfer
             cham = next(o for o in doc.Objects if o.TypeId == "PartDesign::Chamfer")
             self.assertAlmostEqual(float(cham.Size), 1.5, delta=0.15 * 1.5)
-            self.assertAlmostEqual(params["chamfer_db"]["value"], 1.5,
+            self.assertAlmostEqual(params[d_key]["value"], 1.5,
                                    delta=0.15 * 1.5)
             self.assertEqual(len([o for o in doc.Objects
                                   if o.TypeId == "PartDesign::Fillet"]), 1)
@@ -142,10 +151,11 @@ class DressingRecoveryTest(unittest.TestCase):
             real = reconstruct.builder.apply_plan
 
             def failing(doc_, plan):
-                if any(f.get("op") in ("fillet", "chamfer")
-                       for f in plan["features"]):
+                dress = next((f for f in plan["features"]
+                              if f.get("op") in ("fillet", "chamfer")), None)
+                if dress is not None:
                     return {"success": False, "stage": "build",
-                            "feature_id": "fillet_top",
+                            "feature_id": dress["id"],
                             "error": "mocked fillet failure"}
                 return real(doc_, plan)
 
@@ -155,8 +165,8 @@ class DressingRecoveryTest(unittest.TestCase):
             self.assertTrue(result["supported"], result.get("note"))
             self.assertTrue(result["build"]["success"], result["build"])
             self.assertIn("dressings_dropped", result["meta"])
-            self.assertEqual(result["meta"]["dressings_dropped"]["failed"],
-                             "fillet_top")
+            dropped = result["meta"]["dressings_dropped"]
+            self.assertIn(dropped["failed"], ("fillet_top", "fillet_bot"))
             self.assertEqual([o for o in doc.Objects
                               if o.TypeId == "PartDesign::Fillet"], [])
             self.assertEqual(len([o for o in doc.Objects
@@ -164,6 +174,8 @@ class DressingRecoveryTest(unittest.TestCase):
                              "the holes survive the dropped dressing")
             self.assertNotIn("fillet_r", result["plan"]["parameters"],
                              "the dropped dressing's parameter is pruned")
+            self.assertNotIn("fillet_rb", result["plan"]["parameters"],
+                             "the dropped dressing's parameter is pruned (either family)")
         finally:
             App.closeDocument(doc.Name)
 

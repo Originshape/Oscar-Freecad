@@ -45,7 +45,10 @@ BBOX_AFTER = (94.9, 62.79, 24.0)
 # which line of the Build Summary's Validated list each recorded check family produces
 VALIDATED_LINES = {"health": "Model health", "fit.interference": "Part-to-part interference", "fit.clearance": "Clearances",
                    "fit.ports": "Port openings contain every connector", "fit.retention": "Snap-fit retention",
-                   "dfm": "Printability rules", "editability": "Parameter editability"}
+                   "dfm": "Printability rules", "editability": "Parameter editability",
+                   # V-3: rebuild has a producer now — it is listed as validated when the
+                   # headless replay check really ran and matched (Issue-backlog V-3).
+                   "rebuild": "rebuild.py reproduces the model headless"}
 
 
 def bbox(shape) -> tuple[float, float, float]:
@@ -141,8 +144,10 @@ class GoldenPi4Test(CommonChecks, GoldenBase):
         for heading in SUMMARY_HEADINGS:
             self.assertIn(heading, text)
         self.assertIn("reference status: step-measured", text)
-        self.assertIn("STEP-based collision check", section(text, "Validated"))
-        self.assertNotIn("STEP-based collision check", section(text, "NOT validated"))
+        # V-3 removed the step_collision catalog entry; its evidence is the reference
+        # interference rows under fit.interference ("Part-to-part interference").
+        self.assertIn("Part-to-part interference", section(text, "Validated"))
+        self.assertNotIn("Part-to-part interference", section(text, "NOT validated"))
         self.assertEqual(self.RUN.worker.ledger.pending_required(), [])
 
     def test_02_validated_and_not_validated_match_the_recorded_checks(self):
@@ -158,11 +163,13 @@ class GoldenPi4Test(CommonChecks, GoldenBase):
         self.assertGreaterEqual(check["after_step"], self.project.last_geometry_step())
         self.assertIn("rebuild.py reproduces the model headless", validated)
         # and nothing is claimed beyond what ran: every line of Validated maps to a recorded family
-        known = list(VALIDATED_LINES.values()) + ["rebuild.py reproduces", "STEP-based collision check"]
+        known = list(VALIDATED_LINES.values()) + ["rebuild.py reproduces"]
         for line in bullet_lines(validated):
             self.assertTrue(any(k in line for k in known), line)
         self.assertIn("Physical fit, printing", not_validated)          # the app cannot check a real print
-        self.assertEqual(len(bullet_lines(not_validated)), 1, not_validated)
+        self.assertIn("Reconstruction accuracy vs the imported reference (not run)", not_validated)  # Issue 003
+        self.assertIn("Scan-to-model deviation", not_validated)         # the recon engine (recon.deviation)
+        self.assertEqual(len(bullet_lines(not_validated)), 3, not_validated)
 
     def test_03_the_model_text_cannot_widen_the_validated_list(self):
         # the model's closing text names STEP and STL exports only; the summary is generated from records
@@ -502,8 +509,10 @@ class GoldenPi4NominalTest(CommonChecks, GoldenBase):
         text = self.result.text
         self.assertEqual((self.result.outcome, self.result.ok), ("validated", True), text[-1500:])
         self.assertIn("reference status: catalog-nominal", text)
-        self.assertIn("STEP-based collision check", section(text, "NOT validated"))
-        self.assertNotIn("STEP-based collision check", section(text, "Validated"))
+        # V-3: step_collision is gone from the catalog; the not-run list names the real
+        # reference checks instead, and the collision vocabulary appears nowhere.
+        self.assertIn("Reconstruction accuracy vs the imported reference (not run)", section(text, "NOT validated"))
+        self.assertNotIn("STEP-based collision check", text)
         for heading in SUMMARY_HEADINGS:
             self.assertIn(heading, text)
 
