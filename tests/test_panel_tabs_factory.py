@@ -6,10 +6,14 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(__file__))
+from support import isolation  # noqa: E402  (the header every test that imports oscar must carry)
 
-from PySide import QtWidgets
-from oscar.panel_params import ParamsTab
-from oscar.panel_tabs import make_params_tab
+isolation.isolate_process()   # sandboxed settings/projects/logs BEFORE importing oscar
+
+from PySide import QtWidgets  # noqa: E402
+from oscar.panel_params import ParamsTab  # noqa: E402
+from oscar.panel_tabs import make_params_tab  # noqa: E402
 
 
 class ParamsTabFactoryTest(unittest.TestCase):
