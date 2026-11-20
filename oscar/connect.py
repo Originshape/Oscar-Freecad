@@ -642,6 +642,12 @@ def _first_sentence(text: str, name: str) -> str:
     return _clip(line[: end.start()] if end else line, 240)
 
 
+def _artifact_entry(kind: str, name: str, version: int, data: bytes) -> dict[str, Any]:
+    """One uploaded file's verifiable identity (issue #7): content hash and size, not a filename."""
+    return {"kind": kind, "name": name, "version": version, "bytes": len(data),
+            "sha256": hashlib.sha256(data).hexdigest()}
+
+
 def step_event(payload: dict[str, Any]) -> dict[str, Any] | None:
     """The progress event the browser shows for a finished step (the worker's ``step_finished`` payload), or None
     for one it doesn't show (skipped steps, plan bookkeeping)."""
@@ -1274,6 +1280,7 @@ class Loop:
         last_preview = float("-inf")
         version = 0
         cancelled = False
+        manifest: list[dict[str, Any]] = []   # issue #7: what this turn uploaded, verifiable
         awaiting = getattr(turn, "awaiting_answer", None)
         answer = getattr(turn, "answer", None)
 
@@ -1308,8 +1315,10 @@ class Loop:
                     if preview is not None:
                         version, data = preview[0], preview[1]
                         fmt = preview[2] if len(preview) > 2 and preview[2] in PREVIEW_FORMATS else "stl"
+                        name = f"preview-{version}.{fmt}"
                         self._guarded(job, "preview_upload", lambda: self._upload(
-                            client, job, turn, "preview", fmt, f"preview-{version}.{fmt}", version, data))
+                            client, job, turn, "preview", fmt, name, version, data, final=done))
+                        manifest.append(_artifact_entry("preview", name, version, data))
                         last_preview = now
                     if preview is not None or done:
                         self._guarded(job, "tree", lambda: self._send_tree(client, job, turn))
@@ -1324,6 +1333,8 @@ class Loop:
                 for name, fmt, data in self._guarded(job, "exports", turn.exports) or ():
                     self._guarded(job, "export_upload", lambda n=name, f=fmt, d=data: self._upload(
                         client, job, turn, "export", f, n, version, d))
+                    manifest.append(_artifact_entry("export", name, version, data))
+            self._send_artifacts(client, job, manifest)
         self._finish(client, job.task_id, answer, ok=ok, events=turn.events.drain(), message_id=job.message_id)
 
     def _send_tree(self, client: Client, job: Job, turn: Turn) -> None:
@@ -1346,9 +1357,28 @@ class Loop:
         except AuthError as e:   # a server that doesn't know trees yet: the turn goes on without one
             self._log("connect_tree_refused", task=job.task_id, error=str(e)[:200])
 
+    def _send_artifacts(self, client: Client, job: Job, files: list[dict[str, Any]]) -> None:
+        """The turn's uploaded files as ONE verifiable manifest (name, version, size, sha256), posted when the
+        turn ends ok: the workspace can prove WHICH bytes a finished turn produced instead of guessing artifact
+        identity from filenames (issue #7 — stale or mixed viewer models). A server that does not know the
+        event yet ignores it; the turn is never failed over it."""
+        if not files:
+            return
+        try:
+            client.post_events(job.task_id, [{"kind": "artifacts", "data": {"files": files}}])
+        except AuthUnavailable as e:
+            self._log("connect_artifacts_failed", task=job.task_id, error=str(e)[:200])
+        except SignedOut:
+            raise
+        except AuthError as e:   # a server that doesn't know the manifest yet: the turn goes on without one
+            self._log("connect_artifacts_refused", task=job.task_id, error=str(e)[:200])
+
     def _upload(self, client: Client, job: Job, turn: Turn, kind: str, fmt: str, name: str, version: int,
-                data: bytes) -> None:
-        waits = UPLOAD_RETRY_S if kind == "export" else ()   # a preview is replaced by the next one anyway
+                data: bytes, final: bool = False) -> None:
+        # an export — or the turn's FINAL preview, the model the browser keeps showing once the
+        # turn ends (issue #7) — is worth the retry ladder; a mid-turn preview is replaced by
+        # the next one anyway
+        waits = UPLOAD_RETRY_S if kind == "export" or final else ()
         for attempt in range(len(waits) + 1):
             try:
                 client.upload(job.task_id, kind=kind, fmt=fmt, name=name, version=version, data=data)
@@ -1360,7 +1390,7 @@ class Loop:
                 self._log("connect_upload_failed", task=job.task_id, file_kind=kind, attempt=attempt + 1,
                           error=str(e)[:200])
                 if attempt == len(waits) or self._stop.wait(waits[attempt]):
-                    if kind == "export":   # never a silent gap in the files: the browser says which one is missing
+                    if kind == "export" or final:   # never a silent gap: the browser is told which file is missing
                         turn.events.error(f"Couldn’t upload {name}: the OriginShape server was busy.")
                     return
 

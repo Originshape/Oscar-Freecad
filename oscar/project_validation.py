@@ -16,9 +16,13 @@ from typing import Any
 
 from .project_util import _json_safe
 
-# The ordered catalog of "things the app can say it validated".
+# The ordered catalog of "things the app can say it validated". ``rebuild`` is marked ran
+# by the Project when the manifest's headless rebuild check is fresh (V-3); ``physical``
+# is the deliberately-manual entry (never ran, always listed as not validated); the dead
+# ``step_collision`` id was REMOVED (V-3): its evidence is the reference interference
+# rows under ``fit.interference``, which never needed a second catalog entry.
 CATALOG = ("health", "fit.interference", "fit.clearance", "fit.ports", "fit.retention", "dfm",
-           "editability", "rebuild", "step_collision", "physical")
+           "editability", "reference.deviation", "recon.deviation", "rebuild", "physical")
 FIT_IDS = ("fit.interference", "fit.clearance", "fit.ports", "fit.retention")
 
 # Which check_fit rows belong to which catalog entry: by row kind / id prefix (the alignment rows of the kit are
@@ -29,6 +33,8 @@ FIT_ENTRY = {
     "fit.ports": lambda r: (r.get("kind") in ("containment", "alignment")
                             and not str(r.get("id", "")).startswith("hooks.")),
     "fit.retention": lambda r: r.get("kind") == "retention" or str(r.get("id", "")).startswith("hooks."),
+    "reference.deviation": lambda r: r.get("kind") == "reference_deviation",
+    "recon.deviation": lambda r: r.get("kind") == "recon_deviation",
 }
 
 HEALTH_ROWS_CAP = 400       # object rows kept in validation.json (a 5000-object document must not make every write megabytes)

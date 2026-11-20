@@ -53,6 +53,7 @@ MAP_FILE = "workspace-tasks.json"
 OUTBOX_FILE = "workspace-outbox.json"   # answers not yet taken by the server (``connect.Outbox``)
 RECOVER_TIMEOUT_S = 10.0
 DOCS_FILE = "workspace-docs.json"
+VERSIONS_FILE = "workspace-versions.json"   # task id -> highest preview/export version uploaded (issue #7)
 WORKBENCH = "OscarWorkbench"
 FILES_DIR = "workspace-files"
 START_TIMEOUT_S = 30.0
@@ -172,6 +173,36 @@ def _docs_path() -> str:
 def _load_docs() -> dict[str, dict]:
     """``task id -> {"doc": document name, "file": its saved path or ""}``."""
     return {str(k): v for k, v in _read_json(_docs_path()).items() if isinstance(v, dict)}
+
+
+# --- task -> highest uploaded version (issue #7) ----------------------------------------------------------------
+# A turn's preview/export ``version`` is its step index, which restarts at 1 every turn: a second
+# reconstruction of the same task would re-upload ``preview-1..N`` with LOWER versions than the
+# first turn left on the server, and anything that orders by version would show the OLD model.
+# The highest version a task ever uploaded is remembered here; a later turn's versions are
+# offset above it, so they can only ever move forward.
+
+
+def _versions_path() -> str:
+    return os.path.join(_chats.chats_dir(), VERSIONS_FILE)
+
+
+def _load_versions() -> dict[str, int]:
+    return {str(k): int(v) for k, v in _read_json(_versions_path()).items()
+            if isinstance(v, int) and not isinstance(v, bool)}
+
+
+def remember_version(task_id: str, version: int) -> None:
+    """Keep ``version`` as the task's highest uploaded version (never lowered)."""
+    if not task_id or version <= 0:
+        return
+    try:
+        known = _load_versions()
+        if version > known.get(task_id, 0):
+            known[task_id] = int(version)
+            _write_json(_versions_path(), known)
+    except Exception as e:  # noqa: BLE001 - a lost offset only costs version monotonicity
+        _log("connect_version_map_failed", task=task_id, error=f"{type(e).__name__}: {e}"[:200])
 
 
 _NAME_SKIP = frozenset({"and", "for", "the", "with", "from", "into", "make", "build", "create", "design"})
@@ -324,7 +355,12 @@ class GuiTurn:
         self._reply = ""
         self._ok, self._text = False, ""
         self._doc = doc   # the task's document (open_task_document); a step's active document replaces it
+        self._task_doc = doc   # issue #7: what the turn must keep previewing/exporting
+        self._docs_at_start: set[str] = set()   # documents that existed before this turn
         self._preview_due: int | None = None
+        self._last_n = 0        # the highest step index this turn previewed (issue #7)
+        self._preview_final = False
+        self._vbase = _load_versions().get(job.task_id, 0)   # issue #7: versions never regress per task
         self._geometry = False
         self._tree_due = False
         self._tree_final = False
@@ -342,6 +378,12 @@ class GuiTurn:
             signal = getattr(worker, name, None)
             if signal is not None and hasattr(signal, "connect"):
                 signal.connect(slot)
+        try:
+            import FreeCAD as App
+
+            self._docs_at_start = set(App.listDocuments())
+        except Exception:  # noqa: BLE001 - headless: nothing to track, the task document stays pinned
+            self._docs_at_start = set()
 
     def refuse(self, reason: str) -> None:
         """The panel did not start the turn (``_send_blocker``)."""
@@ -361,9 +403,14 @@ class GuiTurn:
         self.events.step(connect.step_event(data))
         if data.get("ok") and isinstance(data.get("step_index"), int) and data["step_index"] >= 0:
             doc = _active_doc_name()
+            # issue #7: follow the active document only when it IS the task's document or was
+            # CREATED during this turn; a scratch or verification document that merely got
+            # activated must not hijack the task's previews and exports
+            follow = doc and (doc == self._task_doc or doc not in self._docs_at_start)
             with self._lock:
                 self._preview_due = data["step_index"]
-                self._doc = doc or self._doc
+                if follow:
+                    self._doc = doc
                 self._geometry = True
                 self._tree_due = True
 
@@ -446,17 +493,37 @@ class GuiTurn:
         return self._ok, self._text
 
     def take_preview(self) -> tuple[int, bytes, str] | None:
-        """The model after a geometry step: a GLB with one node per part, else an STL of the whole model."""
+        """The model after a geometry step: a GLB with one node per part, else an STL of the whole model.
+
+        Issue #7 hardening: when the turn ends, the LAST state is previewed even if the final
+        step failed or was not journaled (``_preview_due`` stays None) — otherwise the browser
+        keeps an older model while the exports are newer. The version never regresses for a
+        task: each turn's previews and exports sit above everything a previous turn of the
+        same task uploaded (``workspace-versions.json``), so nothing that orders by version
+        can fall back to an older model."""
         with self._lock:
             due, doc = self._preview_due, self._doc
             self._preview_due = None
-        if due is None or not doc:
+            final = self._done.is_set() and self._geometry and not self._preview_final
+            if final:
+                self._preview_final = True
+            if due is not None:
+                self._last_n = max(self._last_n, due)
+        if (due is None and not final) or not doc:
             return None
+        n = due if due is not None else self._last_n
+        if final and n <= 0:
+            n = 1                       # a geometry turn with no journaled step still moves forward
+        version = self._vbase + n if self._vbase else n
         glb = _glb_preview(doc)
         if glb is not None:
-            return due, glb, "glb"
+            remember_version(self.job.task_id, version)
+            return version, glb, "glb"
         files = _export(doc, ("stl",), PREVIEW_TOLERANCE_MM)
-        return (due, files[0][2], "stl") if files else None
+        if not files:
+            return None
+        remember_version(self.job.task_id, version)
+        return version, files[0][2], "stl"
 
     def take_tree(self) -> dict | None:
         """The document's feature tree after a geometry change, and once more when the turn ends."""

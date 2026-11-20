@@ -195,6 +195,42 @@ def visible_tips(doc) -> list:
     return tips
 
 
+def hide_source_meshes(doc) -> list:
+    """The imported source meshes of ``doc`` that were hidden now: every visible ``Mesh::Feature`` is hidden
+    once the document holds at least one visible solid tip (the rebuilt body is the deliverable, the mesh was
+    its trace-over source — the enclosure kit hides its reference the same way). W-2: the CALLER only invokes
+    this after a verified outcome. The mesh object itself is never deleted. GUI thread only."""
+    if not visible_tips(doc):
+        return []
+    hidden = []
+    for obj in geometry_objects(doc):
+        if getattr(obj, "TypeId", "") != "Mesh::Feature" or not getattr(obj, "Visibility", True):
+            continue
+        try:
+            obj.Visibility = False
+        except Exception:  # noqa: BLE001 - a headless object may have no visibility
+            continue
+        hidden.append(obj.Name)
+    return hidden
+
+
+def show_source_meshes(doc, names: "list[str]") -> list:
+    """W-2: make ``names`` visible again (an outcome that lost verification must not
+    keep the scan hidden). Returns the names actually shown. GUI thread only."""
+    shown = []
+    by_name = {o.Name: o for o in doc.Objects}
+    for name in names or []:
+        obj = by_name.get(str(name))
+        if obj is None or getattr(obj, "Visibility", True):
+            continue
+        try:
+            obj.Visibility = True
+            shown.append(obj.Name)
+        except Exception:  # noqa: BLE001
+            continue
+    return shown
+
+
 def object_names(doc) -> tuple[list[str], list[str]]:
     """``(geometry-or-container names, every object name)`` of ``doc`` (the checkpoint sidecar's fields)."""
     primary = [o.Name for o in doc.Objects if is_container(o) or is_geometry(o)]
