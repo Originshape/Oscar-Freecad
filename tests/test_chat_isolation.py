@@ -574,5 +574,30 @@ class ChatIsolationTest(FlowTestCase):
         self.assertTrue(queued[-1].queued)
 
 
+    def test_provider_headers_and_persisted_state_discriminate_the_chats(self):
+        """Phase 5 coverage: BOTH chats' provider contexts carry their OWN ``x-oscar-session``
+        (never each other's), and reloading the persisted chats keeps each chat's history
+        separate - the restart half of the isolation boundary."""
+        from oscar.provider_originshape import context_headers
+        from oscar import chats as _chats
+
+        p = self.p
+        worker_a = self.send("Chat A message")
+        session_a = p._current_session()
+        self.end_turn(worker_a)
+        p._new_chat()
+        worker_b = self.send("Chat B message")
+        session_b = p._current_session()
+        self.end_turn(worker_b)
+        for session, worker in ((session_a, worker_a), (session_b, worker_b)):
+            headers = context_headers({"session": worker.kw["session_id"], "turn": "t"})
+            self.assertEqual(headers["x-oscar-session"], session["id"])
+        self.assertNotEqual(worker_a.kw["session_id"], worker_b.kw["session_id"])
+        loaded_a = _chats.load(session_a["id"])
+        loaded_b = _chats.load(session_b["id"])
+        self.assertEqual([str(m.content) for m in loaded_a["history"]], ["Chat A message"])
+        self.assertEqual([str(m.content) for m in loaded_b["history"]], ["Chat B message"])
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
