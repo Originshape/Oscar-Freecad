@@ -3,7 +3,8 @@
 Call ``isolate_process()`` at the top of each test module BEFORE importing ``oscar``.
 It is idempotent and process-wide: one temp sandbox per test process, removed at exit.
 It sets OSCAR_* variables only (settings, projects, logs, cache, downloads, and the account and script
-switches: no real keychain, no reachable OriginShape server, scripts allowed without a dialog).
+switches: no real keychain, no reachable OriginShape server, scripts allowed without a dialog, no settings sync started
+by the panel or the dialog).
 """
 
 import atexit
@@ -29,7 +30,7 @@ def isolate_process() -> str:
     env = os.environ
     PINNED.update(k for k in ("OSCAR_AI_SETTINGS", "OSCAR_PROJECTS_DIR", "OSCAR_LOG_DIR",
                               "OSCAR_CACHE_DIR", "OSCAR_DOWNLOAD_DIR", "OSCAR_ALLOW_CODE", "OSCAR_UPDATE_CHECK",
-                              "OSCAR_CREDENTIAL_STORE", "OSCAR_API_URL") if k in env)
+                              "OSCAR_CREDENTIAL_STORE", "OSCAR_API_URL", "OSCAR_SETTINGS_SYNC") if k in env)
     env.setdefault("OSCAR_AI_SETTINGS", os.path.join(_ROOT, "settings.json"))
     env.setdefault("OSCAR_PROJECTS_DIR", os.path.join(_ROOT, "projects"))
     env.setdefault("OSCAR_LOG_DIR", os.path.join(_ROOT, "logs"))
@@ -37,6 +38,7 @@ def isolate_process() -> str:
     env.setdefault("OSCAR_DOWNLOAD_DIR", os.path.join(_ROOT, "downloads"))
     env.setdefault("OSCAR_ALLOW_CODE", "1")              # scripts run without the approval dialog
     env.setdefault("OSCAR_UPDATE_CHECK", "0")            # no daily update check (the tests of it turn it on)
+    env.setdefault("OSCAR_SETTINGS_SYNC", "0")           # no AI settings sync on its own (its tests turn it on)
     env.setdefault("OSCAR_CREDENTIAL_STORE", "memory")   # never the real keychain or credential file
     env.setdefault("OSCAR_API_URL", "http://127.0.0.1:9")  # unroutable: no test reaches a real OriginShape server
     # HOME is deliberately NOT overridden: tests that spawn the bundled python need the real user-site

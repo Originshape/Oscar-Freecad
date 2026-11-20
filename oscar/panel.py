@@ -53,6 +53,7 @@ from . import __version__
 from . import attachments as _attach
 from . import consent_gui, panel_chats, panel_markup, paths
 from . import params as _params
+from . import settings_sync as _settings_sync
 from . import settings_ui
 from .agent import AgentWorker
 from .auth import consent as _consent
@@ -166,6 +167,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         self._register_netguard_hook()
         self._register_quit_hook()
         self._init_account()
+        self._init_settings_sync()
         self._append_empty_state()
         self._init_project_links()
         self._load_sessions()
@@ -519,9 +521,33 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
                 self._reload_profiles()
                 self._flash_status(f"Could not switch the profile: {e}", 6000)
                 return
+            _settings_sync.request("panel", prefer="local")   # the profile in use, on the website too
         profile = _params.active_profile()
         self.model_label.setText(_params.model_display_name(profile))
         self._refresh_account()
+
+    def _init_settings_sync(self) -> None:
+        """The AI model settings follow the OriginShape account (``settings_sync``): a sync when the panel starts, and
+        the picker re-read when a pull changed the profiles."""
+        try:
+            settings_ui.account_hub().settings_synced.connect(self._on_settings_synced)
+            _settings_sync.request("start")
+        except Exception as e:  # noqa: BLE001 - the panel works without the sync
+            self._log_panel_error("settings_sync", e)
+
+    def _on_settings_synced(self, payload: str = "") -> None:
+        """A sync's news (GUI thread): a pull that changed the profiles shows in the picker and the model label."""
+        import json
+
+        try:
+            changed = json.loads(payload or "{}").get("event") == "changed"
+        except (AttributeError, TypeError, ValueError):
+            changed = False
+        if changed:
+            try:
+                self._reload_profiles()
+            except Exception as e:  # noqa: BLE001
+                self._log_panel_error("settings_sync", e)
 
     def _open_settings(self, account_action: str = ""):
         """The settings dialog (modal). ``account_action`` (``"signin"`` / ``"device"``) starts that sign-in at once.
@@ -1049,6 +1075,8 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
             elif blocker == "consent":   # the user is here and wants to chat: the prompt, at once
                 QtCore.QTimer.singleShot(0, lambda: consent_gui.open_dialog(self))
             return
+        if workspace is None:
+            _settings_sync.pull_if_stale()   # a minute since the last pull: one in the background (never waited for)
         typed = text
 
         if workspace is None:

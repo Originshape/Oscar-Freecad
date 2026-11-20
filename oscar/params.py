@@ -20,6 +20,14 @@ so. Move to the OS keychain if that ever stops being acceptable. The
 OriginShape account's sign-in is never stored here (``oscar.auth.keystore``):
 its profile (``account_profile()``) carries no key and no URL.
 
+Every profile has a stable ``id`` (``settings_sync.ensure_ids``: a file from before ids reads with ids derived from the
+names, the same on every read, kept by the next write). The active profile is ``active_profile_id`` plus its name in
+``active_profile`` (what an Oscar from before ids reads; a name that disagrees wins, see
+``settings_sync.active_index``), so a rename never changes which profile is in use. ``ai_sync`` is the snapshot of
+the last sync with the OriginShape account (``oscar.settings_sync``). An older Oscar ignores the profile ids and keeps
+``active_profile_id`` / ``ai_sync`` as they are (they are top-level keys it does not know); when it saves the
+profiles without their ids, they are found again by name.
+
 Writers never build a file from a read that failed: every read-modify-write
 reads strictly (``SettingsUnavailable``, an ``OSError``, when the file exists
 but cannot be read right now), and ``<name>.bak`` keeps the previous file
@@ -37,6 +45,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 from . import context_guard as _context_guard
 from . import fsretry as _fsretry
+from . import settings_sync as _sync
 from .auth import account as _auth_account
 
 import FreeCAD
@@ -332,6 +341,11 @@ class Profile:
     notes: str = field(default="")
     reasoning: str = field(default="auto")           # "off" | "low" | "medium" | "high" | "auto"
     caps_override: dict = field(default_factory=dict)  # ModelCaps field overrides, e.g. {"tools": "text", "context_window": 8192}
+    id: str = field(default_factory=_sync.new_profile_id)   # stable: made once, kept across renames (and synced)
+    # A key a sync set aside when the account's settings moved this profile to another provider or host:
+    # {"key", "provider", "base_url"} of where it was entered for. Never sent anywhere; it comes back when the profile
+    # points there again, or when the user confirms it in the settings dialog (settings_sync).
+    held_key: dict = field(default_factory=dict)
 
     def __post_init__(self):
         # A hand-edited settings file must not be able to break the provider layer.
@@ -339,8 +353,13 @@ class Profile:
             self.reasoning = "auto"
         if not isinstance(self.caps_override, dict):
             self.caps_override = {}
+        if not _sync.valid_id(self.id):
+            self.id = _sync.new_profile_id()
+        if not isinstance(self.held_key, dict) or not isinstance(self.held_key.get("key"), str):
+            self.held_key = {}
         # Every provider key loaded from the settings file stays out of the model's context (context_guard).
         _context_guard.remember(self.api_key)
+        _context_guard.remember(self.held_key.get("key"))
 
 
 def effective_limits(profile) -> tuple[float, int]:
@@ -484,6 +503,7 @@ def _read_state(*, for_write: bool = False) -> dict[str, Any]:
         state["active_profile"] = ""
     if not isinstance(state.get("model_caps"), dict):
         state["model_caps"] = {}
+    _sync.ensure_ids(state)   # in memory: the same ids on every read of the same file; a write keeps them
     return state
 
 
@@ -721,52 +741,66 @@ def ensure_account_profile(*, activate: bool) -> str:
         state = _read_state(for_write=True)
         profiles = state["profiles"]
         names = [p.get("name") if isinstance(p.get("name"), str) else "" for p in profiles]
-        active = state["active_profile"]
-        in_use = active if active and active in names else next((n for n in names if n), "")   # active_profile_name()
-        name = next((n for p, n in zip(profiles, names) if n and p.get("provider") == ACCOUNT_PROVIDER), "")
+        index = _sync.active_index(state)
+        in_use = profiles[index] if index >= 0 else None   # active_profile()
+        account = next((p for p, n in zip(profiles, names) if n and p.get("provider") == ACCOUNT_PROVIDER), None)
         changed = False
-        if not name:
+        if account is None:
             taken = {n.casefold() for n in names}
             name, number = ACCOUNT_PROFILE_NAME, 2
             while name.casefold() in taken:
                 name, number = f"{ACCOUNT_PROFILE_NAME} {number}", number + 1
-            profiles.insert(0, asdict(account_profile(name)))
+            account = asdict(account_profile(name))
+            profiles.insert(0, account)
             changed = True
         if activate:
-            wanted = name
-        elif changed and in_use:   # pinned by name: the new first profile must not take over from the one in use
+            wanted = account
+        elif changed and in_use is not None:   # pinned: the new first profile must not take over from the one in use
             wanted = in_use
         else:
-            wanted = active
-        if active != wanted:
-            state["active_profile"] = wanted
+            wanted = None
+        if wanted is not None and _sync.set_active(state, next(i for i, p in enumerate(profiles) if p is wanted)):
             changed = True
         if changed:
             _write_state(state)
-        return name
+        return account["name"]
+
+
+def _load_checked() -> tuple[list[dict], bool, str | None]:
+    """``(stored profiles, from_file, active id)``, seeding the account profile into a file without profiles (see
+    ``load_profiles_checked``)."""
+    with _LOCK:
+        state = _read_state()
+    if state["profiles"]:
+        index = _sync.active_index(state)
+        return state["profiles"], True, state["profiles"][index].get("id")
+    seed = asdict(_seed_profile())
+    try:
+        with _LOCK:   # one transaction: re-read strictly, seed only a file that really has no profiles
+            state = _read_state(for_write=True)
+            if state["profiles"]:   # the first read failed and this one did not: never seed over real profiles
+                index = _sync.active_index(state)
+                return state["profiles"], True, state["profiles"][index].get("id")
+            state["profiles"] = [seed]
+            _sync.set_active(state, 0)
+            _write_state(state)
+    except OSError:
+        return [seed], False, seed["id"]   # unreadable right now: the starter profile in memory, the file untouched
+    return [seed], True, seed["id"]
 
 
 def load_profiles_checked() -> tuple[list[Profile], bool]:
     """``(profiles, from_file)``. ``from_file`` is False when the list is an in-memory starter profile because the
     settings file exists but cannot be read right now: a caller that would SAVE the list must not."""
-    with _LOCK:
-        raw = _read_state()["profiles"]
-    profiles = _profiles_from(raw)
-    if profiles:
-        return profiles, True
-    seed = _seed_profile()
-    try:
-        with _LOCK:   # one transaction: re-read strictly, seed only a file that really has no profiles
-            state = _read_state(for_write=True)
-            stored = _profiles_from(state["profiles"])
-            if stored:   # the first read failed and this one did not: never seed over real profiles
-                return stored, True
-            state["profiles"] = [asdict(seed)]
-            state["active_profile"] = seed.name
-            _write_state(state)
-    except OSError:
-        return [seed], False   # unreadable right now: keep the starter profile in memory, the file untouched
-    return [seed], True
+    raw, from_file, _active = _load_checked()
+    return _profiles_from(raw), from_file
+
+
+def load_profiles_for_edit() -> tuple[list[Profile], bool, dict]:
+    """``load_profiles_checked()`` plus, from the same read, what the file holds for them: ``{"profiles": [stored
+    dicts], "active_profile_id"}``, the ``base`` the settings dialog saves with (``save_profiles``)."""
+    raw, from_file, active = _load_checked()
+    return _profiles_from(raw), from_file, {"profiles": json.loads(json.dumps(raw)), "active_profile_id": active}
 
 
 def load_profiles() -> list[Profile]:
@@ -775,39 +809,81 @@ def load_profiles() -> list[Profile]:
     return load_profiles_checked()[0]
 
 
-def save_profiles(profiles: list[Profile]) -> None:
+def save_profiles(profiles: list[Profile], *, active_id: str | None = None,
+                  base: dict | None = None) -> None:
+    """Replace the profiles (one locked, strict read-modify-write). The active profile is ``active_id`` when given,
+    else the one that was active (followed by its id, so a rename keeps it), else the first.
+
+    ``base`` (``{"profiles": [dicts], "active_profile_id"}``, what the settings dialog loaded) merges instead of
+    replacing: what the caller changed since ``base`` wins, and what changed in the file meanwhile (a sync with the
+    OriginShape account) is kept (``settings_sync.merge_saved``)."""
     with _LOCK:
         state = _read_state(for_write=True)
-        state["profiles"] = [asdict(p) for p in profiles]
-        # Drop the active profile if it no longer exists.
-        names = {p.name for p in profiles}
-        if state["active_profile"] not in names and profiles:
-            state["active_profile"] = profiles[0].name
+        current = state["profiles"][_sync.active_index(state)].get("id") if state["profiles"] else None
+        new = [asdict(p) for p in profiles]
+        if base is not None:   # all three as Profile dicts, so a field an older file lacks is not taken for an edit
+            def normalised(dicts):
+                return [asdict(p) for p in _profiles_from(dicts)]
+
+            merged = _sync.merge_saved(
+                {"profiles": normalised(base.get("profiles") or []), "active_profile_id": base.get("active_profile_id")},
+                {"profiles": new, "active_profile_id": active_id},
+                {"profiles": normalised(state["profiles"]), "active_profile_id": current})
+            new, active_id = merged["profiles"], merged["active_profile_id"]
+        state["profiles"] = new
+        ids = [p.get("id") for p in new]
+        wanted = active_id if active_id in ids else current if current in ids else (ids[0] if ids else None)
+        _sync.set_active(state, ids.index(wanted) if wanted in ids else -1)
         _write_state(state)
+
+
+def update_state(mutate):
+    """One locked, strict read-modify-write of the whole settings state, for ``settings_sync``: ``mutate(state)``
+    changes the dict in place and returns ``(write, result)``; the file is written when ``write``. Returns ``result``.
+    Raises ``SettingsUnavailable`` (an ``OSError``) instead of working on a read that failed."""
+    with _LOCK:
+        state = _read_state(for_write=True)
+        write, result = mutate(state)
+        if write:
+            _write_state(state)
+        return result
 
 
 def active_profile_name() -> str:
     with _LOCK:
         state = _read_state()
-    name = state["active_profile"]
-    if name and any(p.get("name") == name for p in state["profiles"]):
-        return name
-    return state["profiles"][0].get("name", "") if state["profiles"] else ""
+    index = _sync.active_index(state)
+    return state["profiles"][index].get("name", "") if index >= 0 else ""
+
+
+def active_profile_id() -> str:
+    """The id of the active profile (``""`` without profiles)."""
+    with _LOCK:
+        state = _read_state()
+    index = _sync.active_index(state)
+    return state["profiles"][index].get("id", "") if index >= 0 else ""
 
 
 def active_profile() -> Profile | None:
-    name = active_profile_name()
-    for p in load_profiles():
-        if p.name == name:
-            return p
-    return None
+    with _LOCK:
+        state = _read_state()
+    index = _sync.active_index(state)
+    wanted = state["profiles"][index].get("id") if index >= 0 else None
+    return next((p for p in load_profiles() if p.id == wanted), None)
+
+
+def profile_by_id(profile_id: str) -> Profile | None:
+    """The stored profile with this id (with its key), or None."""
+    with _LOCK:
+        raw = _read_state()["profiles"]
+    return next((p for p in _profiles_from(raw) if p.id == profile_id), None)
 
 
 def set_active_profile(name: str) -> None:
     with _LOCK:
         state = _read_state(for_write=True)
-        if any(p.get("name") == name for p in state["profiles"]):
-            state["active_profile"] = name
+        index = next((i for i, p in enumerate(state["profiles"]) if p.get("name") == name), -1)
+        if index >= 0 and _sync.set_active(state, index):
             _write_state(state)
 
 

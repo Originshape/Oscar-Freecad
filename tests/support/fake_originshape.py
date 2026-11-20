@@ -43,6 +43,14 @@ ROUTES
                                                   own sign-in or the website may), 400 invalid_request unless ``accept_terms`` is
                                                   true, 409 conflict for a ``terms_version`` that isn't the current one,
                                                   else 200 {"consent"}; ``me`` follows (``consent_posts``: the bodies)
+  GET  /v1/me/ai-settings                         ``ai_settings`` (the AiSettings of ai-settings-sync.md) for a valid bearer;
+                                                  403 forbidden for a personal API key
+  PUT  /v1/me/ai-settings                         a write from Oscar: 409 conflict (``details.current``, in the error
+                                                  envelope) unless ``version`` is the stored one; 400 invalid_request for
+                                                  what the contract refuses (unknown fields, a field named like a
+                                                  credential, a base URL with a user, password, query or fragment, names
+                                                  not unique, bad ids / provider / reasoning / overrides); else 200 with
+                                                  the stored settings (version + 1, ``updated_by`` "freecad")
   PUT  /v1/freecad/chats/{id}/turns/{n}           a chat record (``chat_turns[(id, n)]``, replaced when sent again) |
   PUT  /v1/freecad/chats/{id}/files?name&kind&turn   a file (``chat_files``; 201, or 200 for bytes already kept; 411
                                                   without Content-Length, 413 past ``file_limit`` / ``stl_limit``).
@@ -69,6 +77,12 @@ SCRIPTING (plain attributes; change them at any time)
                                               obeys them, see GATEWAY). It has no ``consent`` / ``legal`` (a server
                                               from before the Terms) until ``set_consent(accepted=, current=)``
   models = {...}                              the /v1/models body
+  ai_settings = {...}                         the stored AiSettings; ``web_edit(mutate)`` makes a write from the
+                                              website (``mutate(settings)`` changes a copy; ``has_key`` and
+                                              ``base_url_local`` follow the contract's rules for a website write)
+  before_ai_put = None | callable(fake)       runs before a PUT is handled (a website write that lands first: a 409)
+  conflict_details_beside = False             put a 409's ``details`` beside the error envelope instead of in it;
+                                              ``conflict_without_details = True`` leaves them out
   metadata_overrides = {}                     merged over the discovery document (a value of None deletes the key)
   delays = {"/oauth/token": 0.3}              sleep BEFORE handling a path (to overlap concurrent requests)
   reply_delays = {"/oauth/token": 0.3}        sleep AFTER handling, before answering (the server acted; the
@@ -107,7 +121,8 @@ STATE you can assert on
   calls, calls_to(path), gateway_requests, counts, grants (id -> Grant), revoked_tokens, api_keys,
   devices (user_code -> Device), refresh_state(token) -> "active" | "used" | "revoked" | "unknown",
   grant_of(refresh_token) -> Grant | None, consent_posts (bodies), chat_turns ((chat id, turn) -> body),
-  chat_files (dicts: chat, name, kind, turn, size, sha256, content_length, stored)
+  chat_files (dicts: chat, name, kind, turn, size, sha256, content_length, stored), ai_settings_puts (the raw
+  body of every PUT /v1/me/ai-settings, refused ones too), ai_settings_refusals (the 400 messages)
 
 COUNTER KEYS
   "discovery", "jwks", "authorize", "token:authorization_code", "token:refresh_token", "token:device_code",
@@ -278,6 +293,84 @@ def message_json(text: str = "Hello from the fake OriginShape gateway.", *, usag
     return GatewayReply(200, json.dumps(body).encode("utf-8"), "application/json")
 
 
+AI_TOP_FIELDS = {"version", "active_profile_id", "profiles"}
+AI_PROFILE_FIELDS = {"id", "name", "provider", "base_url", "base_url_local", "model", "reasoning", "overrides", "notes",
+                     "has_key"}
+AI_OVERRIDES = ("max_output", "temperature", "context_window", "tools", "ollama_native")
+AI_CREDENTIAL_WORDS = ("key", "token", "secret", "password", "authorization")
+_AI_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def _ai_field_problem(names, allowed) -> str:
+    for name in names:
+        if name not in allowed:
+            return f"Unknown field {name!r}. Provider keys never leave FreeCAD."
+        if name != "has_key" and any(word in name.lower() for word in AI_CREDENTIAL_WORDS):
+            return "Provider keys never leave FreeCAD."
+    return ""
+
+
+def _ai_settings_problem(body) -> str:
+    """What the API refuses in a PUT /v1/me/ai-settings body (ai-settings-sync.md sections 1 and 2), or ""."""
+    if not isinstance(body, dict):
+        return "A JSON object is required."
+    problem = _ai_field_problem(body, AI_TOP_FIELDS)
+    if problem:
+        return problem
+    if isinstance(body.get("version"), bool) or not isinstance(body.get("version"), int):
+        return "version is required."
+    profiles = body.get("profiles")
+    if not isinstance(profiles, list) or len(profiles) > 50:
+        return "profiles: at most 50."
+    names, ids = set(), set()
+    for p in profiles:
+        if not isinstance(p, dict):
+            return "A profile is an object."
+        problem = _ai_field_problem(p, AI_PROFILE_FIELDS) or _ai_field_problem(p.get("overrides") or {}, set(AI_OVERRIDES))
+        if problem:
+            return problem
+        if set(p) != AI_PROFILE_FIELDS or not isinstance(p["overrides"], dict) or set(p["overrides"]) != set(AI_OVERRIDES):
+            return "A profile has every field."
+        if not isinstance(p["id"], str) or not _AI_ID_RE.fullmatch(p["id"]) or p["id"] in ids:
+            return "Profile ids are 1-64 of A-Z a-z 0-9 _ - and unique."
+        ids.add(p["id"])
+        if not isinstance(p["name"], str) or not 1 <= len(p["name"]) <= 80 or p["name"].casefold() in names:
+            return "Profile names are 1-80 characters and unique."
+        names.add(p["name"].casefold())
+        if p["provider"] not in ("originshape", "anthropic", "openai_compat"):
+            return "Unknown provider."
+        if p["reasoning"] not in ("auto", "off", "low", "medium", "high"):
+            return "Unknown reasoning."
+        if not isinstance(p["model"], str) or len(p["model"]) > 200 or not isinstance(p["notes"], str) \
+                or len(p["notes"]) > 2000 or not isinstance(p["has_key"], bool) or not isinstance(p["base_url_local"], bool):
+            return "A profile field has the wrong type or length."
+        url = p["base_url"]
+        if not isinstance(url, str) or len(url) > 500:
+            return "base_url: at most 500 characters."
+        if p["provider"] == "originshape" or p["base_url_local"]:
+            if url:
+                return "base_url must be empty here."
+        else:
+            parts = urlsplit(url)
+            if parts.scheme not in ("http", "https") or not parts.hostname:
+                return "base_url must be an http(s) URL."
+            if parts.username or parts.password or parts.query or parts.fragment or "?" in url or "#" in url:
+                return "Provider keys never leave FreeCAD."
+        o = p["overrides"]
+        checks = (o["max_output"] is None or (type(o["max_output"]) is int and 256 <= o["max_output"] <= 1_000_000),
+                  o["temperature"] is None or (isinstance(o["temperature"], (int, float))
+                                               and not isinstance(o["temperature"], bool) and 0 <= o["temperature"] <= 2),
+                  o["context_window"] is None or (type(o["context_window"]) is int
+                                                  and 1024 <= o["context_window"] <= 10_000_000),
+                  o["tools"] in (None, "auto", "native", "text"),
+                  o["ollama_native"] in (None, True, False))
+        if not all(checks):
+            return "An override is out of range."
+    if body.get("active_profile_id") is not None and body["active_profile_id"] not in ids:
+        return "active_profile_id must be one of the profiles."
+    return ""
+
+
 def envelope(code: str, message: str = "", *, error_type: str | None = None, action_url: str | None = None) -> dict:
     """The API's error body."""
     error = {"type": error_type or _ERROR_TYPES.get(code, "api_error"), "code": code, "message": message or code}
@@ -380,6 +473,13 @@ class FakeOriginShape:
         self.gateway: list = []
         self.me: dict = {}
         self.models: dict = default_models()
+        self.ai_settings: dict = {"version": 0, "updated_at": None, "updated_by": None, "active_profile_id": None,
+                                  "profiles": []}
+        self.before_ai_put = None
+        self.conflict_details_beside = False
+        self.conflict_without_details = False
+        self.ai_settings_puts: list[bytes] = []
+        self.ai_settings_refusals: list[str] = []
         self.plugin: dict = {"latest_version": "0.1.0", "min_version": "0.1.0", "download_url": ""}
         self.file_limit = 50_000_000      # PUT .../files: 413 past this (an .stl: past stl_limit)
         self.stl_limit = 100_000_000
@@ -805,6 +905,68 @@ class FakeOriginShape:
             return self._unauthorized()
         return self._json(200, copy.deepcopy(self.models))
 
+    # the AI model settings (ai-settings-sync.md) ------------------------------------------------------------
+
+    def _api_key_bearer(self, call: RecordedCall) -> bool:
+        auth = call.headers.get("authorization", "")
+        token = auth[7:].strip() if auth.lower().startswith("bearer ") else call.headers.get("x-api-key", "").strip()
+        return token in self.api_keys
+
+    def web_edit(self, mutate) -> dict:
+        """A write from the website: ``mutate(settings)`` edits a copy of the stored settings. As the contract says, an
+        existing profile keeps the stored ``has_key`` / ``base_url_local`` (a non-empty ``base_url`` clears
+        ``base_url_local``) and a new one starts with both false. Returns the new settings."""
+        with self.lock:
+            current = copy.deepcopy(self.ai_settings)
+            stored = {p["id"]: p for p in current["profiles"]}
+            mutate(current)
+            for profile in current["profiles"]:
+                old = stored.get(profile["id"])
+                profile["has_key"] = bool(old and old.get("has_key"))
+                local = bool(old and old.get("base_url_local"))
+                profile["base_url_local"] = local and not profile.get("base_url")
+                profile.setdefault("overrides", {k: None for k in AI_OVERRIDES})
+            current.update(version=current["version"] + 1, updated_by="web",
+                           updated_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+            self.ai_settings = current
+            return copy.deepcopy(current)
+
+    def route_ai_settings_get(self, call: RecordedCall) -> tuple:
+        self.counts["ai_settings_get"] += 1
+        if not self._bearer(call.headers):
+            return self._unauthorized()
+        if self._api_key_bearer(call):
+            return self._json(403, envelope("forbidden", "Only the website or Oscar's own sign-in may."))
+        return self._json(200, copy.deepcopy(self.ai_settings))
+
+    def route_ai_settings_put(self, call: RecordedCall) -> tuple:
+        self.counts["ai_settings_put"] += 1
+        self.ai_settings_puts.append(call.raw)
+        if not self._bearer(call.headers):
+            return self._unauthorized()
+        if self._api_key_bearer(call):
+            return self._json(403, envelope("forbidden", "Only the website or Oscar's own sign-in may."))
+        if self.before_ai_put is not None:
+            hook, self.before_ai_put = self.before_ai_put, None
+            hook(self)
+        body = call.json if isinstance(call.json, dict) else None
+        problem = _ai_settings_problem(body)
+        if problem:
+            self.ai_settings_refusals.append(problem)
+            return self._json(400, envelope("invalid_request", problem))
+        if body["version"] != self.ai_settings["version"]:
+            error = envelope("conflict", "The settings changed since you read them.")
+            details = {"current": copy.deepcopy(self.ai_settings)}
+            if self.conflict_details_beside:
+                error["details"] = details
+            elif not self.conflict_without_details:
+                error["error"]["details"] = details
+            return self._json(409, error)
+        self.ai_settings = {"version": self.ai_settings["version"] + 1,
+                            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "updated_by": "freecad",
+                            "active_profile_id": body["active_profile_id"], "profiles": copy.deepcopy(body["profiles"])}
+        return self._json(200, copy.deepcopy(self.ai_settings))
+
     def route_plugin(self, call: RecordedCall) -> tuple:
         self.counts["plugin"] += 1
         body = copy.deepcopy(self.plugin)
@@ -961,6 +1123,8 @@ class FakeOriginShape:
         ("POST", "/v1/me/consent"): "route_consent",
         ("GET", "/v1/models"): "route_models",
         ("GET", "/v1/plugin"): "route_plugin",
+        ("GET", "/v1/me/ai-settings"): "route_ai_settings_get",
+        ("PUT", "/v1/me/ai-settings"): "route_ai_settings_put",
         ("POST", GATEWAY_PATH): "route_gateway",
     }
 
