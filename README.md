@@ -208,8 +208,8 @@ keys are added and changed here, in **⚙ → AI model**.
 - **Test in FreeCAD:** with **Connect to the OriginShape workspace** on, the website can ask this FreeCAD to run **Test
   connection** for a profile. The test runs here, with the key saved here; only its result (passed or not, which
   checks passed, and a short message) goes back. The message, and every name and model sent, loses any key: by its
-  shape, by value with any piece of it (such as its last characters), and as providers echo it masked
-  (`sk-proj-****…Ab9Z`, `**** abcd`).
+  shape, by value (the whole key, any 8 characters of it, its last characters as in "ending in 4f2a"), and as
+  providers echo it masked (`sk-proj-****…Ab9Z`, `**** abcd`).
 - `OSCAR_SETTINGS_SYNC=0` (an environment variable) keeps these settings on this computer only.
 
 ## Your first part

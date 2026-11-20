@@ -303,7 +303,7 @@ class KeyTailTest(unittest.TestCase):
             "key ●●●●abcd": "key [redacted]",
             "key ∙∙∙∙abcd": "key [redacted]",
             "key ending in abcd": "key ending in [redacted]",
-            "key ending in ABCD.": "key ending in [redacted].",
+            "key ending in ABCD.": "key ending in ABCD.",      # keys are case-sensitive: not this key's tail
             "key sk-..abcd": "key [redacted]",
             "Incorrect API key provided: sk-proj-****abcd.": "Incorrect API key provided: [redacted]",
             "starts sk-proj-ABCD and has IJKLMNOP": "starts [redacted] and has [redacted]",
@@ -317,6 +317,36 @@ class KeyTailTest(unittest.TestCase):
                 self.assertFalse(keyguard.looks_like_a_key(out, (self.KEY,)))
         self.assertEqual(keyguard.scrub("LM Studio / Ollama (local)", ("lm-studio", "ollama")),
                          "LM Studio / Ollama (local)", "a short placeholder key is not hunted in pieces")
+
+    def test_a_keys_prefix_and_short_pieces_inside_its_body_are_no_piece_of_it(self):
+        key = "sk-proj-ABCDEFGHproxyIJKLMNOPQRSTUV4f2a"
+        for name in ("My project", "Proxy", "proxy server", "proj sk", "Projects 4f2a2"):
+            with self.subTest(name):
+                self.assertEqual(keyguard.scrub(name, (key,)), name)
+                self.assertFalse(keyguard.looks_like_a_key(name, (key,)))
+                self.assertEqual(settings_sync.to_wire(stored(name, "p", api_key=key), (key,))["name"], name)
+        self.assertEqual(keyguard.key_body(key), "ABCDEFGHproxyIJKLMNOPQRSTUV4f2a")
+        self.assertEqual(keyguard.key_body("sk-ant-api03-Zz"), "Zz")
+
+    def test_a_keys_tail_as_a_word_and_eight_characters_of_its_body_are(self):
+        key = "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWX4f2a"
+        cases = {
+            "ending in 4f2a": "ending in [redacted]",
+            "key …4f2a": "key [redacted]",
+            "key ...4f2a": "key [redacted]",
+            "tail WX4f2a.": "tail [redacted].",
+            "Work KLMNOPQR": "Work [redacted]",
+            "xxABCDEFGHyy": "[redacted]",
+            "ending in 4F2A": "ending in 4F2A",
+            "the 4f2ab model": "the 4f2ab model",
+        }
+        for text, expected in cases.items():
+            with self.subTest(text):
+                self.assertEqual(keyguard.scrub(text, (key,)), expected)
+        state = state_of(stored("Work KLMNOPQR", "p", api_key=key))
+        self.assertEqual(settings_sync.local_settings(state)["profiles"][0]["name"], "Work [redacted]")
+        tail_named = "sk-proj-ABCDEFGHIJKLMNOPQRSTUVProxy"
+        self.assertEqual(keyguard.scrub("Proxy", (tail_named,)), "[redacted]", "the key's very tail, as a word")
 
     def test_the_test_message_and_the_wire_use_the_same_policy(self):
         text = "Proxy ending in abcd ●●●●wxyz"

@@ -5,8 +5,10 @@ refuse:
 
 * **a whole credential by its shape** (``context_guard``: provider and OriginShape keys, tokens, private keys), and
   every secret this process has handled (``context_guard.remember``);
-* **a key this computer holds, by value** (``secrets``): the whole key, and any word of 4 or more letters, digits,
-  ``-`` or ``_`` that is a piece of it, such as its last characters ("ending in 4f2a");
+* **a key this computer holds, by value** (``secrets``): the whole key; in its body (the key without its provider's
+  prefix, ``KEY_PREFIX``: ``sk-proj-`` is in every OpenAI key, so "My project" is no piece of one), any piece of 8 or
+  more characters anywhere, and its last 4 to 8 characters as a word of their own ("ending in 4f2a", "…4f2a"); both
+  case-sensitive, as keys are;
 * **a key a provider echoed masked**: a word with a run of mask characters (``*``, ``•``, ``●``, ``∙``), an ellipsis
   or ``..`` against letters or digits, or a run of four ``x`` (``sk-proj-****…Ab9Z``, ``****abcd``, ``sk-..abcd``,
   ``sk-xxxxxxxx1234``); a word of mask characters alone takes the next word with it ("**** abcd");
@@ -26,7 +28,12 @@ from . import context_guard as _context_guard
 REDACTED = "[redacted]"
 MIN_VALUE = 8          # a key shorter than this (a local server's placeholder) is not looked for by value
 MIN_PIECE_SOURCE = 16  # pieces are looked for only of a key at least this long (a real key, not "lm-studio")
-MIN_PIECE = 4          # the shortest piece of a key that counts
+PIECE_ANYWHERE = 8     # a piece of a key's body this long counts wherever it is
+TAIL = (4, 8)          # the body's last 4 to 8 characters count as a word of their own
+# The prefixes of the keys providers issue (the same keys context_guard knows by shape), longest first: never a piece.
+KEY_PREFIX = re.compile(r"^(?:sk-ant-api\d{2}-|sk-ant-admin\d{2}-|sk-ant-|sk-proj-|sk-svcacct-|sk-or-v1-|sk-|gsk_|"
+                        r"xai-|pplx-|csk-|fw_|tgp_v1_|AIza|os_live_|os_test_|hf_|r8_|nvapi-|gh[pousr]_|github_pat_|"
+                        r"glpat-|xox[abprs]-|AKIA|ASIA|whsec_|GOCSPX-)")
 KEY_PREFIXES = ("sk-", "gsk_", "xai-", "pplx-", "csk-", "fw_", "tgp_v1_", "AIza", "os_live_", "os_test_", "hf_", "r8_",
                 "nvapi-", "ghp_", "gho_", "ghs_", "github_pat_", "glpat-", "xoxb-", "xoxp-", "AKIA", "ASIA")
 
@@ -58,9 +65,31 @@ def _starts_like_a_key(run: str) -> bool:
     return any(run.startswith(prefix) and len(run) > len(prefix) for prefix in KEY_PREFIXES)
 
 
-def _piece_of(word: str, keys: list[str]) -> bool:
-    lowered = word.lower()
-    return len(word) >= MIN_PIECE and any(lowered in key.lower() for key in keys)
+def key_body(key: str) -> str:
+    """``key`` without its provider's prefix (``KEY_PREFIX``)."""
+    match = KEY_PREFIX.match(key)
+    return key[match.end():] if match else key
+
+
+class _Pieces:
+    """The pieces of the keys held here that count (see the module docstring), for runs of key characters."""
+
+    def __init__(self, secrets: Iterable[str] | None) -> None:
+        self.bodies = [body for body in (key_body(k) for k in _usable(secrets, MIN_PIECE_SOURCE))
+                       if len(body) >= PIECE_ANYWHERE]
+        self.grams = {body[i:i + PIECE_ANYWHERE] for body in self.bodies
+                      for i in range(len(body) - PIECE_ANYWHERE + 1)}
+
+    def __bool__(self) -> bool:
+        return bool(self.bodies)
+
+    def hit(self, run: str) -> bool:
+        """``run`` (a whole run of key characters: a word of its own) holds 8 characters of a body, or is its tail."""
+        if len(run) >= PIECE_ANYWHERE and any(run[i:i + PIECE_ANYWHERE] in self.grams
+                                              for i in range(len(run) - PIECE_ANYWHERE + 1)):
+            return True
+        return TAIL[0] <= len(run) <= TAIL[1] and any(len(body) > len(run) and body.endswith(run)
+                                                       for body in self.bodies)
 
 
 def looks_like_a_key(text: str, secrets: Iterable[str] | None = ()) -> bool:
@@ -71,9 +100,9 @@ def looks_like_a_key(text: str, secrets: Iterable[str] | None = ()) -> bool:
         return True
     if _context_guard.redact(text) != text:
         return True
-    keys = _usable(secrets, MIN_PIECE_SOURCE)
+    pieces = _Pieces(secrets)
     for match in _KEY_CHARS.finditer(text):
-        if _starts_like_a_key(match.group(0)) or (keys and _piece_of(match.group(0), keys)):
+        if _starts_like_a_key(match.group(0)) or (pieces and pieces.hit(match.group(0))):
             return True
     return any(_masked_word(m.group(0)) for m in _SPACED_WORD.finditer(text))
 
@@ -82,7 +111,7 @@ def scrub(text: str, secrets: Iterable[str] | None = ()) -> str:
     """``text`` with every key, piece of a key and masked key replaced by ``REDACTED`` (see the module docstring). In
     this order: the keys held here by value, whole keys by their shape, masked words (the server's rule, with the word
     after a word of mask characters alone), then runs of key characters that start like a key or are a piece of one
-    held here."""
+    held here (8 characters of its body anywhere, its tail as a word of its own)."""
     if not text:
         return text
     for secret in _usable(secrets, MIN_VALUE):
@@ -107,12 +136,12 @@ def scrub(text: str, secrets: Iterable[str] | None = ()) -> str:
         redact_next = bool(_ONLY_MASK.fullmatch(word))
     out.append(text[last:])
     text = "".join(out)
-    keys = _usable(secrets, MIN_PIECE_SOURCE)
+    pieces = _Pieces(secrets)
 
     def run(match: re.Match) -> str:
         chars = match.group(0)
         if chars == "redacted":
             return chars
-        return REDACTED if _starts_like_a_key(chars) or (keys and _piece_of(chars, keys)) else chars
+        return REDACTED if _starts_like_a_key(chars) or (pieces and pieces.hit(chars)) else chars
 
     return _KEY_CHARS.sub(run, text)

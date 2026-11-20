@@ -315,10 +315,12 @@ triggers, the website's test; it re-exports what other modules use) and `keyguar
   (`syncable`): a provider other than `originshape` / `anthropic` / `openai_compat`, a profile `removed_remotely`; and
   past 50 profiles (what the server has first). The sync line says what stays local.
 - **One masking policy** (`keyguard`, a superset of the server's `ai_settings/keys.py`): credentials by their shape
-  (`context_guard`), the keys held here by value with any piece of 4+ characters (pieces only of keys of 16+
-  characters, so "lm-studio" placeholders don't mask "Studio"), masked words (runs of `*`, `•`, `●`, `∙`, an ellipsis
-  or `..` before letters or digits, `xxxx`; a word of mask characters takes the next one with it), and runs that start
-  like a key (`KEY_PREFIXES`). For names, models and test messages alike.
+  (`context_guard`); the keys held here by value: the whole key, and in its body (the key without its provider's
+  prefix, `keyguard.KEY_PREFIX`, so "My project" is no piece of an `sk-proj-` key) any 8 characters anywhere and its
+  last 4 to 8 characters as a word of their own ("ending in 4f2a", "…4f2a"), case-sensitive, for keys of 16+
+  characters (so "lm-studio" placeholders mask nothing); masked words (runs of `*`, `•`, `●`, `∙`, an ellipsis or `..`
+  before letters or digits, `xxxx`; a word of mask characters takes the next one with it); and runs that start like a
+  key (`KEY_PREFIXES`). For names, models and test messages alike.
 - **Ids**: `Profile.id` (32 hex characters for a new profile). `settings_wire.ensure_ids` runs on every read of the
   settings file (`params._read_state`): a profile without an id (a file from before ids, or saved by an older Oscar)
   gets back the id the last sync knew it by (its name in the snapshot), else one derived from its name, or from its

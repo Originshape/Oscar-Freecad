@@ -34,9 +34,9 @@ What Oscar can do on your machine, and how it is limited:
   that looks like a piece of a key (sent as empty and marked as kept in FreeCAD); a key, a piece of one or anything
   shaped like a credential in a name or model (masked, and logged by field name only); the profile's notes; what Oscar
   learned about each model; the rest of Oscar's settings. One masking policy covers names, models and test messages:
-  credentials by their shape, the keys saved here by value with any piece of 4 or more characters (their last
-  characters above all), keys echoed masked (`sk-proj-****…Ab9Z`, `**** abcd`, `●●●●abcd`, `sk-..abcd`), and words
-  that start like a key.
+  credentials by their shape; the keys saved here by value (the whole key, any 8 characters of it after its provider's
+  prefix, and its last 4 to 8 characters as a word of their own, such as "ending in 4f2a"); keys echoed masked
+  (`sk-proj-****…Ab9Z`, `**** abcd`, `●●●●abcd`, `sk-..abcd`); and words that start like a key.
 - **A website session can't send your key, or your prompts, somewhere new.** A profile a sync created, or whose base URL
   or provider a sync changed (with or without a key; also a website URL replacing one kept in FreeCAD), is not used at
   all (no chat, no Test connection, no model list, no metadata probe; the website's Test in FreeCAD fails with
