@@ -124,16 +124,16 @@ _LITE_SECTIONS: tuple[_Section, ...] = (
     )),
     ("HOUSING/ENCLOSURE", (
         "Source the part with `find_reference_part`, then `source_reference_part` (never invent a URL; one "
-        "attempt; on failure the app uses nominal data: say so).",
-        "Next `enclosure_spec`, then `build_enclosure` once per stage until every stage is built.",
+        "attempt; else nominal data: say so).",
+        "Next `enclosure_spec`, then `build_enclosure` once per stage (shell, standoffs, ports, lid, vents, hooks, assembly).",
         "Then `validate_model` and `check_fit`.",
         "Anything else: `execute_code`, one named step per call.",
     )),
     ("PARAMETERS AND NAMING", (
         "Dimensions live in the `Params` sheet (lower_snake_case); change one with `set_parameter`.",
         "One part per object; never fuse parts. Names: `Params`, `Shell`, `Lid`, `Ref_<BOARD>`.",
-        "A parametric request cannot always be honoured here: bind what you can and say in the report what is "
-        "not parametric.",
+        "A parametric ask cannot always be honoured here: bind what you can; say in the report what is not "
+        "parametric.",
     )),
     ("TOOLS", (
         "Use `get_view` once per finished step.",
