@@ -57,10 +57,10 @@ def account_profile(pid="acct", name="OriginShape"):
 
 
 def wire(name, pid, *, provider="anthropic", base_url="https://api.anthropic.com", model="claude-sonnet-4-5",
-         has_key=False, local=False, notes="", reasoning="auto", overrides=None):
+         has_key=False, local=False, reasoning="auto", overrides=None):
     return {"id": pid, "name": name, "provider": provider, "base_url": "" if local else base_url,
             "base_url_local": local, "model": model, "reasoning": reasoning,
-            "overrides": {**NO_OVERRIDES, **(overrides or {})}, "notes": notes, "has_key": has_key}
+            "overrides": {**NO_OVERRIDES, **(overrides or {})}, "has_key": has_key}
 
 
 def settings(*profiles, active=None, version=0):
@@ -172,10 +172,11 @@ class WireTest(unittest.TestCase):
         state = state_of(
             stored("Claude", "p1", api_key=KEY, notes=f"my key is {KEY} (do not share)"),
             stored(f"OpenAI {OPENAI_KEY}", "p2", provider="openai_compat", base_url="https://api.openai.com/v1",
-                   model="gpt-4o", api_key=OPENAI_KEY),
+                   model=f"gpt-4o {LOCAL_KEY}", api_key=OPENAI_KEY),
             stored("LM Studio", "p3", provider="openai_compat", base_url="http://localhost:1234/v1", model="qwen",
                    api_key=LOCAL_KEY, notes=LOCAL_KEY),
             stored("Held", "p4", held_key={"key": KEY[::-1], "provider": "anthropic", "base_url": ""}),
+            stored("No key", "p5", notes="nothing secret"),
         )
         payload = {"version": 0, **settings_sync.local_settings(state)}
         text = json.dumps(payload)
@@ -183,18 +184,23 @@ class WireTest(unittest.TestCase):
             self.assertNotIn(secret, text)
             for piece in substrings(secret):
                 self.assertNotIn(piece, text, f"a part of a key: {piece!r}")
-        self.assertNotIn("api_key", text)
-        self.assertNotIn("held_key", text)
-        self.assertEqual([p["has_key"] for p in payload["profiles"]], [True, True, True, False])
-        self.assertIn("[redacted credential]", payload["profiles"][0]["notes"])
+        for word in ("api_key", "held_key", "notes", "nothing secret", "temperature\": 0.2", "max_tokens"):
+            self.assertNotIn(word, text)
+        self.assertEqual([p["has_key"] for p in payload["profiles"]], [True, True, True, True, False],
+                         "a key set aside until confirmed is still a key saved in FreeCAD")
+        self.assertEqual(payload["profiles"][1]["name"], "OpenAI [redacted credential]")
         for p in payload["profiles"]:
-            self.assertEqual(set(p), {"id", "name", "provider", "base_url", "base_url_local", "model", "reasoning",
-                                      "overrides", "notes", "has_key"})
+            self.assertEqual(tuple(p), settings_sync.WIRE_FIELDS)
+            self.assertEqual(tuple(p["overrides"]), settings_sync.OVERRIDE_KEYS)
+        self.assertEqual(settings_sync.masked_fields(state["profiles"][1], (OPENAI_KEY, LOCAL_KEY)), ["name", "model"])
+        w = settings_sync.to_wire(stored("Work sk-proj-Ab12", "p6", model="gpt-4o"))
+        self.assertEqual((w["name"], w["model"]), ("Work [redacted]", "gpt-4o"), "a piece of a key in a name too")
 
     def test_a_base_url_that_carries_a_credential_stays_on_this_computer(self):
         local = ("https://user:pass@proxy.example.com/v1", "https://api.example.com/v1?key=abc123",
-                 "https://api.example.com/v1#token", "localhost:11434/v1", "", "ftp://example.com",
-                 f"https://gw.example.com/{KEY}/v1", "https://" + "a" * 600 + ".com")
+                 "https://api.example.com/v1#token", "localhost:11434/v1", "ftp://example.com",
+                 f"https://gw.example.com/{KEY}/v1", "https://" + "a" * 600 + ".com", "https://a.example\\v1",
+                 f"https://gw.example.com/{OPENAI_KEY[::-1]}x/{'sk-proj-' + 'Q' * 40}/v1")
         for url in local:
             with self.subTest(url=url):
                 w = settings_sync.to_wire(stored("X", "p", provider="openai_compat", base_url=url, api_key=KEY),
@@ -202,6 +208,10 @@ class WireTest(unittest.TestCase):
                 self.assertEqual((w["base_url"], w["base_url_local"]), ("", True))
         w = settings_sync.to_wire(stored("X", "p", provider="openai_compat", base_url="http://localhost:11434/v1"))
         self.assertEqual((w["base_url"], w["base_url_local"]), ("http://localhost:11434/v1", False))
+        w = settings_sync.to_wire(stored("X", "p", provider="openai_compat", base_url="  "))
+        self.assertEqual((w["base_url"], w["base_url_local"]), ("", False), "an unfinished profile")
+        w = settings_sync.to_wire(dict(account_profile(), model="origin9-preview"))
+        self.assertEqual(w["model"], "origin1", "an account model the server doesn't take yet goes as the default")
         w = settings_sync.to_wire(account_profile())
         self.assertEqual((w["base_url"], w["base_url_local"], w["model"]), ("", False, "origin1"))
         w = settings_sync.to_wire(dict(account_profile(), model="oscar-default"))
@@ -417,34 +427,97 @@ class PlanTest(unittest.TestCase):
         self.assertFalse(result.push)
         self.assertFalse(result.changed)
 
-    def test_a_key_is_set_aside_when_the_account_moves_its_profile_to_another_host(self):
-        state = state_of(stored("Claude", "c", api_key=KEY))
+    def pulled(self, state, **change):
+        """``state`` synced once, then a website write that changes its first profile."""
         sent = confirmed(state, plan(state, settings()), 1)
-        evil = copy.deepcopy(sent)
-        evil["version"] = 2
-        evil["profiles"][0].update(provider="openai_compat", base_url="https://collect.example.net/v1")
-        result = plan(state, evil)
-        profile = state["profiles"][0]
-        self.assertEqual((profile["provider"], profile["base_url"], profile["api_key"]),
-                         ("openai_compat", "https://collect.example.net/v1", ""))
-        self.assertEqual(profile["held_key"], {"key": KEY, "provider": "anthropic",
-                                               "base_url": "https://api.anthropic.com"})
-        self.assertFalse(result.payload["profiles"][0]["has_key"])
-        confirmed(state, result, 3)
-        back = copy.deepcopy(evil)
-        back["version"] = 4
-        back["profiles"][0].update(provider="anthropic", base_url="https://api.anthropic.com/", model="m2")
-        plan(state, back)
-        profile = state["profiles"][0]
-        self.assertEqual((profile["api_key"], profile["held_key"], profile["model"]), (KEY, {}, "m2"))
+        web = copy.deepcopy(sent)
+        web["version"] = 2
+        web["profiles"][0].update(change)
+        return plan(state, web), web
 
-    def test_a_model_change_on_the_same_host_keeps_the_key(self):
-        state = state_of(stored("Claude", "c", api_key=KEY))
+    def test_a_pulled_url_or_provider_change_holds_a_keyed_profile_until_confirmed(self):
+        changes = {"another host": {"base_url": "https://collect.example.net/v1"},
+                   "another path": {"base_url": "https://api.anthropic.com/proxy/v1"},
+                   "another provider": {"provider": "openai_compat"},
+                   "both": {"provider": "openai_compat", "base_url": "https://collect.example.net/v1"}}
+        for label, change in changes.items():
+            with self.subTest(label):
+                state = state_of(stored("Claude", "c", api_key=KEY))
+                result, _web = self.pulled(state, **change)
+                profile = state["profiles"][0]
+                for name, value in change.items():
+                    self.assertEqual(profile[name], value, "the website's change is taken")
+                self.assertEqual(profile["api_key"], "", "the key is not where a request could use it")
+                self.assertEqual(profile["held_key"], {"key": KEY, "provider": "anthropic",
+                                                       "base_url": "https://api.anthropic.com"})
+                self.assertTrue(settings_sync.needs_confirmation(profile))
+                self.assertIn("api.anthropic.com" if label == "another provider" else "", settings_sync
+                              .confirmation_text(profile))
+                self.assertTrue(result.payload["profiles"][0]["has_key"], "the key is still saved in FreeCAD")
+                self.assertFalse(result.push)
+
+    def test_a_website_url_replacing_a_local_one_holds_the_key_too(self):
+        state = state_of(stored("Proxy", "p", provider="openai_compat", base_url="https://u:pw@proxy.example/v1",
+                                api_key=KEY))
         sent = confirmed(state, plan(state, settings()), 1)
-        sent["version"] = 2
-        sent["profiles"][0].update(model="claude-opus-4-1", base_url="https://api.anthropic.com/v1")
-        plan(state, sent)
-        self.assertEqual((state["profiles"][0]["api_key"], state["profiles"][0]["model"]), (KEY, "claude-opus-4-1"))
+        self.assertEqual(sent["profiles"][0]["base_url_local"], True)
+        web = copy.deepcopy(sent)
+        web["version"] = 2
+        web["profiles"][0].update(base_url="https://proxy.example/v1", base_url_local=False)
+        plan(state, web)
+        profile = state["profiles"][0]
+        self.assertEqual((profile["base_url"], profile["api_key"]), ("https://proxy.example/v1", ""))
+        self.assertEqual(profile["held_key"]["base_url"], "https://u:pw@proxy.example/v1")
+        self.assertTrue(settings_sync.needs_confirmation(profile))
+
+    def test_no_hold_without_a_key_or_for_another_change_and_back_where_it_was_the_key_returns(self):
+        state = state_of(stored("Local", "l", provider="openai_compat", base_url="http://localhost:11434/v1"))
+        self.pulled(state, base_url="http://localhost:1234/v1")
+        self.assertEqual((state["profiles"][0]["held_key"], settings_sync.needs_confirmation(state["profiles"][0])),
+                         ({}, False))
+        state = state_of(stored("Claude", "c", api_key=KEY))
+        self.pulled(state, model="claude-opus-4-1", name="Claude (web)", reasoning="high")
+        self.assertEqual((state["profiles"][0]["api_key"], state["profiles"][0]["held_key"]), (KEY, {}))
+        state = state_of(stored("Claude", "c", api_key=KEY))
+        result, web = self.pulled(state, base_url="https://collect.example.net/v1")
+        confirmed(state, result, 3)
+        back = copy.deepcopy(web)
+        back["version"] = 4
+        back["profiles"][0].update(base_url="https://api.anthropic.com/")
+        plan(state, back)
+        self.assertEqual((state["profiles"][0]["api_key"], state["profiles"][0]["held_key"]), (KEY, {}))
+
+    def test_a_held_profile_is_not_tested_for_the_website(self):
+        state = state_of(stored("Claude", "c", api_key=KEY))
+        self.pulled(state, base_url="https://collect.example.net/v1")
+        store = MemoryStore(state)
+        passed, message, checks = settings_sync.run_profile_test("c", store=store,
+                                                                 run=lambda *a, **k: self.fail("nothing is sent"))
+        self.assertEqual((passed, message, checks), (False, "Confirm the new address in Oscar's settings in FreeCAD "
+                                                            "before its key is used.",
+                                                     {"reply": None, "tools": None, "image": None}))
+
+    def test_a_key_typed_in_the_dialog_decides_for_a_held_profile(self):
+        base = {"profiles": [stored("Claude", "c", api_key=KEY)], "active_profile_id": "c"}
+        theirs = {"profiles": [stored("Claude", "c", base_url="https://new.example/v1",
+                                      held_key={"key": KEY, "provider": "anthropic", "base_url": "x"})],
+                  "active_profile_id": "c"}
+        ours = {"profiles": [stored("Claude", "c", api_key="sk-ant-api03-" + "N" * 40)], "active_profile_id": "c"}
+        merged = settings_sync.merge_saved(base, ours, theirs)["profiles"][0]
+        self.assertEqual((merged["api_key"][-5:], merged["held_key"], merged["base_url"]),
+                         ("NNNNN", {}, "https://new.example/v1"))
+        untouched = settings_sync.merge_saved(base, copy.deepcopy(base), theirs)["profiles"][0]
+        self.assertTrue(settings_sync.needs_confirmation(untouched), "a Save that didn't touch it keeps the hold")
+
+    def test_a_pull_never_touches_the_notes(self):
+        state = state_of(stored("Claude", "c", api_key=KEY, notes="my own notes"))
+        self.pulled(state, model="m2")
+        self.assertEqual(state["profiles"][0]["notes"], "my own notes")
+        web = settings(wire("From the web", "w"), version=5)
+        web["profiles"][0]["notes"] = "an older server still sends notes"
+        plan(state, web, account="another")
+        added = next(p for p in state["profiles"] if p["id"] == "w")
+        self.assertEqual(added["notes"], "")
 
 
 class MergeSavedTest(unittest.TestCase):
@@ -530,6 +603,11 @@ class SyncerTest(_FakeCase):
             self.assertNotIn(secret, raw)
             for piece in substrings(secret):
                 self.assertNotIn(piece, raw)
+        for body in self.puts():   # exactly the contract's fields: the server refuses any other one
+            self.assertEqual(set(body), {"version", "active_profile_id", "profiles"})
+            for profile in body["profiles"]:
+                self.assertEqual(set(profile), set(settings_sync.WIRE_FIELDS))
+                self.assertEqual(set(profile["overrides"]), set(settings_sync.OVERRIDE_KEYS))
         stored_there = self.fake.ai_settings
         self.assertEqual(stored_there["active_profile_id"], "c")
         self.assertEqual([(p["id"], p["has_key"], p["base_url_local"]) for p in stored_there["profiles"]],
@@ -581,6 +659,8 @@ class SyncerTest(_FakeCase):
                 self.assertEqual(len(self.fake.ai_settings_puts) - puts, 2)
                 there = {p["id"]: p for p in self.fake.ai_settings["profiles"]}
                 self.assertEqual((there["a"]["name"], there["b"]["model"]), (name, model))
+                self.assertEqual(set(self.puts()[-1]), {"version", "active_profile_id", "profiles"},
+                                 "nothing of the GET (updated_at, updated_by) is sent back")
                 self.assertEqual(store.by_id("b")["model"], model)
 
     def test_a_second_409_waits_for_the_next_trigger(self):
@@ -592,7 +672,7 @@ class SyncerTest(_FakeCase):
 
         def web_twice(fake):
             fake.web_edit(lambda s: s["profiles"][0].update(model="w1"))
-            fake.before_ai_put = lambda f: f.web_edit(lambda s: s["profiles"][0].update(notes="w2"))
+            fake.before_ai_put = lambda f: f.web_edit(lambda s: s["profiles"][0].update(reasoning="high"))
         self.fake.before_ai_put = web_twice
         puts = len(self.fake.ai_settings_puts)
         status = syncer.sync()
@@ -618,8 +698,22 @@ class SyncerTest(_FakeCase):
         self.assertEqual(status["state"], "error")
         self.assertIn("names must be unique", status["message"])
         self.assertNotIn(KEY, json.dumps(logged))
-        self.assertTrue(all(kind == "ai_settings_sync" for kind, _ in logged))
+        self.assertEqual({kind for kind, _ in logged}, {"ai_settings_sync", "ai_settings_refused", "ai_settings_masked"})
+        self.assertIn(("ai_settings_masked", {"fields": ["name"], "profiles": 1}), logged)
         self.assertEqual(syncer.sync()["state"], "synced")
+
+    def test_a_refused_push_names_the_field_in_the_status(self):
+        self.sign_in()
+        store = MemoryStore(state_of(stored("Claude", "c"), stored("Work", "w")))
+        details = {"type": "error", "error": {"type": "invalid_request_error", "code": "invalid_request",
+                                              "message": "profiles.1.base_url: A base URL is an http:// address.",
+                                              "details": [{"field": "profiles.1.base_url",
+                                                           "message": "A base URL is an http:// address."}]}}
+        self.fake.fail(settings_sync.ROUTE, 400, details, method="PUT")
+        status = self.syncer(store).sync()
+        self.assertEqual(status["state"], "error")
+        self.assertEqual(status["message"], "Not synced: OriginShape refused these settings: the profile “Work”, "
+                                            "base url: A base URL is an http:// address.")
 
     def test_an_unreadable_settings_file_changes_nothing(self):
         self.sign_in()
@@ -702,6 +796,27 @@ class ProfileTestTest(unittest.TestCase):
             self.assertNotIn(piece, message)
         self.assertNotIn("*****", message)
         self.assertEqual(checks, {"reply": False, "tools": None, "image": None})
+
+    def test_keys_providers_echo_masked_are_scrubbed(self):
+        echoes = {
+            "OpenAI": "Error code: 401 - Incorrect API key provided: sk-proj-********************************Ab9Z. "
+                      "You can find your API key at https://platform.openai.com/account/api-keys.",
+            "DeepSeek": "Authentication Fails, Your api key: ****abcd is invalid",
+            "Anthropic": "authentication_error: invalid x-api-key sk-ant-api03-…XyZ1 (sk-ant-api03-Qw...XyZ1)",
+            "xAI": "Incorrect API key provided: xa***************************Ab. You can obtain an API key at "
+                   "https://console.x.ai.",
+            "Groq / others": "Invalid API Key gsk_abc12 (key=sk-proj-short, pplx-1234, sk-xxxxxxxxxxxx1234, AIzaSy-short)",
+        }
+        for provider, echo in echoes.items():
+            with self.subTest(provider):
+                report = Report(False, [Line(step="connect", ok=False, text=f"{provider}: {echo}")])
+                _passed, message, _checks = settings_sync.run_profile_test("c", store=self.store(),
+                                                                           run=lambda profile, should_stop: report)
+                for fragment in ("Ab9Z", "abcd", "XyZ1", "**", "…", "...X", "gsk_", "sk-", "pplx-", "xxxx", "AIza",
+                                 "xa*"):
+                    self.assertNotIn(fragment, message)
+                self.assertIn("[redacted]", message)
+                self.assertIn(provider, message, "the rest of the message is kept")
 
     def test_a_local_base_urls_secrets_are_scrubbed(self):
         report = Report(False, [Line(step="connect", ok=False,
@@ -801,6 +916,14 @@ class ConnectProfileTestTest(_FakeCase):
         self.assertNotIn(KEY, json.dumps(good))
         self.assertEqual((bad["passed"], bad["message"]), (False, settings_sync.UNKNOWN_PROFILE_TEXT))
         self.assertEqual(bad["checks"], {"reply": None, "tools": None, "image": None})
+
+    def test_the_client_scrubs_what_any_handler_sends(self):
+        test_id = self.fake.add_profile_test("c")
+        self.loop(test_profile=lambda test: (False, f"401: Incorrect API key provided: sk-proj-****Ab9Z; whole: {KEY}",
+                                             {"reply": False})).start()
+        self.assertTrue(self.wait_until(lambda: test_id in self.fake.profile_test_results))
+        message = self.fake.profile_test_results[test_id]["message"]
+        self.assertEqual(message, "401: Incorrect API key provided: [redacted]; whole: [redacted credential]")
 
     def test_a_handler_that_fails_still_answers(self):
         def broken(test):

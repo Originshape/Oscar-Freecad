@@ -247,6 +247,12 @@ def run_connection_test(profile, *, should_stop: Callable[[], bool] | None = Non
 
     make = make or make_provider
     report = ConnectionReport()
+    from . import settings_sync
+
+    if settings_sync.needs_confirmation(profile):   # changed on the account: nothing is sent until confirmed here
+        report.error = settings_sync.confirmation_text(profile)
+        report.lines.append(CheckLine("connect", False, report.error))
+        return report
     if probe:
         try:
             found = _models.probe_metadata(profile, refresh=True)

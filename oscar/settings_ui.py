@@ -76,9 +76,11 @@ Signed in with OriginShape, the AI model settings (never the API keys) sync with
 dialog asks for a sync when it opens and after Save, and the AI model tab says how the last one went
 (``oscarSyncStatus``). A pull that changes the settings while the dialog is open reloads the tab, or, when the user has
 unsaved changes there, says so and offers *Reload* (``oscarSyncReload``); Save keeps the user's changes and what the
-pull changed elsewhere (``params.save_profiles(base=...)``). A key a sync set aside because the account moved its
-profile to another provider or host (``Profile.held_key``) is offered back under the API key field
-(``oscarProfileHeldKey`` / ``oscarProfileUseHeldKey``), never sent there on its own.
+pull changed elsewhere (``params.save_profiles(base=...)``). When a sync changed the provider or base URL of a profile
+that has a key, the key is set aside (``Profile.held_key``) and the profile is not used until the user decides here,
+under the API key field (``oscarProfileHeldKey``): *Use my key with <host>* (``oscarProfileUseHeldKey``) or *Remove
+the key* (``oscarProfileRemoveHeldKey``); typing another key decides too. A change made in this dialog needs no
+confirmation.
 """
 
 import copy
@@ -1364,18 +1366,28 @@ class SettingsDialog(QtWidgets.QDialog):
         self.key_edit.setEchoMode(QtWidgets.QLineEdit.Password)
         self.key_edit.setPlaceholderText("Paste your provider's API key")
         form.addRow("API key", self.key_edit)
-        # A key a sync set aside (the account moved this profile to another provider or host): offered back, never
-        # used there on its own.
+        # A sync changed this profile's provider or base URL while it had a key: the key is set aside and the profile
+        # is not used until the user decides here.
         self.held_key_row = QtWidgets.QWidget()
-        held = QtWidgets.QHBoxLayout(self.held_key_row)
+        held = QtWidgets.QVBoxLayout(self.held_key_row)
         held.setContentsMargins(0, 0, 0, 0)
-        self.held_key_label = self._hint("", "oscarProfileHeldKey", plain=True)
-        self.held_key_btn = QtWidgets.QPushButton("Use it here")
+        held.setSpacing(4)
+        self.held_key_label = _StatusLabel("oscarProfileHeldKey")
+        self._tone(self.held_key_label, "error")
+        held_buttons = QtWidgets.QHBoxLayout()
+        self.held_key_btn = QtWidgets.QPushButton("Use my key")
         self.held_key_btn.setObjectName("oscarProfileUseHeldKey")
         self.held_key_btn.setAutoDefault(False)
         self.held_key_btn.clicked.connect(lambda *_: self._use_held_key())
-        held.addWidget(self.held_key_label, 1)
-        held.addWidget(self.held_key_btn)
+        self.held_key_remove_btn = QtWidgets.QPushButton("Remove the key")
+        self.held_key_remove_btn.setObjectName("oscarProfileRemoveHeldKey")
+        self.held_key_remove_btn.setAutoDefault(False)
+        self.held_key_remove_btn.clicked.connect(lambda *_: self._remove_held_key())
+        held_buttons.addWidget(self.held_key_btn)
+        held_buttons.addWidget(self.held_key_remove_btn)
+        held_buttons.addStretch(1)
+        held.addWidget(self.held_key_label)
+        held.addLayout(held_buttons)
         self.held_key_row.setVisible(False)
         form.addRow("", self.held_key_row)
 
@@ -1431,8 +1443,8 @@ class SettingsDialog(QtWidgets.QDialog):
 
         note = self._hint("Your provider's API key is saved in Oscar's settings file on this computer, readable only "
                           "by your user account; use a key you can revoke. It never leaves this computer: signed in, "
-                          "the rest of each profile syncs with your OriginShape account. Your OriginShape sign-in is "
-                          "kept separately, in the system keychain.", "oscarKeyStorageNote")
+                          "the profile's other settings (not its key or notes) sync with your OriginShape account. Your "
+                          "OriginShape sign-in is kept separately, in the system keychain.", "oscarKeyStorageNote")
         outer.addWidget(note)
         return self.byok_box
 
@@ -2433,21 +2445,33 @@ class SettingsDialog(QtWidgets.QDialog):
         self._show_held_key(profile)
 
     def _show_held_key(self, profile: Profile | None) -> None:
-        held = getattr(profile, "held_key", None) or {}
-        shown = bool(profile is not None and held.get("key") and not profile.api_key)
+        """The notice of a profile whose provider or base URL a sync changed while it had a key."""
+        shown = bool(profile is not None and _settings_sync.needs_confirmation(profile) and not profile.api_key)
         if shown:
-            host = _settings_sync.endpoint(held.get("provider"), held.get("base_url"))[1] or held.get("provider") or ""
-            where = _settings_sync.endpoint(profile.provider, profile.base_url)[1] or "its new address"
-            self.held_key_label.setText(f"Your OriginShape account changed this profile's provider or base URL, so "
-                                        f"Oscar set aside the API key you saved for {host}: it isn't sent to {where} "
-                                        "unless you choose to.")
+            held = profile.held_key
+            before = _settings_sync.display_host(held.get("base_url")) or held.get("provider") or "another server"
+            where = _settings_sync.display_host(profile.base_url) or "the new address"
+            self.held_key_label.setText(
+                f"This profile's provider or base URL was changed on your OriginShape account (your key was saved for "
+                f"{before}). Oscar doesn't use this profile until you decide: use your key with {where}, or remove "
+                "it. Only do so if you made this change.")
+            self.held_key_btn.setText(f"Use my key with {where}")
         self.held_key_row.setVisible(shown)
 
     def _use_held_key(self) -> None:
+        """Confirmed: the key goes with the profile as it is now (Save keeps it)."""
         profile = self._selected()
-        held = getattr(profile, "held_key", None) or {}
-        if held.get("key"):
-            self.key_edit.setText(held["key"])
+        if profile is not None and _settings_sync.needs_confirmation(profile):
+            self.key_edit.setText(profile.held_key["key"])
+            self._stash_editor()             # the key is the profile's again; the set-aside copy is dropped
+            self.held_key_row.setVisible(False)
+
+    def _remove_held_key(self) -> None:
+        """Declined: the key is dropped from this profile (Save keeps that); the profile can be used without it."""
+        profile = self._selected()
+        if profile is not None:
+            profile.held_key = {}
+            self.key_edit.clear()
             self.held_key_row.setVisible(False)
 
     def _unique_name(self, wanted: str, exclude=None) -> str:

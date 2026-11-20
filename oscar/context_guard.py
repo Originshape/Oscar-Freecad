@@ -128,6 +128,33 @@ def guard_request(system: str, messages: Iterable[Any]) -> tuple[str, list[Any]]
     return safe_system, [_redacted_message(message, pattern) for message in messages]
 
 
+FRAGMENT_REDACTED = "[redacted]"
+# How keys start (a provider echoes the start of a key it refused, or the whole of a short one).
+KEY_PREFIXES = ("sk-", "gsk_", "xai-", "pplx-", "csk-", "fw_", "AIza", "os_live_", "os_test_", "hf_", "r8_", "nvapi-",
+                "ghp_", "gho_", "ghs_", "github_pat_", "glpat-", "xoxb-", "xoxp-", "AKIA", "ASIA")
+_WORD = re.compile(r"[^\s\"'`<>()\[\]{},;:=]+")
+# A key echoed with its middle hidden: stars or bullets, an ellipsis before the visible tail, or a run of x.
+_MASKING = re.compile(r"\*{2,}|•{2,}|(?:…|\.{3})(?=[A-Za-z0-9])|[xX]{4,}")
+
+
+def redact_fragments(text: str) -> str:
+    """``text`` with every word that looks like a piece of a key replaced by ``FRAGMENT_REDACTED``: a key a provider
+    echoed masked (``sk-proj-****…Ab9Z``, ``****abcd``, ``sk-ant-…XyZ1``, ``sk-xxxx1234``) or anything that starts
+    like a key (``KEY_PREFIXES``). For short free text that leaves this computer (a test report), on top of ``redact``,
+    which removes whole keys."""
+    if not text:
+        return text
+
+    def word(match: re.Match) -> str:
+        token = match.group(0)
+        bare = token.lstrip(".-_*•…")
+        if _MASKING.search(token) or any(bare.startswith(p) and len(bare) > len(p) for p in KEY_PREFIXES):
+            return FRAGMENT_REDACTED
+        return token
+
+    return _WORD.sub(word, text)
+
+
 def untrusted(source: str, text: str) -> str:
     """``text`` under a line saying it comes from ``source`` and is data, not instructions.
 

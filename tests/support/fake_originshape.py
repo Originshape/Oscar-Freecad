@@ -294,7 +294,7 @@ def message_json(text: str = "Hello from the fake OriginShape gateway.", *, usag
 
 
 AI_TOP_FIELDS = {"version", "active_profile_id", "profiles"}
-AI_PROFILE_FIELDS = {"id", "name", "provider", "base_url", "base_url_local", "model", "reasoning", "overrides", "notes",
+AI_PROFILE_FIELDS = {"id", "name", "provider", "base_url", "base_url_local", "model", "reasoning", "overrides",
                      "has_key"}
 AI_OVERRIDES = ("max_output", "temperature", "context_window", "tools", "ollama_native")
 AI_CREDENTIAL_WORDS = ("key", "token", "secret", "password", "authorization")
@@ -310,10 +310,40 @@ def _ai_field_problem(names, allowed) -> str:
     return ""
 
 
+_AI_CREDENTIAL_RE = re.compile(
+    r"sk-ant-[A-Za-z0-9_\-]{20,}|\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_\-]{32,}|\bos_live_[A-Za-z0-9_\-]{20,}"
+    r"|\bAIza[0-9A-Za-z_\-]{35}|\bgh[pousr]_[A-Za-z0-9]{36,}|\bxox[abprs]-[A-Za-z0-9\-]{10,}"
+    r"|(?<![A-Za-z0-9_\-])eyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}")   # as the API's guard
+
+
+def _strings(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings(item)
+
+
+def _ai_problem_field(body) -> str:
+    """The ``details.field`` of a refused body: the first profile the checks refuse (``profiles.<n>``), else ""."""
+    if not isinstance(body, dict) or not isinstance(body.get("profiles"), list):
+        return ""
+    for index, profile in enumerate(body["profiles"]):
+        if _ai_settings_problem({"version": 0, "active_profile_id": None, "profiles": [profile]}):
+            return f"profiles.{index}"
+    return ""
+
+
 def _ai_settings_problem(body) -> str:
-    """What the API refuses in a PUT /v1/me/ai-settings body (ai-settings-sync.md sections 1 and 2), or ""."""
+    """What the API refuses in a PUT /v1/me/ai-settings body (ai-settings-sync.md sections 1 and 2, as
+    ``ai_settings/schemas.py`` checks it), or ""."""
     if not isinstance(body, dict):
         return "A JSON object is required."
+    if any(_AI_CREDENTIAL_RE.search(text) or "\x00" in text for text in _strings(body)):
+        return "Provider keys never leave FreeCAD."
     problem = _ai_field_problem(body, AI_TOP_FIELDS)
     if problem:
         return problem
@@ -341,16 +371,18 @@ def _ai_settings_problem(body) -> str:
             return "Unknown provider."
         if p["reasoning"] not in ("auto", "off", "low", "medium", "high"):
             return "Unknown reasoning."
-        if not isinstance(p["model"], str) or len(p["model"]) > 200 or not isinstance(p["notes"], str) \
-                or len(p["notes"]) > 2000 or not isinstance(p["has_key"], bool) or not isinstance(p["base_url_local"], bool):
+        if not isinstance(p["model"], str) or len(p["model"]) > 200 or not isinstance(p["has_key"], bool) \
+                or not isinstance(p["base_url_local"], bool):
             return "A profile field has the wrong type or length."
         url = p["base_url"]
         if not isinstance(url, str) or len(url) > 500:
             return "base_url: at most 500 characters."
+        if p["provider"] == "originshape" and p["model"] not in ("origin1", "origin1-super"):
+            return "The OriginShape account's model is origin1 or origin1-super."
         if p["provider"] == "originshape" or p["base_url_local"]:
             if url:
                 return "base_url must be empty here."
-        else:
+        elif url:   # empty: an unfinished profile
             parts = urlsplit(url)
             if parts.scheme not in ("http", "https") or not parts.hostname:
                 return "base_url must be an http(s) URL."
@@ -950,10 +982,13 @@ class FakeOriginShape:
             hook, self.before_ai_put = self.before_ai_put, None
             hook(self)
         body = call.json if isinstance(call.json, dict) else None
-        problem = _ai_settings_problem(body)
+        problem, where = _ai_settings_problem(body), _ai_problem_field(body)
         if problem:
             self.ai_settings_refusals.append(problem)
-            return self._json(400, envelope("invalid_request", problem))
+            error = envelope("invalid_request", problem)
+            if where:
+                error["error"]["details"] = [{"field": where, "message": problem}]
+            return self._json(400, error)
         if body["version"] != self.ai_settings["version"]:
             error = envelope("conflict", "The settings changed since you read them.")
             details = {"current": copy.deepcopy(self.ai_settings)}

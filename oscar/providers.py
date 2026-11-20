@@ -1245,6 +1245,10 @@ def make_provider(profile):
     if kind in COMING_SOON_KINDS:
         raise ProviderError(f"{COMING_SOON_KINDS[kind]} is coming soon and cannot be used yet. "
                             "Choose another provider in Oscar's settings (⚙).")
+    from . import settings_sync   # pure; a sync changed this profile's provider or URL: not used until confirmed
+
+    if settings_sync.needs_confirmation(profile):
+        raise ProviderError(settings_sync.confirmation_text(profile), code="endpoint_changed")
     if kind == "anthropic":
         return AnthropicProvider(profile)
     if kind == "originshape":

@@ -172,6 +172,75 @@ class SaveMergeTest(_Settings):
         self.assertEqual(stored["active_profile"], "Account")
 
 
+class ConfirmationTest(_Settings):
+    """A profile whose provider or base URL a sync changed while it had a key is not used until confirmed."""
+
+    def held(self, **extra):
+        return Profile(**{**WORK, "api_key": "", "base_url": "https://collect.example.net/v1",
+                          "held_key": {"key": KEY, "provider": "anthropic", "base_url": "https://api.anthropic.com"},
+                          **extra})
+
+    def test_no_provider_is_made_for_it(self):
+        from oscar import providers
+        from oscar.provider_transport import ProviderError
+
+        with self.assertRaises(ProviderError) as caught:
+            providers.make_provider(self.held())
+        self.assertEqual(caught.exception.code, "endpoint_changed")
+        self.assertIn("collect.example.net", str(caught.exception))
+        self.assertNotIn(KEY, str(caught.exception))
+        providers.make_provider(Profile(**WORK))   # a profile nobody changed elsewhere
+
+    def test_no_test_connection_no_model_list_no_probe(self):
+        from oscar import provider_check, provider_probe
+
+        def nothing(*args, **kwargs):
+            raise AssertionError("no request for a profile waiting for confirmation")
+        with mock.patch.object(provider_probe, "_PROBES", {}), \
+                mock.patch("oscar.models.probe_metadata", side_effect=nothing):
+            report = provider_check.run_connection_test(self.held(), make=nothing)
+        self.assertFalse(report.ok)
+        self.assertEqual([(line.step, line.ok) for line in report.lines], [("connect", False)])
+        models, error = provider_probe.list_models(self.held())
+        self.assertEqual(models, [])
+        self.assertIn("confirm", error)
+        self.assertEqual(provider_probe.probe(self.held()), {})
+
+    def test_the_panel_refuses_to_send(self):
+        try:
+            from oscar import panel
+        except ImportError as e:
+            self.skipTest(f"the panel needs FreeCAD's GUI modules: {e}")
+        blocker = panel.OscarPanel._send_blocker(None, self.held())
+        self.assertEqual(blocker, "endpoint")
+
+    def test_a_change_made_in_this_freecad_needs_no_confirmation(self):
+        work = Profile(**WORK)
+        params.save_profiles([work])
+        work.base_url, work.provider = "https://proxy.example/v1", "openai_compat"
+        params.save_profiles([work])
+        saved = params.profile_by_id(work.id)
+        self.assertEqual((saved.api_key, saved.held_key), (KEY, {}))
+        self.assertFalse(settings_sync.needs_confirmation(saved))
+
+    def test_a_pull_through_the_settings_file_holds_it(self):
+        work = Profile(**WORK)
+        params.save_profiles([work])
+        tag = settings_sync.account_tag("http://api.test", "a@example.com")
+        local = settings_sync.local_settings(json.loads(self.raw()))
+        params.update_state(lambda state: settings_sync.plan_sync(
+            state, settings_sync.normalise_remote({"version": 1, **local}), prefer="remote", account=tag))
+        web = json.loads(json.dumps(local))
+        web["profiles"][0]["base_url"] = "https://collect.example.net/v1"
+        params.update_state(lambda state: settings_sync.plan_sync(
+            state, settings_sync.normalise_remote({"version": 2, **web}), prefer="remote", account=tag,
+            limits=settings_sync.ParamsStore().limits))
+        saved = params.profile_by_id(work.id)
+        self.assertEqual((saved.base_url, saved.api_key), ("https://collect.example.net/v1", ""))
+        self.assertTrue(settings_sync.needs_confirmation(saved))
+        self.assertEqual(saved.held_key["key"], KEY)
+
+
 class _FakeSession(_Settings):
     def setUp(self):
         super().setUp()
@@ -334,19 +403,54 @@ class DialogTest(_Settings):
         self.assertEqual(d.profiles[2].model, "llama3.3")
         self.assertFalse(d.sync_reload_btn.isVisibleTo(d))
 
-    def test_a_key_set_aside_is_offered_back_and_never_used_on_its_own(self):
-        moved = Profile(name="Moved", provider="openai_compat", base_url="https://other.example/v1", model="m",
-                        held_key={"key": KEY, "provider": "anthropic", "base_url": "https://api.anthropic.com"})
+    def moved(self):
+        return Profile(name="Moved", provider="openai_compat", base_url="https://other.example/v1", model="m",
+                       held_key={"key": KEY, "provider": "anthropic", "base_url": "https://api.anthropic.com"})
+
+    def test_a_profile_changed_elsewhere_waits_and_use_my_key_confirms_it(self):
+        moved = self.moved()
         d = self.dialog([params.account_profile(), moved], active=moved.id)
         d.list.setCurrentRow(0)
         self.assertTrue(d.held_key_row.isVisibleTo(d))
         self.assertIn("api.anthropic.com", d.held_key_label.text())
+        self.assertEqual(d.held_key_btn.text(), "Use my key with other.example")
         self.assertEqual(d.key_edit.text(), "")
+        d._test()                                   # the dialog's Test connection sends nothing meanwhile
+        self.assertTrue(QtWidgets.QApplication.instance() is not None)
+        deadline = time.monotonic() + 5
+        while "test" in d._jobs and time.monotonic() < deadline:
+            QtWidgets.QApplication.processEvents()
+            time.sleep(0.01)
+        QtWidgets.QApplication.processEvents()
+        d._drain_mailbox()
+        self.assertIn("changed on your OriginShape account", d.test_label.text())
         d.held_key_btn.click()
         self.assertEqual(d.key_edit.text(), KEY)
+        self.assertFalse(d.held_key_row.isVisibleTo(d))
         d._save()
         saved = params.profile_by_id(moved.id)
-        self.assertEqual((saved.api_key, saved.held_key), (KEY, {}))
+        self.assertEqual((saved.api_key, saved.held_key, saved.base_url), (KEY, {}, "https://other.example/v1"))
+        self.assertFalse(settings_sync.needs_confirmation(saved))
+
+    def test_remove_the_key_confirms_without_it(self):
+        moved = self.moved()
+        d = self.dialog([params.account_profile(), moved], active=moved.id)
+        d.list.setCurrentRow(0)
+        d.held_key_remove_btn.click()
+        self.assertFalse(d.held_key_row.isVisibleTo(d))
+        d._save()
+        saved = params.profile_by_id(moved.id)
+        self.assertEqual((saved.api_key, saved.held_key), ("", {}))
+        self.assertNotIn(KEY, self.raw().decode())
+
+    def test_typing_another_key_confirms_too(self):
+        moved = self.moved()
+        d = self.dialog([params.account_profile(), moved], active=moved.id)
+        d.list.setCurrentRow(0)
+        d.key_edit.setText("sk-new-key-for-the-new-server")
+        d._save()
+        saved = params.profile_by_id(moved.id)
+        self.assertEqual((saved.api_key, saved.held_key), ("sk-new-key-for-the-new-server", {}))
 
     def test_duplicate_makes_a_profile_of_its_own(self):
         work = Profile(**WORK)

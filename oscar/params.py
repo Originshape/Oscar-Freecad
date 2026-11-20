@@ -342,9 +342,10 @@ class Profile:
     reasoning: str = field(default="auto")           # "off" | "low" | "medium" | "high" | "auto"
     caps_override: dict = field(default_factory=dict)  # ModelCaps field overrides, e.g. {"tools": "text", "context_window": 8192}
     id: str = field(default_factory=_sync.new_profile_id)   # stable: made once, kept across renames (and synced)
-    # A key a sync set aside when the account's settings moved this profile to another provider or host:
-    # {"key", "provider", "base_url"} of where it was entered for. Never sent anywhere; it comes back when the profile
-    # points there again, or when the user confirms it in the settings dialog (settings_sync).
+    # A key a sync set aside because the account's settings changed this profile's provider or base URL: {"key",
+    # "provider", "base_url"} of where it was entered for. While it is set the profile is not used (no chat, no Test
+    # connection, no model list: settings_sync.needs_confirmation) and the key is sent nowhere, until the user decides
+    # in the settings dialog (use the key there, or remove it), types another key, or a sync points it back there.
     held_key: dict = field(default_factory=dict)
 
     def __post_init__(self):

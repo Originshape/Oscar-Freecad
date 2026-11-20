@@ -5,13 +5,14 @@ The contract is ``docs/architecture/ai-settings-sync.md`` in the OriginShape app
 thread by ``request``) and the Test connection the website can ask for (``run_profile_test``). ``params`` keeps the
 settings file and calls the id helpers here; ``settings_ui`` and ``panel`` start syncs and show what happened.
 
-**Provider keys never leave this computer.** For each profile OriginShape receives its ``id``, name, provider, model,
-reasoning, Advanced overrides (the five keys of ``caps_override`` the dialog sets), notes, base URL and ``has_key``
-(this FreeCAD holds a key for it); never the key, part of it or a hash of it. A base URL that is not a plain http(s)
-URL (a user name or password, a query, a fragment, the key in it, or not an http(s) URL at all) goes as ``""`` with
-``base_url_local: true`` and the real one stays here. A key found in a name, model or notes is masked, and so is
-anything shaped like a credential (``context_guard``). ``model_caps``, the preferences, other ``caps_override`` keys,
-``temperature`` / ``max_tokens`` and the network grants stay local.
+**Provider keys never leave this computer.** For each profile OriginShape receives exactly its ``id``, name, provider,
+base URL, ``base_url_local``, model, reasoning, Advanced overrides (the five keys of ``caps_override`` the dialog sets)
+and ``has_key`` (a key for it is saved in FreeCAD); never the key, part of it or a hash of it. A base URL that is not a
+plain http(s) URL (a user name or password, a query, a fragment, something shaped like a credential, or not an
+http(s) URL at all) goes as ``""`` with ``base_url_local: true`` and the real one stays here; an empty one is an
+unfinished profile. A key found in a name or model is masked, and so is anything shaped like a credential
+(``context_guard``). The notes, ``model_caps``, the preferences, other ``caps_override`` keys, ``temperature`` /
+``max_tokens`` and the network grants stay local, and a pull never touches them.
 
 **When** (``request``; signed in with OriginShape only, never with a personal API key; signed out nothing is sent):
 when Oscar's panel starts, after a sign-in, when the settings dialog opens, after a Save there (and after a profile
@@ -31,10 +32,13 @@ Two device-specific fields, ``has_key`` and the base URL (one FreeCAD may hold a
 not), are compared with what THIS FreeCAD last had accepted by the server (``ai_sync.device``), so two computers never
 undo each other's values on every sync.
 
-**A key stays with the server it was entered for.** When a pull changes a profile's provider or the host of its base
-URL, its key is set aside (``Profile.held_key``) instead of being sent to the new address: kept in the settings file,
-never used there, until the profile points back at the old address or the user confirms it in the settings dialog.
-Otherwise whoever can edit the account's settings could point a profile at their own server and receive its key.
+**A key stays with the server it was entered for.** When a pull changes the provider or the base URL of a profile that
+has a key (a new URL, another provider, or a website URL replacing one kept in FreeCAD), the key is set aside
+(``Profile.held_key``) and the profile is not used at all (no chat, no Test connection, no model list, a website test
+fails) until the user decides in the settings dialog: use the key with the new address, or remove it (typing another
+key decides too). The key stays in the settings file meanwhile and comes back by itself if a later pull points the
+profile back where it was. Otherwise a stolen website session could point a profile at its own server and receive the
+key with the next chat. A change made in FreeCAD's own dialog needs no confirmation.
 """
 
 from __future__ import annotations
@@ -52,7 +56,7 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from . import context_guard as _context_guard
-from .auth.transport import AuthError, AuthUnavailable, SignedOut, api_error, error_details
+from .auth.transport import AuthError, AuthUnavailable, SignedOut, api_error, error_details, safe_text
 
 ROUTE = "/v1/me/ai-settings"
 ENV = "OSCAR_SETTINGS_SYNC"      # "0": never sync (and don't offer the website's Test in FreeCAD)
@@ -65,14 +69,15 @@ OVERRIDE_KEYS = ("max_output", "temperature", "context_window", "tools", "ollama
 MAX_OUTPUT_RANGE = (256, 1_000_000)          # the ranges of settings_model's Advanced overrides (and the contract's)
 TEMPERATURE_RANGE = (0.0, 2.0)
 CONTEXT_WINDOW_RANGE = (1024, 10_000_000)
-NAME_LIMIT, URL_LIMIT, MODEL_LIMIT, NOTES_LIMIT = 80, 500, 200, 2000
-MIN_MASKED_KEY = 6               # a shorter "key" (a local server's placeholder) is not looked for in names and notes
+NAME_LIMIT, URL_LIMIT, MODEL_LIMIT = 80, 500, 200
+MIN_MASKED_KEY = 6               # a shorter "key" (a local server's placeholder) is not looked for in names
 TEST_MESSAGE_LIMIT = 500
 TEST_TIMEOUT_S = 150.0           # the server expires a test 3 minutes after FreeCAD claimed it
+NEEDS_CONFIRMATION_TEXT = "Confirm the new address in Oscar's settings in FreeCAD before its key is used."
 UNKNOWN_PROFILE_TEXT = ("This profile isn't in Oscar's settings in FreeCAD (it was removed there, or FreeCAD hasn't "
                         "synced it yet). Open Oscar's settings in FreeCAD, then try again.")
 _ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
-_REGULAR = ("name", "provider", "model", "reasoning", "notes", *(f"overrides.{key}" for key in OVERRIDE_KEYS))
+_REGULAR = ("name", "provider", "model", "reasoning", *(f"overrides.{key}" for key in OVERRIDE_KEYS))
 _ENDPOINT_FIELDS = ("provider", "base_url", "model", "overrides.max_output", "overrides.temperature")
 
 on_change: Callable[[str], Any] | None = None   # (any thread) JSON ``{"event": "status" | "changed", ...}``
@@ -170,9 +175,10 @@ def set_active(state: dict, index: int) -> bool:
 
 
 def publishable_url(url: Any) -> bool:
-    """True for a base URL OriginShape may see: an http(s) URL with a host, no user name or password, no query and no
-    fragment, at most ``URL_LIMIT`` characters, without spaces or control characters."""
-    if not isinstance(url, str) or not url or len(url) > URL_LIMIT or "?" in url or "#" in url:
+    """True for a base URL OriginShape may see (and accepts): an http(s) URL with a host, no user name or password, no
+    query and no fragment, at most ``URL_LIMIT`` characters, without spaces, control characters or backslashes, and
+    nothing in it shaped like a credential."""
+    if not isinstance(url, str) or not url or len(url) > URL_LIMIT or "?" in url or "#" in url or "\\" in url:
         return False
     if any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in url):
         return False
@@ -182,20 +188,47 @@ def publishable_url(url: Any) -> bool:
         _port = parts.port
     except ValueError:
         return False
-    return parts.scheme in ("http", "https") and bool(host) and "@" not in parts.netloc
+    return (parts.scheme.lower() in ("http", "https") and bool(host) and "@" not in parts.netloc
+            and _context_guard.redact(url) == url)
 
 
 def endpoint(provider: Any, base_url: Any) -> tuple[str, str]:
-    """``(provider, origin)`` a key goes to: the scheme, host and port of ``base_url`` (its path doesn't matter)."""
-    origin = ""
-    if isinstance(base_url, str) and base_url.strip():
-        try:
-            parts = urlsplit(base_url.strip())
-            port = parts.port
-            origin = f"{parts.scheme.lower()}://{(parts.hostname or '').lower()}{f':{port}' if port else ''}"
-        except ValueError:
-            origin = base_url.strip().lower()
-    return (provider if isinstance(provider, str) else ""), origin
+    """``(provider, base URL)`` as a key's destination, for comparing two of them: the URL's scheme and host in lower
+    case, without a trailing ``/``. Any other difference (another host, port, path, user) is another destination."""
+    url = base_url.strip() if isinstance(base_url, str) else ""
+    try:
+        parts = urlsplit(url)
+        url = parts._replace(scheme=parts.scheme.lower(), netloc=parts.netloc.lower()).geturl()
+    except ValueError:
+        pass
+    return (provider if isinstance(provider, str) else ""), url.rstrip("/")
+
+
+def display_host(base_url: Any) -> str:
+    """The host (and port) of a base URL for a message (never its user, password, path or query)."""
+    try:
+        parts = urlsplit(base_url.strip() if isinstance(base_url, str) else "")
+        host = parts.hostname or ""
+        return f"{host}:{parts.port}" if host and parts.port else host
+    except ValueError:
+        return ""
+
+
+def needs_confirmation(profile: Any) -> bool:
+    """True while a profile's key is set aside because a sync changed its provider or base URL (``held_key``): the
+    profile is not used (no chat, no Test connection, no model list) until the user confirms in the settings dialog."""
+    held = profile.get("held_key") if isinstance(profile, dict) else getattr(profile, "held_key", None)
+    return isinstance(held, dict) and isinstance(held.get("key"), str) and bool(held["key"].strip())
+
+
+def confirmation_text(profile: Any) -> str:
+    """Why a profile waiting for confirmation is not used, and what to do (no key, no URL secrets in it)."""
+    name = profile.get("name") if isinstance(profile, dict) else getattr(profile, "name", "")
+    url = profile.get("base_url") if isinstance(profile, dict) else getattr(profile, "base_url", "")
+    where = display_host(url) or "its new address"
+    return (f"The provider or base URL of the profile “{name or 'Profile'}” was changed on your OriginShape account. "
+            f"Oscar doesn't use it, or send its API key to {where}, until you confirm the change in Oscar's settings "
+            "(⚙ → AI model): use your key there, or remove the key.")
 
 
 def _text(value: Any, limit: int) -> str:
@@ -203,11 +236,12 @@ def _text(value: Any, limit: int) -> str:
 
 
 def _masked(text: str, secrets: tuple[str, ...]) -> str:
-    """``text`` without any of ``secrets`` and without anything shaped like a credential."""
+    """``text`` without any of ``secrets``, without anything shaped like a credential or a piece of one
+    (``context_guard``), and without NUL characters (the server refuses a request that has any of them)."""
     for secret in secrets:
         if secret and secret in text:
             text = text.replace(secret, _context_guard.REDACTED)
-    return _context_guard.redact(text)
+    return _context_guard.redact_fragments(_context_guard.redact(text)).replace("\x00", "")
 
 
 def _number(value: Any, low: float, high: float, cast) -> Any:
@@ -231,19 +265,47 @@ def overrides_of(caps: Any) -> dict:
     }
 
 
+ACCOUNT_WIRE_MODELS = ("origin1", "origin1-super")   # the account's models the server takes in a profile
+
+
 def _account_model(model: str) -> str:
     from .auth.account import RETIRED_ALIASES
 
     return RETIRED_ALIASES.get(model.strip(), model.strip())
 
 
+def _account_wire_model(model: str) -> str:
+    """The account profile's model as the server takes it: one of ``ACCOUNT_WIRE_MODELS`` (a retired alias as its
+    tier; an alias the server added since this list as the default, so the rest of the settings still sync)."""
+    model = _account_model(model)
+    return model if model in ACCOUNT_WIRE_MODELS else ACCOUNT_WIRE_MODELS[0]
+
+
+WIRE_FIELDS = ("id", "name", "provider", "base_url", "base_url_local", "model", "reasoning", "overrides",
+               "has_key")   # exactly what a profile carries on the wire (the server refuses any other field)
+
+
+def masked_fields(profile: dict, secrets: tuple[str, ...] = ()) -> list[str]:
+    """The free-text fields of a stored profile that ``to_wire`` masks (a key or a credential-shaped value in them):
+    their names only, for the log."""
+    secrets = tuple(s for s in secrets if isinstance(s, str) and len(s) >= MIN_MASKED_KEY)
+    found = []
+    for name, limit in (("name", 4 * NAME_LIMIT), ("model", MODEL_LIMIT)):
+        text = _text(profile.get(name), limit)
+        if _masked(text, secrets) != text.replace("\x00", ""):
+            found.append(name)
+    return found
+
+
 def to_wire(profile: dict, secrets: tuple[str, ...] = ()) -> dict:
-    """What OriginShape receives of a stored profile (a ``params.Profile`` as a dict): never ``api_key`` or
-    ``held_key``, a base URL only when ``publishable_url``, every ``secrets`` value masked in the free text."""
+    """What OriginShape receives of a stored profile (a ``params.Profile`` as a dict): exactly ``WIRE_FIELDS``; never
+    ``api_key`` or ``held_key``; a base URL only when ``publishable_url`` (an empty one is an unfinished profile; any
+    other goes as ``""`` with ``base_url_local``); every ``secrets`` value and anything credential-shaped masked in the
+    free text."""
     secrets = tuple(s for s in secrets if isinstance(s, str) and len(s) >= MIN_MASKED_KEY)
     provider = _text(profile.get("provider"), 64)
     url = profile.get("base_url").strip() if isinstance(profile.get("base_url"), str) else ""
-    if provider == ACCOUNT_PROVIDER:
+    if provider == ACCOUNT_PROVIDER or not url:
         base_url, local = "", False
     elif publishable_url(url) and not any(s in url for s in secrets):
         base_url, local = url, False
@@ -251,7 +313,7 @@ def to_wire(profile: dict, secrets: tuple[str, ...] = ()) -> dict:
         base_url, local = "", True
     model = _masked(_text(profile.get("model"), MODEL_LIMIT).strip(), secrets)
     if provider == ACCOUNT_PROVIDER:
-        model = _account_model(model)
+        model = _account_wire_model(model)
     name = " ".join(_masked(_text(profile.get("name"), 4 * NAME_LIMIT), secrets).split())[:NAME_LIMIT] or "Profile"
     reasoning = profile.get("reasoning") if profile.get("reasoning") in REASONING_LEVELS else "auto"
     api_key = profile.get("api_key")
@@ -264,9 +326,16 @@ def to_wire(profile: dict, secrets: tuple[str, ...] = ()) -> dict:
         "model": model[:MODEL_LIMIT],
         "reasoning": reasoning,
         "overrides": overrides_of(profile.get("caps_override")),
-        "notes": _masked(_text(profile.get("notes"), NOTES_LIMIT), secrets)[:NOTES_LIMIT],
-        "has_key": isinstance(api_key, str) and bool(api_key.strip()),
+        # a key set aside until the user confirms a changed provider or URL is still a key saved in FreeCAD
+        "has_key": (isinstance(api_key, str) and bool(api_key.strip())) or needs_confirmation(profile),
     }
+
+
+def wire_profile(profile: dict) -> dict:
+    """A wire profile with exactly ``WIRE_FIELDS`` (and the five override keys), whatever else ``profile`` holds."""
+    out = {name: profile.get(name) for name in WIRE_FIELDS}
+    out["overrides"] = {key: (profile.get("overrides") or {}).get(key) for key in OVERRIDE_KEYS}
+    return out
 
 
 def _local_secrets(state: dict) -> tuple[str, ...]:
@@ -317,7 +386,6 @@ def normalise_remote(data: Any) -> dict:
             "model": _account_model(model) if provider == ACCOUNT_PROVIDER else model,
             "reasoning": item.get("reasoning") if item.get("reasoning") in REASONING_LEVELS else "auto",
             "overrides": overrides_of(item.get("overrides")),
-            "notes": _text(item.get("notes"), NOTES_LIMIT),
             "has_key": item.get("has_key") is True,
         })
     active = data.get("active_profile_id")
@@ -412,8 +480,8 @@ def _merge_profile(base: dict | None, local: dict, remote: dict, device: dict | 
         sent = ours_url
     else:
         sent = theirs_url
-        if theirs_changed and not theirs_url[1]:
-            url = theirs_url[0]               # a real URL set elsewhere replaces ours ("" + local never does)
+        if theirs_changed and not theirs_url[1] and (theirs_url[0] or not ours_url[1]):
+            url = theirs_url[0]               # a real URL set elsewhere replaces ours ("" never replaces a local one)
     wire["base_url"], wire["base_url_local"] = sent
     # has_key: "a FreeCAD holds a key". True while this one does; false when this one just dropped its key; else what
     # the server has (another FreeCAD may hold one)
@@ -557,15 +625,16 @@ def stored_from_wire(wire: dict) -> dict:
     return {
         "name": wire["name"], "provider": wire["provider"],
         "base_url": "" if wire["base_url_local"] else wire["base_url"], "model": wire["model"], "api_key": "",
-        "temperature": 0.2, "max_tokens": 4096, "notes": wire["notes"], "reasoning": wire["reasoning"],
+        "temperature": 0.2, "max_tokens": 4096, "notes": "", "reasoning": wire["reasoning"],
         "caps_override": {k: v for k, v in wire["overrides"].items() if v is not None}, "id": wire["id"],
         "held_key": {},
     }
 
 
 def _guard_key(before: dict, profile: dict) -> None:
-    """A key goes only where it was entered for: when the provider or the base URL's host changed, the key is set
-    aside (``held_key``); it comes back when the profile points there again."""
+    """A key goes only where it was entered for. When a pull changed the provider or the base URL of a profile with a
+    key, the key is set aside (``held_key``: the key and where it was entered for) and the profile waits for the user
+    to confirm (``needs_confirmation``); it comes back by itself when the profile points there again."""
     old, new = endpoint(before.get("provider"), before.get("base_url")), \
         endpoint(profile.get("provider"), profile.get("base_url"))
     key = profile.get("api_key") if isinstance(profile.get("api_key"), str) else ""
@@ -643,6 +712,7 @@ class Plan:
     version: int
     account: str
     adopted: int = 0
+    masked: dict = field(default_factory=dict)   # free-text field -> how many profiles had a credential masked in it
 
 
 def plan_sync(state: dict, remote: dict, *, prefer: str, account: str,
@@ -664,15 +734,22 @@ def plan_sync(state: dict, remote: dict, *, prefer: str, account: str,
         key = next((p["has_key"] for p in after if p["id"] == entry.id), None)
         if key is not None and entry.id in before_keys and key != before_keys[entry.id]:
             entry.wire["has_key"] = key
-    payload = {"version": remote["version"], **merged.settings()}
+    settings = merged.settings()
+    payload = {"version": remote["version"], "active_profile_id": settings["active_profile_id"],
+               "profiles": [wire_profile(p) for p in settings["profiles"]]}
     push = not same_settings(payload, remote)
     now = {p["id"]: _device(p) for p in after}
+    masked: dict[str, int] = {}
+    secrets = _local_secrets(state)
+    for profile in state["profiles"]:
+        for name in masked_fields(profile, secrets):
+            masked[name] = masked.get(name, 0) + 1
     state[STATE_KEY] = {"account": account, "version": remote["version"],
                         "remote": {"active_profile_id": remote["active_profile_id"],
                                    "profiles": copy.deepcopy(remote["profiles"])},
                         "device": device if push else now}
     changed = _profile_view(state) != before
-    plan = Plan(payload, push, changed, now, remote["version"], account, adopted)
+    plan = Plan(payload, push, changed, now, remote["version"], account, adopted, masked)
     return changed or state[STATE_KEY] != old_snapshot, plan
 
 
@@ -721,7 +798,10 @@ def merge_saved(base: dict, ours: dict, theirs: dict) -> dict:
     for pid in _order(list(by_theirs), list(by_ours), "local"):
         b, o, t = by_base.get(pid), by_ours.get(pid), by_theirs.get(pid)
         if o is not None and t is not None:
-            profiles.append(_merge_value(b, o, t) if b is not None else copy.deepcopy(o))
+            merged = _merge_value(b, o, t) if b is not None else copy.deepcopy(o)
+            if b is not None and o.get("api_key") and o.get("api_key") != b.get("api_key"):
+                merged["held_key"] = {}      # a key typed in the dialog decides for a profile a pull put on hold
+            profiles.append(merged)
         elif o is not None:
             if b is None or _edited(o, b):   # new in the dialog, or edited there after a pull removed it
                 profiles.append(copy.deepcopy(o))
@@ -792,6 +872,28 @@ class ParamsStore:
 
 class SyncConflict(AuthError):
     code = "conflict"
+
+
+def refusal(reply, payload: dict) -> tuple[str, str, str]:
+    """``(code, field, text)`` of a 400 to a push: the server's ``details`` name the field (``profiles.1.base_url``)
+    and say what is wrong, never with a value. ``text`` names the profile by its name for the dialog."""
+    code, description = error_details(reply.body)
+    data = reply.json()
+    error = data.get("error") if isinstance(data, dict) else None
+    details = error.get("details") if isinstance(error, dict) else None
+    first = details[0] if isinstance(details, list) and details and isinstance(details[0], dict) else {}
+    field_name = first.get("field") if isinstance(first.get("field"), str) else ""
+    message = safe_text(first.get("message"), limit=300) or description or f"HTTP {reply.status}"
+    where = field_name
+    match = re.fullmatch(r"profiles\.(\d+)(?:\.(.+))?", field_name)
+    profiles = payload.get("profiles") or []
+    if match and int(match.group(1)) < len(profiles):
+        name = profiles[int(match.group(1))].get("name") or "a profile"
+        where = f"the profile “{name}”" + (f", {match.group(2).replace('_', ' ')}" if match.group(2) else "")
+    elif field_name:
+        where = field_name.replace("_", " ")
+    text = f"{where}: {message}" if where else message
+    return code, field_name[:120], text if text.endswith(".") else text + "."
 
 
 def _conflict_current(reply) -> dict | None:
@@ -876,6 +978,8 @@ class Syncer:
     def _plan(self, remote: dict, prefer: str, account: str) -> Plan:
         plan = self.store.transaction(lambda state: plan_sync(state, remote, prefer=prefer, account=account,
                                                               limits=self.store.limits))
+        if plan.masked and plan.push:   # names of the fields only, never their values
+            self._log("ai_settings_masked", fields=sorted(plan.masked), profiles=max(plan.masked.values()))
         if plan.changed:
             self._notify("changed", {"version": remote["version"], "updated_by": remote.get("updated_by")})
         return plan
@@ -918,9 +1022,10 @@ class Syncer:
                 raise SyncConflict("the settings changed on the website at the same moment. Oscar tries again "
                                    "later.", status=409)
             if reply.status == 400:
-                code, description = error_details(reply.body)
-                raise AuthError(f"OriginShape refused these settings ({description or code or 'HTTP 400'}).",
-                                code=code or "invalid_request", status=400)
+                code, field_name, text = refusal(reply, plan.payload)
+                self._log("ai_settings_refused", reason=reason, code=code, field=field_name)
+                raise AuthError(f"OriginShape refused these settings: {text}", code=code or "invalid_request",
+                                status=400)
             raise api_error(reply, "the AI model settings")
         self._log("ai_settings_sync", outcome="pulled" if pulled else "unchanged", reason=reason,
                   version=remote["version"], profiles=len(remote["profiles"]), adopted=plan.adopted)
@@ -1032,14 +1137,14 @@ def wait_idle(timeout: float = 10.0) -> bool:
 
 # -- the Test connection the website asks for --------------------------------------------------------------------
 
-_MASKED_TOKEN = re.compile(r"\S*(?:\*{3,}|•{3,})\S*")
 _WORD = re.compile(r"[A-Za-z0-9_\-]{4,}")
 
 
 def scrub_test_message(text: str, profile: Any) -> str:
     """A test report as it may leave this computer: every credential ``context_guard`` knows or recognises, the
-    profile's key (and its held key) and any run of it (6+ characters, or 4+ with a digit), a key echoed with stars
-    (``sk-abc***...7890``) and a local base URL's secret parts replaced; at most ``TEST_MESSAGE_LIMIT`` characters."""
+    profile's key (and its held key) and any run of it (6+ characters, or 4+ with a digit), a key a provider echoed
+    masked or a word that starts like a key (``context_guard.redact_fragments``: ``sk-proj-****…Ab9Z``, ``****abcd``)
+    and a local base URL's secret parts replaced; at most ``TEST_MESSAGE_LIMIT`` characters."""
     text = _context_guard.redact(text or "")
     held = getattr(profile, "held_key", None)
     secrets = [s.strip() for s in (getattr(profile, "api_key", ""), held.get("key") if isinstance(held, dict) else "")
@@ -1047,7 +1152,7 @@ def scrub_test_message(text: str, profile: Any) -> str:
     for secret in sorted(secrets, key=len, reverse=True):
         if len(secret) >= 4:
             text = text.replace(secret, _context_guard.REDACTED)
-    text = _MASKED_TOKEN.sub(_context_guard.REDACTED, text)
+    text = _context_guard.redact_fragments(text)
 
     def fragment(match: re.Match) -> str:
         word = match.group(0)
@@ -1070,7 +1175,7 @@ def scrub_test_message(text: str, profile: Any) -> str:
     return text if len(text) <= TEST_MESSAGE_LIMIT else text[:TEST_MESSAGE_LIMIT - 1] + "…"
 
 
-def test_checks(report: Any) -> dict:
+def report_checks(report: Any) -> dict:
     """``{"reply", "tools", "image"}`` of a ``provider_check.ConnectionReport``: True / False, or None when the step
     was not run or did not decide."""
     lines = list(getattr(report, "lines", None) or ())
@@ -1102,6 +1207,9 @@ def run_profile_test(profile_id: str, *, store: Any = None, run: Callable[..., A
     if profile is None:
         _log("ai_settings_test", outcome="unknown_profile")
         return False, UNKNOWN_PROFILE_TEXT, dict(_NO_CHECKS)
+    if needs_confirmation(profile):   # its provider or URL was changed elsewhere: nothing is sent until confirmed here
+        _log("ai_settings_test", outcome="needs_confirmation")
+        return False, NEEDS_CONFIRMATION_TEXT, dict(_NO_CHECKS)
     if run is None:
         from .provider_check import run_connection_test as run
     deadline = time.monotonic() + timeout
@@ -1120,6 +1228,6 @@ def run_profile_test(profile_id: str, *, store: Any = None, run: Callable[..., A
     text = report.summary() or "(no result)"
     if not report.ok:
         text += "\n✗ This model cannot be used as it is."
-    checks = test_checks(report)
+    checks = report_checks(report)
     _log("ai_settings_test", outcome="passed" if report.ok else "failed", **{k: v for k, v in checks.items()})
     return bool(report.ok), scrub_test_message(text, profile), checks

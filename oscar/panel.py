@@ -722,7 +722,8 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         self._render()
 
     def _send_blocker(self, profile) -> str:
-        """Why a send must not start a turn, from LOCAL facts only (no network): ``no_profile``, ``no_key``, ``server``
+        """Why a send must not start a turn, from LOCAL facts only (no network): ``no_profile``, ``endpoint`` (a sync
+        changed the profile's provider or base URL and the user hasn't confirmed it yet), ``no_key``, ``server``
         (the configured OriginShape server is refused), ``signed_out``, ``waitlisted``, ``outdated`` (this Oscar is
         older than the server's minimum version), ``consent`` (the account has not accepted OriginShape's current
         Terms: never for another provider); ``""`` lets the turn go. The
@@ -730,6 +731,8 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         some), and a sign-in that is not known yet (the OS keychain is still being read) is left to the turn."""
         if profile is None:
             return "no_profile"
+        if _settings_sync.needs_confirmation(profile):   # its provider or URL was changed on the account: confirm first
+            return "endpoint"
         if not _params.is_account_profile(profile):
             if not profile.api_key and profile.provider == "anthropic":
                 return "no_key"
@@ -759,6 +762,9 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         """Show why the send did not start a turn; the typed text and the attachments stay where they are."""
         if blocker == "no_profile":
             self._append(Block.ERROR, "No chat profile is configured — open ⚙ settings and add one.")
+            self._render()
+        elif blocker == "endpoint":
+            self._append(Block.ERROR, _settings_sync.confirmation_text(_params.active_profile()))
             self._render()
         elif blocker == "server":
             problem = self._account_state().get("error") or "The OriginShape server URL cannot be used."
