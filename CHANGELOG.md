@@ -6,6 +6,17 @@ and versions follow [Semantic Versioning](https://semver.org/): the version is i
 
 ## [Unreleased]
 
+### Fixed
+
+- **The source mesh no longer appears as a second model after a rebuild** (#5): when a finished turn
+  rebuilds an imported STL/OBJ into a solid body, the mesh it traced over is hidden at the end of the
+  turn (the body is the deliverable; the mesh stays in the tree as a reference and the saved model
+  carries the hidden state). Only meshes Oscar itself imported are hidden, and only in the document the
+  turn built the deliverable in — a scan imported for a fit check or measurement is never touched, a
+  capped or unverified build keeps its mesh visible, and a later turn does not hide a mesh the user
+  showed again on purpose. Reverting the turn brings the mesh back: the engine's turn snapshot now
+  records mesh visibility and the revert restores it.
+
 ## [0.2.1] - 2026-10-28
 
 The first public release: 0.2.0 (released internally) with these fixes.
