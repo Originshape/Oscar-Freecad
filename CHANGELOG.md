@@ -6,6 +6,26 @@ and versions follow [Semantic Versioning](https://semver.org/): the version is i
 
 ## [Unreleased]
 
+### Added
+
+- **AI model settings synced with your OriginShape account**: signed in with OriginShape, whether you use the account
+  or your own provider, your provider profiles (name, provider, base URL, model, reasoning, Advanced overrides, notes)
+  and the one in use are the same in FreeCAD and on the website (Settings → AI model). Oscar syncs when the panel
+  opens, after you sign in, when you open its settings, after Save (and a profile picked in the panel), and before a
+  chat when the last check is more than a minute old, always in the background. Each setting is merged on its own; when
+  both sides changed the same one, the website's wins on a fetch and yours on a Save. **API keys never leave this
+  computer** (the website only learns whether a key is saved here), nor does a base URL with a user, password, query or
+  fragment in it. A change on the website that points a profile at another provider or server sets its key aside
+  instead of sending it there. `OSCAR_SETTINGS_SYNC=0` keeps the settings local.
+- **Test in FreeCAD**: with Connect on, the website can ask FreeCAD to test a profile; the test runs here with the key
+  saved here, and only its result comes back, scrubbed of the key.
+
+### Changed
+
+- **Every provider profile has a stable id** in `oscar_settings.json`, and the profile in use is remembered by it, so a
+  rename never switches profiles. Older settings files get their ids when they are read (nothing is rewritten until
+  the next save), and an older Oscar can still read and save the file.
+
 ## [0.2.1] - 2026-10-28
 
 The first public release: 0.2.0 (released internally) with these fixes.

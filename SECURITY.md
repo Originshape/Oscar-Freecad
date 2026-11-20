@@ -25,7 +25,18 @@ What Oscar can do on your machine, and how it is limited:
   `OSCAR_UPDATE_CHECK=0`, turns that off.
 - **API keys** of your own providers are stored in plain text in Oscar's settings file (`oscar_settings.json` in your
   FreeCAD user folder) and in its backups next to it (`oscar_settings.json.bak`, and `oscar_settings.json.corrupt-*`
-  after a damaged file was replaced).
+  after a damaged file was replaced). They are entered, stored and used only on this computer: OriginShape never
+  receives a key, a part of one or a hash of one.
+- **AI model settings sync with your OriginShape account** while you are signed in with OriginShape (not with a
+  personal API key; `OSCAR_SETTINGS_SYNC=0` turns it off). What is sent, for each provider profile: its name, provider,
+  base URL, model, reasoning level, Advanced overrides, notes, and whether this computer holds a key for it; and which
+  profile is in use. What is not: the key; a base URL with a user name, password, query or fragment (sent as empty and
+  marked as kept in FreeCAD); a key or anything shaped like a credential found in a name, model or notes (masked);
+  what Oscar learned about each model; the rest of Oscar's settings. A change made on the website never sends a key
+  somewhere new: when it moves a profile to another provider or server, the profile's key is set aside on this
+  computer until you confirm it in Oscar's settings. The website's **Test in FreeCAD** (with Connect on) runs the
+  connection test here, with the key saved here; only the outcome and a short message, scrubbed of the key and of a
+  local base URL's secrets, are sent back.
 - **Your OriginShape sign-in** (a refresh token or a personal API key) is kept in the system keychain (macOS Keychain,
   Windows Credential Manager, the Secret Service on Linux), else in `oscar_credentials.json` next to the settings file,
   readable by your user account only. It is only ever sent to the OriginShape server set in Oscar's settings (https,
