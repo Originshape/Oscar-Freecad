@@ -196,14 +196,20 @@ class FinalizeHidesSourceMeshTest(_DocTestCase):
         finally:
             App.closeDocument(saved.Name)
 
-    def test_an_answered_rebuild_also_hides_the_source(self):
-        """The gate passed without a validation record: still a finished build (outcome ``answered``)."""
-        doc = _new_doc("Answered")
-        mesh = _add_mesh(doc)
-        solid = _add_solid(doc)
-        doc.recompute()
-        _rebuild_turn(self.proj, doc, mesh, solid, outcome="answered")
-        self.assertFalse(mesh.Visibility)
+    def test_an_answered_rebuild_without_validation_keeps_the_source_visible(self):
+        """Phase 5 rule: only a VALIDATED reconstruction hides the source. An ``answered`` turn
+        finished without a validation record keeps the mesh visible — it is still the reference
+        the user checks the unvalidated result against. Failed and cancelled turns likewise."""
+        for outcome in ("answered", "failed", "cancelled"):
+            with self.subTest(outcome=outcome):
+                proj = S.make_project(title=f"outcome {outcome}")
+                doc = _new_doc(f"Doc{outcome}")
+                mesh = _add_mesh(doc)
+                solid = _add_solid(doc)
+                doc.recompute()
+                _rebuild_turn(proj, doc, mesh, solid, outcome=outcome)
+                self.assertTrue(mesh.Visibility,
+                                f"outcome {outcome} must keep the source mesh visible")
 
     def test_a_capped_build_keeps_the_source_mesh_visible(self):
         """The round cap hit with required steps open: the half-built model needs its reference."""

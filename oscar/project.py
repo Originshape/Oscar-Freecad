@@ -1492,8 +1492,9 @@ class Project(SummaryMixin, RewindMixin):
         is used (the Summary never claims what no check recorded). Before the files are written the meshes a
         rebuild traced over are hidden (``_hide_source_meshes``: only the project's own mesh imports, only in a
         document whose visible deliverable was built after the mesh entered it, and only for a completed turn —
-        ``validated`` / ``answered``, or the native reconstruction's ``verified_parametric`` /
-        ``partially_verified_parametric``; each hidden name becomes a decision note and the autosave then
+        ``validated``, or the native reconstruction's ``verified_parametric`` /
+        ``partially_verified_parametric`` — an ``answered`` turn without a validation record keeps the
+        mesh visible; each hidden name becomes a decision note and the autosave then
         carries the hidden state).
         ``export=None`` means True for the ledger intents enclosure / fixture / bracket / generic_part / deliver:
         when ``exports/`` holds no file yet, STEP + STL of the visible solid tips are exported with the spec's
@@ -1554,15 +1555,23 @@ class Project(SummaryMixin, RewindMixin):
         deliverable was built over that source — so a fit-check scan imported next to an existing (or
         earlier-built) part, and reference geometry, are never touched, while a reconstruction that
         completes in a LATER turn than it built the Body still hides its source. Only a completed turn
-        hides: ``validated`` / ``answered`` (the generic flow) or ``verified_parametric`` /
-        ``partially_verified_parametric`` (the native reconstruction flow's verdicts); a capped or
+        hides: ``validated`` (the generic flow) or ``verified_parametric`` /
+        ``partially_verified_parametric`` (the native reconstruction flow's verdicts); ``answered``,
+        capped or
         unverified outcome keeps the mesh visible, the reference it still is. A mesh is hidden once
         (``manifest["hidden_source_meshes"]``): a mesh the user showed again stays visible on later turns,
         until a revert (``note_reverted``) clears the record and a rebuilt reconstruction hides it again.
         The mesh object is never deleted; each hidden name becomes a ``decision`` note. GUI work first (no
         lock), then the notes under the lock; runs before the autosave so the saved FCStd carries the hidden
         state; a failure is logged and never breaks ``finalize``."""
-        if outcome not in ("validated", "answered", "verified_parametric", "partially_verified_parametric"):
+        # State-transition rule (issue #5, Phase 5 review): the source mesh hides ONLY after a
+        # VALIDATED reconstruction — validated (the generic flow's gate passed with a validation
+        # record) or the native flow's verified_parametric / partially_verified_parametric. A
+        # plain `answered` turn finished WITHOUT validation keeps the mesh visible — it is
+        # still the reference the user checks the unvalidated result against. Failed,
+        # cancelled, capped and unverified turns never hide it; undo/revert restores the
+        # recorded pre-turn visibility (engine snapshot) and clears the hidden record.
+        if outcome not in ("validated", "verified_parametric", "partially_verified_parametric"):
             return
         candidates = {doc: dict(names) for doc, names in (self.manifest.get("source_meshes") or {}).items()
                       if isinstance(names, dict) and names}   # copied: iterated in the GUI task
