@@ -6,6 +6,25 @@ and versions follow [Semantic Versioning](https://semver.org/): the version is i
 
 ## [Unreleased]
 
+### Fixed
+
+- **Chats are independent** (#2): a turn writes only to the chat that started it. Its transcript, plan,
+  artifacts, project folder, attachments, undelivered images, unfinished composer text and turn record are
+  kept per chat, and switching chats (the picker, New chat, Chat search) is allowed while a turn runs — a
+  message sent in another chat then waits in that chat instead of steering the running turn.
+- A queued message whose send was blocked (signed out, new Terms, no key…) no longer disappears together
+  with what the user was typing: it keeps waiting in its chat and the composer is left alone.
+- Picking the chat that is already shown no longer wipes the message being typed.
+- A message queued in the chat on screen goes out when the panel becomes free, even when other chats
+  queued messages before it.
+- The pause, stop and Esc controls act on the running turn only while its chat is shown; in another chat
+  the send button sends (queuing there), Esc belongs to the application again, and the running turn's
+  status line, heartbeat and Act-now button do not show.
+- A turn whose first request failed for an account reason gives its message back to its own chat also when
+  another chat is on screen: the message returns to that chat's input (it used to stay in its history
+  unanswered), and the same now holds for an undelivered steered message.
+- A queued message that is still waiting when its chat is opened later asks before it is sent.
+
 ## [0.2.1] - 2026-10-28
 
 The first public release: 0.2.0 (released internally) with these fixes.
