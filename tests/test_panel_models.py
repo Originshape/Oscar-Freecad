@@ -3,8 +3,12 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(__file__))
+from support import isolation  # noqa: E402  (the header every test that imports oscar must carry)
 
-from oscar.panel_models import catalog_models, model_availability, selected_profile
+isolation.isolate_process()   # sandboxed settings/projects/logs BEFORE importing oscar
+
+from oscar.panel_models import catalog_models, model_availability, selected_profile  # noqa: E402
 
 
 class ModelCatalogTest(unittest.TestCase):
