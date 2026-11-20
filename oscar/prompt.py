@@ -119,21 +119,21 @@ _LITE_SECTIONS: tuple[_Section, ...] = (
         "A work request is finished when the geometry exists, never when a plan has been described: never end the "
         "turn at a plan.",
         "One named step per call; scripts under 40 lines; about 300 words of thinking per round, then act.",
-        "The app keeps the plan and the phase (see the [governor] line at the end of each tool result), records "
-        "every step and checks health: do not save or screenshot to record. If a reply is cut off, act at once.",
+        "The app keeps the plan and phase (see the [governor] line), records steps and checks health: do not "
+        "save or screenshot to record. If a reply is cut off, act at once.",
     )),
     ("HOUSING/ENCLOSURE", (
         "Source the part with `find_reference_part`, then `source_reference_part` (never invent a URL; one "
-        "attempt; if it fails the app uses nominal data: say so).",
-        "Next `enclosure_spec`, then `build_enclosure` once per stage (shell, standoffs, ports, lid, vents, hooks, "
-        "assembly) until all are built.",
+        "attempt; on failure the app uses nominal data: say so).",
+        "Next `enclosure_spec`, then `build_enclosure` once per stage until every stage is built.",
         "Then `validate_model` and `check_fit`.",
         "Anything else: `execute_code`, one named step per call.",
     )),
     ("PARAMETERS AND NAMING", (
-        "Dimensions live in the `Params` sheet (lower_snake_case, unit in the cell); change one with "
-        "`set_parameter`.",
+        "Dimensions live in the `Params` sheet (lower_snake_case); change one with `set_parameter`.",
         "One part per object; never fuse parts. Names: `Params`, `Shell`, `Lid`, `Ref_<BOARD>`.",
+        "A parametric request cannot always be honoured here: bind what you can and say in the report what is "
+        "not parametric.",
     )),
     ("TOOLS", (
         "Use `get_view` once per finished step.",
@@ -160,8 +160,9 @@ _PLAYBOOK_SECTIONS: dict[str, tuple[_Section, ...]] = {
     ),
     "structured_part": (
         ("PLAYBOOK structured_part (prismatic parts: plates, flanges, brackets, fixtures)", (
-            "Prefer one structured plan to a long script: choose the parameters first (name, value, where the "
-            "number comes from), then one feature per entry, then call `apply_feature_plan`.",
+            "Build prismatic parts with one structured plan, not a script (a request that says parametric or "
+            "editable means this path): choose the parameters first (name, value, where the number comes from), "
+            "then one feature per entry, then call `apply_feature_plan`.",
             "Use schema_version 2 with a parameter name for every dimension. Sketch (rectangle, circle, slot, several "
             "profiles), pad, pocket, hole, fillet, chamfer, thickness (shell), linear_pattern, polar_pattern, "
             "mirror, boss. Pick edges by rule (all_outer, vertical, top_outer, bottom_outer, edges_of_feature:<id>), "
@@ -171,7 +172,8 @@ _PLAYBOOK_SECTIONS: dict[str, tuple[_Section, ...]] = {
             "If the call fails, fix the field the error names (it suggests the spelling) and send the whole plan "
             "again; `reapply_plan_feature` repairs one feature.",
             "Then `validate_model`. To resize, change the parameter, not the geometry.",
-            "Round shapes, sweeps or anything the plan cannot say: `execute_code` stays available.",
+            "Only what no plan op can express goes to `execute_code`: bind its dimensions to the Params sheet and "
+            "say in the final report that this piece is not parametric.",
         )),
     ),
     "parts_library": (

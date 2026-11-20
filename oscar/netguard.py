@@ -29,6 +29,7 @@ import hashlib
 import itertools
 import os
 import re
+import stat
 import sys
 import threading
 import time
@@ -748,7 +749,7 @@ _BENIGN_PROGRAMS = frozenset({"echo", "ls", "pwd", "true", "false", "sleep", "da
 _SHELL_META_RE = re.compile(r"[;&|`$<>()\n\\]")
 
 
-_SYSTEM_BIN_DIRS = ("/bin", "/usr/bin", "/sbin", "/usr/sbin")
+_SYSTEM_BIN_DIRS = ("/bin", "/usr/bin", "/sbin", "/usr/sbin", "/usr/lib/cargo/bin/coreutils")
 
 
 def _spawn_executable(event: str, args) -> str:
@@ -817,7 +818,10 @@ def _is_system_binary(path: str) -> bool:
         # the lookup path AND the real file (after symlinks; merged-/usr links such as /bin -> /usr/bin stay inside the set)
         if norm(os.path.dirname(path)) not in trusted or norm(os.path.dirname(real)) not in trusted:
             return False
-        return not os.access(os.path.dirname(real), os.W_OK)
+        # Check the directory mode rather than effective-user writability.  The
+        # latter can be true for root (or an ACL) even when unprivileged
+        # scripts cannot replace a system binary.
+        return not (os.stat(os.path.dirname(real)).st_mode & (stat.S_IWGRP | stat.S_IWOTH))
     except Exception:  # noqa: BLE001
         return False
 
