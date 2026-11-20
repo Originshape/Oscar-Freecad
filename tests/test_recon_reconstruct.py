@@ -609,9 +609,13 @@ class H3CrossHolesTest(unittest.TestCase):
             self.assertEqual(result["meta"]["cross_holes"], 1)
             self.assertIn("xhole_dp1", result["plan"]["parameters"],
                           "a blind cross-hole carries a measured depth parameter")
+            # the depth must reach the recognized floor (H3c: a 10 mm bore from an entry
+            # plane outside the tangent surface): a shallow scratch passed the old 6 %
+            # volume slack on lenient OCC builds but made macOS CI invalid
+            self.assertGreaterEqual(result["plan"]["parameters"]["xhole_dp1"]["value"], 8.0)
             body = doc.getObject(result["build"]["body"])
             self.assertLessEqual(abs(body.Shape.Volume - shape.Volume) / shape.Volume,
-                                 0.06)
+                                 0.02)
         finally:
             App.closeDocument(doc.Name)
 

@@ -1173,7 +1173,13 @@ def _plan_rotational(survey, diag, mesh, plane_tol_gate=0.05):
         if through:
             feat["through"] = True
         else:
-            depth = max(span - surf_half, 0.2 * r["radius"])
+            # blind depth is ENTRY-TO-FLOOR: the entry plane sits at p0 + surf_half * n (the
+            # body surface on the drill axis), the recognized wall ends at p0 - span/2 * n, so
+            # the drill must travel surf_half + span/2 to reach the floor. The old
+            # span - surf_half drilled only a shallow scratch near the entry (H3c: 2 mm on a
+            # 10 mm bore) — valid on lenient OCC builds, an invalid tangential boolean on
+            # stricter ones (macOS CI).
+            depth = max(surf_half + span / 2.0, 0.2 * r["radius"])
             params[f"xhole_dp{i}"] = {"value": round(float(depth), 3),
                                       "source": _source("cross-hole wall extent "
                                                         "(blind, no far wall seen)")}
