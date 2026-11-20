@@ -37,6 +37,7 @@ MATRIX = {
     "plan_set": ("plan", False, False, "XXXXXXX"),
     "plan_update": ("plan", False, False, "XXXXXXX"),
     "record_note": ("plan", False, False, "XXXXXXX"),
+    "ask_user": ("session", False, False, "XXXXXXX"),
     "create_document": ("session", True, False, "XXXXX--"),
     "reload_document": ("session", True, False, "----XXX"),
     "import_file": ("source", True, True, "-X--X--"),
@@ -68,6 +69,8 @@ MATRIX = {
     "set_parameter": ("params", True, True, "----XXX"),
     "validate_model": ("verify", False, False, "----XXX"),
     "check_fit": ("verify", False, False, "----XXX"),
+    "compare_to_reference": ("verify", False, False, "----XXX"),
+    "reconstruct_mesh": ("build", True, True, "XXXXXXX"),
     "save_document": ("deliver", True, False, "----XXX"),
     "export_model": ("deliver", True, False, "-----XX"),
     "export_rebuild_script": ("deliver", True, False, "-----XX"),
@@ -93,8 +96,8 @@ def _mask(phases) -> str:
 
 
 class MatrixTest(unittest.TestCase):
-    def test_matrix_has_the_43_documented_tools(self):
-        self.assertEqual(len(MATRIX), 43)
+    def test_matrix_has_the_46_documented_tools(self):
+        self.assertEqual(len(MATRIX), 46)
         self.assertEqual(len(EXPECTED_V1 - set(MATRIX)), 0)
 
     def test_every_registered_tool_follows_the_matrix(self):
@@ -141,7 +144,7 @@ class MatrixTest(unittest.TestCase):
     def test_core_and_lite_tool_sets(self):
         self.assertEqual(tools.CORE_TOOLS, {"plan_set", "plan_update", "record_note", "list_documents",
                                             "get_objects", "get_object", "get_view"})
-        self.assertEqual(len(tools.LITE_TOOLS), 19)
+        self.assertEqual(len(tools.LITE_TOOLS), 22)
         self.assertLessEqual(tools.CORE_TOOLS, tools.LITE_TOOLS)
         self.assertLessEqual({"create_document", "create_object", "edit_object", "execute_code", "import_file",
                               "find_reference_part", "source_reference_part", "build_enclosure",
@@ -338,7 +341,8 @@ class ModuleLayoutTest(unittest.TestCase):
 class ToolModuleLoopTest(unittest.TestCase):
     def test_default_list_is_the_documented_one(self):
         self.assertEqual(tools._TOOL_MODULES,
-                         ("tools_flow", "tools_project", "tools_ref", "tools_kit", "tools_verify", "tools_web"))
+                         ("tools_flow", "tools_ask", "tools_project", "tools_ref", "tools_recon", "tools_kit",
+                          "tools_verify", "tools_web"))
 
     def test_a_module_that_is_not_delivered_yet_is_tolerated(self):
         def fake(name):

@@ -93,6 +93,10 @@ class PanelTestCase(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self._hook = netguard.on_permission_wait
         self.addCleanup(setattr, netguard, "on_permission_wait", self._hook)
+        # UI redesign: every panel registers itself as netguard.panel_surface — restore it,
+        # like the hook above, so one test's panel never answers another test's questions
+        self._surface = getattr(netguard, "panel_surface", None)
+        self.addCleanup(setattr, netguard, "panel_surface", self._surface)
         self.p = panel.OscarPanel()
         self.addCleanup(self._dispose)
 
@@ -117,10 +121,13 @@ class StatusLineTest(PanelTestCase):
         card.steps.append(Step("execute_code", summary="execute_code …"))
         p._on_netguard_wait(True)
         p._render()
-        self.assertIn("Waiting for your approval", self.plain())   # the old code swallowed it once a card existed
-        self.assertIn("Working…", self.plain())                    # the card header still counts
+        # UI redesign 2026-11-16: while a turn runs the status drives the heartbeat row, not a Chat line
+        self.assertFalse(p.heartbeat_row.isHidden())
+        self.assertIn("approval", p.heartbeat_label.text())   # the wait stays visible under a live card
+        self.assertIn("Waiting for your approval", p._status)
         p._on_netguard_wait(False)
         self.assertIn("Working…", p._status)
+        self.assertEqual(p.heartbeat_label.text(), "Oscar is working…")
 
     def test_status_is_sticky_and_cleared_at_turn_end(self):
         p = self.p
@@ -128,7 +135,11 @@ class StatusLineTest(PanelTestCase):
         p._ensure_card()
         p._set_status("Running execute_code")
         p._render()
-        self.assertIn("Running execute_code", self.plain())
+        # UI redesign 2026-11-16: a render never wipes the status; it stays in the model and the
+        # heartbeat row keeps describing the turn while the worker runs
+        self.assertIn("Running execute_code", p._status)
+        self.assertFalse(p.heartbeat_row.isHidden())
+        self.assertTrue(p.heartbeat_label.text())
         p.worker = None
         self.finish_turn()
         self.assertEqual(p._status, "")
@@ -150,12 +161,16 @@ class StatusLineTest(PanelTestCase):
         p._on_tool_started("create_object")
         p._on_tool_finished("create_object(Box)", True, "made Box")
         p._render()
-        self.assertIn("Working…", self.plain())    # the step finished but the worker is still running
+        # UI redesign 2026-11-16: the header belongs to the turn card (drawn in its dedicated
+        # view, never in Chat); "not Done while running" is pinned on the card state
+        card = next(b for b in p.blocks if b.kind == Block.TOOL and b.steps)
+        self.assertTrue(card.live)                 # the step finished but the worker is still running
         self.assertNotIn("✻ Done", self.plain())
         p.worker = None
         self.finish_turn()
+        self.assertFalse(card.live)
         self.assertNotIn("Working…", self.plain())
-        self.assertIn("✻ Ran 1 step", self.plain())
+        self.assertTrue(card.text.startswith("✻ Ran 1 step"))
 
 
 class ScrollTest(PanelTestCase):

@@ -18,7 +18,9 @@ What it finds, in this order:
 3. in that frame: the PCB size and thickness, the mounting holes (cylindrical faces parallel to the board normal whose axis
    lies in empty space: a boss or a rounded corner has its axis inside the material), the corner radius, the connector
    candidates (solids that reach the PCB edge: side, offset along the wall, width, height, overhang) and the
-   tallest / lowest z of everything.
+   tallest / lowest z of everything;
+4. a model with no PCB at all gets GENERAL PART FACTS instead (``part``): the total volume, the cylindrical holes on any
+   axis (diameter, a point on the axis, depth) and the convex-cylinder inventory (a typical shared radius is the fillet).
 
 Connector candidates need the connectors to be separate solids; a model fused into one lump reports the PCB and the holes only,
 and says so in ``warnings``.
@@ -474,6 +476,77 @@ def mounting_pattern(holes: list) -> "dict | None":
     return {"d": d, "count": len(chosen), "holes": chosen, "pattern": pattern}
 
 
+# --- general part facts (no PCB) ------------------------------------------------------------
+
+def _part_cylinders(rec: SolidRecord) -> tuple:
+    """``(holes, convex_radii)`` of one solid, ANY axis direction (the PCB routines are Z-only).
+
+    A hole is a concave cylindrical face (the outward normal points towards the axis, judged exactly like ``_cylinders``)
+    with a diameter inside ``HOLE_D_RANGE``: ``{"axis": "x"|"y"|"z", "d", "pos": [x, y, z], "depth"}`` — ``pos`` is a point
+    on the axis (the face's parameter-mid sample projected onto it), ``depth`` the face's extent along the axis.
+    ``convex_radii`` lists one radius per convex cylindrical face (boss, rounded corner, fillet).
+    """
+    holes, convex = [], []
+    seen: set = set()
+    examined = 0
+    for face in rec.shape.Faces:
+        surf = face.Surface
+        if not isinstance(surf, Part.Cylinder):
+            continue
+        examined += 1
+        if examined > MAX_CYLINDER_FACES:
+            break
+        axis = surf.Axis
+        try:
+            u0, u1, v0, v1 = face.ParameterRange
+            um, vm = (u0 + u1) / 2.0, (v0 + v1) / 2.0
+            point, normal = face.valueAt(um, vm), face.normalAt(um, vm)
+        except Exception:  # noqa: BLE001 - a face that cannot be sampled is skipped
+            continue
+        centre = surf.Center
+        on_axis = centre + axis * ((point - centre).dot(axis))
+        comps = (abs(axis.x), abs(axis.y), abs(axis.z))
+        name = "xyz"[comps.index(max(comps))]
+        if normal.dot(point - on_axis) > 0:
+            convex.append(float(surf.Radius))
+            continue
+        d = 2.0 * float(surf.Radius)
+        if not (HOLE_D_RANGE[0] <= d <= HOLE_D_RANGE[1]):
+            continue
+        pos = (round(on_axis.x, 2), round(on_axis.y, 2), round(on_axis.z, 2))
+        key = (name, pos, round(d, 2))
+        if key in seen:
+            continue
+        seen.add(key)
+        box = bbox_of(face)
+        depth = (box[3] - box[0]) if name == "x" else (box[4] - box[1]) if name == "y" else (box[5] - box[2])
+        holes.append({"axis": name, "d": round(d, 4), "pos": list(pos), "depth": round(depth, 3)})
+    return holes, convex
+
+
+def _general_part(solids: list, top_n: int) -> dict:
+    """Part facts of a reference that is not a PCB: ``{"volume", "hole_count", "holes" (capped at ``top_n``),
+    "convex_cylinders", "fillet_radius"}``.
+
+    ``fillet_radius`` is the most common convex radius when at least 3 faces share it (a real fillet runs along several
+    edges); a single boss or corner arc does not claim the title (``None``). Deterministic: B-rep only, no tessellation.
+    """
+    holes: list = []
+    convex: list = []
+    for rec in solids:
+        rec_holes, rec_convex = _part_cylinders(rec)
+        holes.extend(rec_holes)
+        convex.extend(rec_convex)
+    holes.sort(key=lambda h: (h["axis"], h["pos"]))
+    counts: dict = {}
+    for r in convex:
+        counts[round(r, 2)] = counts.get(round(r, 2), 0) + 1
+    fillet = max(counts, key=lambda k: (counts[k], k)) if counts else None
+    return {"volume": round(sum(r.volume for r in solids), 2), "hole_count": len(holes),
+            "holes": holes[:max(1, int(top_n))], "convex_cylinders": len(convex),
+            "fillet_radius": fillet if fillet is not None and counts[fillet] >= 3 else None}
+
+
 # --- connectors ----------------------------------------------------------------------------
 
 def _iou(a: tuple, b: tuple) -> float:
@@ -538,6 +611,7 @@ class Measurement:
     solid_count: int = 0
     solids: list = field(default_factory=list)
     pcb: "dict | None" = None
+    part: "dict | None" = None        # general facts of a reference that is not a PCB (no pcb found)
     holes: list = field(default_factory=list)
     mounting: "dict | None" = None
     connectors: list = field(default_factory=list)
@@ -585,8 +659,9 @@ def analyze(solids: list, *, board: "dict | None" = None, expected_bbox=None, to
             object_name: str = "") -> Measurement:
     """Measure ``solids`` (``SolidRecord`` s in any frame) in the board frame; the frame is derived unless one is given.
 
-    GUI-thread only. The solids are not modified. A model without a PCB still gets its bounding box, solid table and
-    identity; ``pcb`` is ``None`` and a warning says that the frame, heights and connectors could not be derived.
+    GUI-thread only. The solids are not modified. A model without a PCB still gets its bounding box, solid table,
+    general part facts (``part``: volume, holes on any axis, convex cylinders) and identity; ``pcb`` is ``None`` and a
+    warning says that the frame, heights and connectors could not be derived.
     """
     m = Measurement(object=object_name)
     solids = [s for s in solids if s.volume > 0 and all(math.isfinite(v) and abs(v) < 1e7 for v in s.box)]
@@ -602,6 +677,7 @@ def analyze(solids: list, *, board: "dict | None" = None, expected_bbox=None, to
     m.solids = solid_table(placed, top_n)
     if not frame.found:
         m.warnings.append(frame.note)
+        m.part = _general_part(placed, top_n)
         m.identity = identity_of(m, board, expected_bbox)
         return m
     length, width, thickness = frame.pcb_size
@@ -650,6 +726,19 @@ def render_text(m: Measurement, *, top_n: int = 8) -> str:
         lo, hi, size = box["min"], box["max"], box["size"]
         lines.append(f"Bounding box: x {_mm(lo[0])}..{_mm(hi[0])}, y {_mm(lo[1])}..{_mm(hi[1])}, z {_mm(lo[2])}..{_mm(hi[2])} "
                      f"(size {_mm(size[0])} x {_mm(size[1])} x {_mm(size[2])} mm).")
+    if m.part:
+        p = m.part
+        shown = p["holes"][:max(1, int(top_n))]
+        if shown:
+            listing = "; ".join(f"{h['axis']}-axis d{_mm(h['d'])} at ({', '.join(_mm(v) for v in h['pos'])}) "
+                                f"depth {_mm(h['depth'])}" for h in shown)
+            more = f"; ... {p['hole_count'] - len(shown)} more (raise top_n, at most 30)" if p["hole_count"] > len(shown) else ""
+            holes_text = f"{p['hole_count']} hole(s): {listing}{more}"
+        else:
+            holes_text = "no cylindrical holes found"
+        lines.append(f"Part: volume {_mm(p['volume'])} mm3; {holes_text}.")
+        if p["fillet_radius"] is not None:
+            lines.append(f"Fillet hint: typical convex radius {_mm(p['fillet_radius'])} mm across {p['convex_cylinders']} faces.")
     if m.pcb:
         p = m.pcb
         lines.append(f"PCB: {_mm(p['length'])} x {_mm(p['width'])} x {_mm(p['thickness'])} mm (solid '{p['solid']}', found as a "

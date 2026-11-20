@@ -16,7 +16,8 @@ Selection (all combinable, in this order of appearance):
 * no names: every ``test_*.py`` next to this file is discovered (new files need no registration);
 * names from ``OSCAR_TEST_MODULES`` (comma separated: freecadcmd -c dies above ~400 characters of argv)
   and from argv: ``test_flow``, ``test_flow.GateTest``, ``test_flow.GateTest.test_x``, ``tests/test_flow.py``;
-* the token ``fast`` (or ``--fast``) selects ``FAST_MODULES`` and ``pure`` (or ``--pure``) selects ``PURE_MODULES``
+* the token ``fast`` (or ``--fast``) selects ``FAST_MODULES``, ``pure`` (or ``--pure``) selects ``PURE_MODULES``
+  and ``recon`` (or ``--recon``) selects ``RECON_MODULES`` (the K1-K4 reconstruction stages; FreeCAD only)
   (those that exist): the pure ones need no FreeCAD, so the fast CI job runs them on a plain python;
 * ``--list`` prints the selected test ids and exits without running them.
 
@@ -42,7 +43,8 @@ FAST_MODULES = (
     "test_stage0", "test_suite_guard", "test_turnlog", "test_runner", "test_scripted_server", "test_personas",
     "test_flow", "test_flow_guard", "test_loopcore", "test_agent_loop", "test_agent_loop_surface", "test_oscar_regressions",
     "test_providers", "test_provider_faults", "test_provider_catalogue", "test_models",
-    "test_tools_and_params", "test_tool_registry", "test_netguard",
+    "test_tools_and_params", "test_tool_registry", "test_tools_ask", "test_netguard",
+    "test_recon_pointcloud", "test_recon_askwire", "test_recon_classify", "test_recon_partialarc",
     "test_project", "test_prompt", "test_context", "test_context_guard",
 )
 
@@ -51,6 +53,7 @@ FAST_MODULES = (
 PURE_MODULES = (
     "test_suite_guard", "test_turnlog", "test_runner", "test_flow", "test_flow_guard", "test_loopcore",
     "test_prompt", "test_context", "test_kit_spec", "test_refparts_identity", "test_panel_render", "test_project",
+    "test_askuser",
     # the OriginShape account: the sign-in core, the P0 script and network gates, the OriginShape provider
     "test_auth_basics", "test_auth_device", "test_auth_fake", "test_auth_keystore", "test_auth_loopback",
     "test_auth_redaction", "test_auth_session", "test_netguard_threads", "test_codeguard", "test_provider_originshape",
@@ -66,6 +69,22 @@ PURE_MODULES = (
     "test_updates",
     # the pen's region line and the chat search
     "test_markup", "test_chatsearch",
+)
+
+# "recon" = the mesh-to-parametric reconstruction stages (K1-K5 + G-stages: quality/
+# tolerances, mesh diagnostics and validated repair, provenance, units, recognition,
+# reconstruction, deviation, the tool, plus the import and registry surfaces they touch).
+# Runs ONLY under FreeCAD.
+RECON_MODULES = (
+    "test_recon_quality", "test_recon_meshops", "test_recon_provenance", "test_recon_units",
+    "test_recon_recognize", "test_recon_reconstruct", "test_recon_fit", "test_recon_merge", "test_recon_section", "test_recon_holes",
+    "test_recon_dressings", "test_recon_patterns", "test_recon_reopen",
+    "test_plan_sweep_loft",
+    "test_cadbench_adapter",
+    "test_recon_deviation", "test_recon_nominal", "test_recon_datums", "test_tools_recon",
+    "test_recon_approve",
+    "test_import_file", "test_tool_registry",
+    "test_export_reimport", "test_export_drawing", "test_hide_source_mesh", "test_benchmark_recon",
 )
 
 EXIT_OK, EXIT_FAILED, EXIT_NO_TESTS, EXIT_REFUSED = 0, 1, 2, 3
@@ -108,10 +127,12 @@ def select_names(tests_dir, argv, environ):
             raw.append("fast")
         elif arg == "--pure":
             raw.append("pure")
+        elif arg == "--recon":
+            raw.append("recon")
         elif not arg.startswith("-"):
             raw.append(arg)
     names = []
-    groups = {"fast": FAST_MODULES, "pure": PURE_MODULES}
+    groups = {"fast": FAST_MODULES, "pure": PURE_MODULES, "recon": RECON_MODULES}
     for item in raw:
         if item.strip() in groups:
             expanded = [m for m in groups[item.strip()] if os.path.isfile(os.path.join(tests_dir, m + ".py"))]
@@ -181,6 +202,31 @@ def _prepare_streams():
             pass
 
 
+def _version_banner():
+    """One line of environment facts for CI logs (K5-H): FreeCAD / python / numpy / scipy."""
+    bits = ["python %s.%s.%s" % sys.version_info[:3]]
+    try:
+        import FreeCAD
+
+        ver = FreeCAD.Version()
+        bits.insert(0, "FreeCAD %s.%s.%s" % (ver[0], ver[1], ver[2] if len(ver) > 2 else "?"))
+    except Exception:  # noqa: BLE001 - the pure job has no FreeCAD by design
+        bits.insert(0, "FreeCAD absent (pure-python run)")
+    try:
+        import numpy
+
+        bits.append("numpy %s" % numpy.__version__)
+    except Exception:  # noqa: BLE001
+        bits.append("numpy absent")
+    try:
+        import scipy
+
+        bits.append("scipy %s" % scipy.__version__)
+    except Exception:  # noqa: BLE001
+        bits.append("scipy absent")
+    return "OSCAR_TESTS env: " + " | ".join(bits)
+
+
 def main(argv=None, environ=None, tests_dir=None, file_hint=None, stream=None):
     """Run the selected tests; return the exit code (see the module docstring). Never raises."""
     environ = os.environ if environ is None else environ
@@ -202,6 +248,7 @@ def main(argv=None, environ=None, tests_dir=None, file_hint=None, stream=None):
         names, list_only = select_names(tests_dir, argv, environ)
         suite = build_suite(tests_dir, names)
         count = suite.countTestCases()
+        _say(_version_banner())
         scope = ", ".join(names) if names else "all test_*.py"
         _say("OSCAR_TESTS: %d tests selected (%s) in %s" % (count, scope, tests_dir))
         if count == 0:

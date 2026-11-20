@@ -24,6 +24,12 @@ What lives here
   ``account_card_html`` (the ``ACCOUNT`` cards: ``onboarding``, ``signed_out``, ``waitlisted``, ``no_credits``,
   ``outdated``, ``consent``), ``account_problem_card`` (which card a failed turn's
   ``account_problem`` payload calls for), ``terms_pending`` and ``format_credits``.
+- the chat redesign helpers: ``message_role`` (whose voice a Block kind is), ``answer_sections`` /
+  ``answer_html`` (a final answer as lead paragraphs + labelled sections — nothing dropped),
+  ``inline_image_target`` / ``group_images`` / ``images_html`` and the markdown ``![caption](path)`` rule
+  (inline previews, click-to-open via the anchor), ``step_chips`` / ``chips_row_html`` (a turn's tool calls
+  collapsed to subtle chips) and ``question_html`` / ``question_locked`` (the transcript embed of a
+  ``panel_questions.QuestionsBar`` payload).
 
 Every function that returns HTML escapes all payload text; colours arrive as parameters.
 """
@@ -39,11 +45,13 @@ from urllib.parse import quote
 
 __all__ = [
     "ACCOUNT_CARD_KINDS", "ACCOUNT_TARGETS", "DETAIL_LIMIT", "StepView", "TurnView", "account_badge", "account_card",
-    "account_card_html", "account_menu", "account_problem_card", "artifacts_strip_html", "classify_file_link",
-    "clip_text", "format_credits", "header_text", "heartbeat_text", "make_turn_meta", "md_to_html", "outcome_badge",
-    "outcome_color", "parse_anchor", "parse_artifact_anchor", "plan_strip_html", "restore_card_html",
-    "restore_thumbs", "split_build_summary", "step_row_html", "summary_block_html", "summary_card_html",
-    "terms_pending", "thumb_url", "unique_call_id",
+    "account_card_html", "account_menu", "account_problem_card", "answer_html", "answer_sections",
+    "artifacts_strip_html", "chips_row_html", "classify_file_link", "clip_text", "format_credits", "group_images",
+    "header_text", "heartbeat_text", "images_html", "inline_image_target", "make_turn_meta", "md_to_html",
+    "message_role", "outcome_badge", "outcome_color", "parse_anchor", "parse_artifact_anchor", "plan_strip_html",
+    "question_html", "question_locked", "restore_card_html", "restore_thumbs", "split_build_summary",
+    "step_chips", "step_row_html", "summary_block_html", "summary_card_html", "terms_pending", "thumb_url",
+    "unique_call_id", "parse_clarification",
 ]
 
 DETAIL_LIMIT = 12000   # characters of a tool result / script shown when a step row is expanded
@@ -151,6 +159,10 @@ _RULE = re.compile(r"^\s*([-*_])(?:\s*\1){2,}\s*$")
 # Bounded label / target: an unbounded ``[^\]]+`` rescans to the end of the text for every ``[`` (quadratic on a long
 # run of unclosed brackets, which froze the GUI thread for seconds).
 _LINK = re.compile(r"\[([^\]\n]{1,200})\]\(((?:https?|file|oscar)://[^)\s]{1,2000})\)")
+# An inline image reference ``![caption](target)``: the caption is bounded like the link label; the target is
+# a URL, an absolute Windows / POSIX path or an ``es-img://`` resource name (see ``inline_image_target``).
+_IMAGE = re.compile(r"!\[([^\]\n]{0,200})\]\(([^)\s]{1,2000})\)")
+_IMAGE_ITEM = _IMAGE
 _TABLE_ROW = re.compile(r"^\s*\|(.+)\|\s*$")
 _TABLE_SEP = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
 _ENTITY_STOP = r"(?!&(?:lt|gt|quot|#x27);)"   # md_to_html escapes first: `<>"'` arrive as entities
@@ -234,8 +246,24 @@ def _inline(text: str) -> str:
         target, tail = _split_trailing(match.group(1))
         return keep(_anchor(_file_href(target), target)) + tail
 
+    def image(match: "re.Match[str]") -> str:
+        # ``![caption](target)``: a LOCAL image renders inline (a thumbnail-size preview that opens
+        # through the anchor when clicked); anything else stays the plain link it always was.
+        caption, target = match.group(1), html.unescape(match.group(2))
+        src, href = inline_image_target(target)
+        label = caption or target
+        if src:
+            title = f" title='{_esc(caption)}'" if caption else ""
+            return keep(f"<a href='{_esc(href)}'><img src='{_esc(src)}' width='320'{title}></a>")
+        if re.match(r"(?i)^[a-z][a-z0-9+.-]*://", target):
+            return keep(_anchor(target, _esc(label)))
+        if re.match(r"[A-Za-z]:[\\/]", target) or target.startswith("/"):
+            return keep(_anchor(_file_href(target), _esc(label)))
+        return _esc("!" + label)   # not a usable reference: keep it visible as plain text
+
     text = _TRIPLE_INLINE.sub(lambda m: keep(f"<code style='{_CODE_STYLE}'>{m.group(1)}</code>"), text)
     text = _INLINE_CODE.sub(lambda m: keep(f"<code style='{_CODE_STYLE}'>{m.group(1)}</code>"), text)
+    text = _IMAGE.sub(image, text)
     text = _LINK.sub(lambda m: keep(_anchor(m.group(2), m.group(1))), text)
     text = _BARE_URL.sub(url, text)
     text = _WIN_PATH.sub(path, text)
@@ -337,7 +365,11 @@ def md_to_html(text: str) -> str:
         elif _RULE.match(line):
             out.append("<hr>")
         elif line.strip():
-            out.append(f"<p style='margin:2px 0;'>{_inline(line)}</p>")
+            figures = _image_line_items(line)
+            if figures:   # the whole line is image references: one captioned row, not a sentence
+                out.append(images_html(figures))
+            else:
+                out.append(f"<p style='margin:2px 0;'>{_inline(line)}</p>")
         i += 1
     close_list()
     return "".join(out)
@@ -402,6 +434,102 @@ def thumb_url(call_id: str) -> str:
     """The ``QTextDocument`` resource name of a step thumbnail (the panel registers the decoded image
     under exactly this URL after each ``setHtml``)."""
     return "es-img://step/" + quote(_text(call_id), safe="")
+
+
+# ---------------------------------------------------------------------------
+# inline images (chat redesign): previews in a message, never a flood of cards
+
+_IMG_EXT = frozenset((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"))
+
+
+def inline_image_target(target: str) -> tuple[str, str]:
+    """``(src, href)`` when ``target`` may become an INLINE preview image, else ``("", "")``.
+
+    Allowed sources: a ``file://`` / ``es-img://`` URL or an absolute Windows / POSIX path whose
+    extension is a plain image format (``inline_image_target("C:/p/view.png")`` ->
+    ``("file:///C:/p/view.png", "file:///C:/p/view.png")``). Remote ``http(s)`` URLs are NEVER loaded
+    inline (the chat must not fetch anything): they stay ordinary links. ``src`` is what the document
+    loads, ``href`` the anchor that opens the file through the panel's link handling."""
+    target = _text(target).strip()
+    if not target:
+        return "", ""
+    stem = target.split("?", 1)[0].split("#", 1)[0].replace("\\", "/")
+    name = stem.rstrip("/").rsplit("/", 1)[-1].lower()
+    dot = name.rfind(".")
+    if dot <= 0 or name[dot:] not in _IMG_EXT:
+        return "", ""
+    if re.match(r"(?i)^(?:file|es-img)://", target):
+        return target, target
+    if re.match(r"(?i)^https?://", target):
+        return "", target
+    if re.match(r"[A-Za-z]:[\\/]", target):
+        # a drive path with forward slashes needs the same 3-slash file URL the backslash form gets
+        url = _file_href(target.replace("/", "\\"))
+        return url, url
+    if target.startswith("/"):
+        url = _file_href(target)
+        return url, url
+    return "", ""
+
+
+def _image_line_items(line: str) -> "list[dict]":
+    """``[{"src", "href", "caption"}, ...]`` when the WHOLE line is inline image references that all
+    render (``![front](a.png) ![back](b.png)`` becomes one row); ``[]`` for any other line, so a
+    sentence that merely contains an image is left to the ordinary paragraph path."""
+    stripped = _text(line).strip()
+    matches = list(_IMAGE_ITEM.finditer(stripped)) if "!" in stripped else []
+    if not matches or _IMAGE_ITEM.sub("", stripped).strip():
+        return []
+    items = []
+    for match in matches:
+        caption, target = match.group(1), html.unescape(match.group(2))
+        src, href = inline_image_target(target)
+        if src:
+            items.append({"src": src, "href": href, "caption": caption})
+    return items if len(items) == len(matches) else []
+
+
+def group_images(items: Any, per_row: int = 3) -> "list[list[dict]]":
+    """Rows of image items (``{"src", "href", "caption"}``): ONE image full-width, two share a row,
+    four make two pairs, five and more pack ``per_row`` to a row. Anything without a ``src`` is
+    dropped; never raises on malformed input."""
+    flat: list[dict] = []
+    for item in items if isinstance(items, (list, tuple)) else []:
+        if not isinstance(item, dict):
+            continue
+        src = _text(item.get("src")).strip()
+        if src:
+            flat.append({"src": src, "href": _text(item.get("href")).strip() or src,
+                         "caption": _text(item.get("caption")).strip()})
+    count = len(flat)
+    if not count:
+        return []
+    size = 1 if count == 1 else (2 if count in (2, 4) else max(1, _int(per_row, 3)))
+    return [flat[i:i + size] for i in range(0, count, size)]
+
+
+def images_html(items: Any, *, muted: str = "#888888") -> str:
+    """Inline previews of one message: a borderless row per ``group_images`` group, each image
+    width-constrained (320 / 210 / 150 px by row size, aspect preserved — no height is ever set),
+    wrapped in an anchor that opens it through the panel's existing link handling, with the caption
+    directly under its image. ``""`` when nothing renders; captions are escaped."""
+    rows = group_images(items)
+    if not rows:
+        return ""
+    out: list[str] = []
+    for row in rows:
+        width = {1: "320", 2: "210"}.get(len(row), "150")
+        cells = []
+        for item in row:
+            caption = item["caption"]
+            cell = (f"<a href='{_esc(item['href'])}'><img src='{_esc(item['src'])}' "
+                    f"width='{width}'></a>")
+            if caption:
+                cell += f"<div style='font-size:small;color:{_css(muted)};'>{_esc(caption)}</div>"
+            cells.append(f"<td style='padding:2px 6px 2px 0;vertical-align:top;'>{cell}</td>")
+        out.append("<table cellpadding='0' cellspacing='0' style='border-collapse:collapse;"
+                   "margin:4px 0 2px 4px;'><tr>" + "".join(cells) + "</tr></table>")
+    return "".join(out)
 
 
 # ---------------------------------------------------------------------------
@@ -505,6 +633,363 @@ def summary_block_html(markdown: str, actions: "list[tuple[str, str]] | None" = 
         row = (f"<div style='margin:4px 0 2px 4px;'>{' &nbsp;·&nbsp; '.join(links)} "
                f"<span style='color:{_css(muted)};font-size:small;'>keeps going from the plan</span></div>")
     return card + row
+
+
+# The UI-redesign tokens this module's two new renderers need. panel_render is PURE (no oscar
+# imports — the module contract test pins it), so the approved values are inlined here with
+# panel_theme.TOKENS as the single source of truth for the widget side.
+_Q_TOKENS = {"bg_card": "#2E2E32", "bg_recessed": "#1E1E21", "border": "#3A3A3F",
+             "accent": "#3B82F6", "success": "#22C55E", "danger": "#e06c5a",
+             "warn": "#ffb547", "text": "#F4F4F5", "text_2": "#A1A1AA", "text_3": "#71717A"}
+
+
+def _q_card(body: str, *, accent: str = "") -> str:
+    t = _Q_TOKENS
+    return (f"<div style='background:{t['bg_card']};border:1px solid {t['border']};"
+            "border-radius:6px;padding:6px 10px;margin:4px 0;"
+            + (f"border-left:2px solid {accent};" if accent else "")
+            + f">{body}</div>")
+
+
+def question_card_html(block) -> str:
+    """The in-chat question/approval card (``Block.QUESTION``, UI redesign).
+
+    ``block.text`` is ``title\\ninformative`` (plain text — model-written words are data, never
+    markup); ``block.actions`` are the ``(oscar://answer/<id>/<key>, label)`` anchors of the
+    offered choices; ``block.detail`` is the state; ``block.reason`` carries the optional answer
+    reason (or the deadline seconds for the timeout state). Nothing here answers anything — the
+    anchors route through the panel's anchor dispatcher like every other chat action.
+    """
+    t = _Q_TOKENS
+    title, _, body = _text(block.text).partition("\n")
+    title_html = f"<b>{_esc(title or 'Oscar needs your decision')}</b>"
+    body_html = f"<div style='color:{t['text_2']};margin-top:2px;'>{_esc(body)}</div>" if body else ""
+    state = _text(block.detail) or "pending"
+    clarification = any(str(target).startswith("oscar://clarify/") for target, _label in block.actions)
+
+    if state == "pending" or (state == "clarification_pending" and clarification):
+        buttons = " ".join(
+            f"<a href='{_esc(target)}' style='display:inline-block;"
+            f"background:{t['accent'] if i == 0 else t['bg_recessed']};color:{'white' if i == 0 else t['text']};"
+            f"border:1px solid {t['border']};border-radius:4px;padding:3px 12px;margin:6px 6px 0 0;"
+            f"text-decoration:none;font-weight:{600 if i == 0 else 400};'>{_esc(label)}</a>"
+            for i, (target, label) in enumerate(block.actions)
+        )
+        hint = (f"<div style='color:{t['text_3']};font-size:small;margin-top:4px;'>"
+                "Choose an option, or type your own answer below.</div>" if clarification else "")
+        return _q_card(f"{title_html}{body_html}{buttons}{hint}",
+                       accent=t["accent"] if clarification else t["warn"])
+    if state == "answered":
+        answer = _text(block.reason).strip()
+        line = f"<span style='color:{t['success']};'>✓ Answered</span>"
+        if answer:
+            line += f" — “{_esc(answer)}”"
+        return _q_card(f"{title_html}<div style='margin-top:2px;'>{line}</div>", accent=t["border"])
+    if state == "superseded":
+        return _q_card(f"{title_html}<div style='color:{t['text_3']};margin-top:2px;'>"
+                       "Replaced by a new request.</div>", accent=t["border"])
+    decided = {
+        "approved": ("✓", t["success"], "You approved"),
+        "rejected": ("✕", t["danger"], "You rejected"),
+        "timeout": ("⏱", t["text_3"], ""),
+        "cancelled": ("·", t["text_3"], ""),
+    }.get(state)
+    if decided is None:
+        return _q_card(title_html, accent=t["border"])
+    glyph, color, verb = decided
+    if state == "timeout":
+        seconds = _text(block.reason).strip() or "120"
+        line = f"<span style='color:{color};'>{glyph} No answer — denied after {seconds} s</span>"
+    elif state == "cancelled":
+        line = f"<span style='color:{color};'>{glyph} Closed — the turn was stopped</span>"
+    else:
+        kept = next((lbl for _tgt, lbl in block.actions if lbl), "")
+        line = (f"<span style='color:{color};'>{glyph} {verb} “{kept or 'the request'}”</span>"
+                + (f" — “{_esc(block.reason)}”" if _text(block.reason) else ""))
+    return _q_card(f"{title_html}<div style='margin-top:2px;'>{line}</div>", accent=t["border"])
+
+
+def parse_clarification(text: str) -> dict | None:
+    """Extract a safe clarification card from a needs-input reply.
+
+    The agent contract is one question followed by two to four plain ``- option`` lines. Anything
+    outside that shape stays ordinary assistant text instead of becoming clickable actions.
+    """
+    lines = [str(line).strip() for line in str(text or "").splitlines() if str(line).strip()]
+    if len(lines) < 3:
+        return None
+    question_index = next((i for i, line in enumerate(lines) if line.endswith("?")), None)
+    if question_index is None:
+        return None
+    question = lines[question_index]
+    options = []
+    for line in lines[question_index + 1:]:
+        match = re.match(r"^(?:[-*]|\d+[.)])\s+(.+?)\s*$", line)
+        if match:
+            option = re.sub(r"[*_`]+", "", match.group(1)).strip()
+            if option and option not in options:
+                options.append(option)
+        elif options:
+            break
+    if not 2 <= len(options) <= 4:
+        return None
+    context = " ".join(lines[:question_index]).strip()
+    return {"question": question, "context": context, "options": options}
+
+
+def telemetry_footer(steps, *, changed: int = 0, recomputed: int = 0, failed: bool = False,
+                     muted: str = "#888888") -> str:
+    """One compact telemetry line for a finished turn card (UI redesign): what ran, what it changed,
+    how long. Real data only — counts from the ``Step`` records the transcript already holds; an
+    empty footer for a turn that did nothing."""
+    done = [s for s in (steps or []) if getattr(s, "dur", 0) is not None and not s.is_thought]
+    if not done and not changed and not recomputed:
+        return ""
+    total = sum(float(getattr(s, "dur", 0.0) or 0.0) for s in done)
+    parts = [f"{len(done)} op{'s' if len(done) != 1 else ''}"]
+    if changed:
+        parts.append(f"{changed} changed")
+    if recomputed:
+        parts.append(f"recomputed {recomputed}")
+    glyph = "✗" if failed else "✓"
+    color = "#e06c5a" if failed else "#22C55E"
+    return (f"<div style='color:{_css(muted)};font-size:small;margin-top:2px;'>"
+            f"<span style='color:{color};'>{glyph}</span> "
+            f"{_esc(' · '.join(parts))} · {total:.1f}s</div>")
+
+
+# ---------------------------------------------------------------------------
+# the chat redesign (2026-11-16): roles, concise answers, step chips, questions
+#
+# Pure presentation logic for the conversational transcript. The BLOCK kinds are the strings
+# ``panel_blocks.Block`` defines (this module imports nothing of Oscar's), so the classification
+# helpers work on plain strings and dicts.
+
+
+def message_role(kind: str) -> str:
+    """``"user"`` / ``"oscar"`` / ``"system"`` / ``"card"`` of a Block kind: whose voice a transcript
+    entry is. ``user`` and ``oscar`` are the conversation proper (messages); ``system`` lines are
+    notices and errors (muted, one line each); ``card`` entries are the structured widgets (question,
+    account, rating, restore, summary). ``""`` for anything unknown — the caller keeps whatever
+    rendering it had."""
+    return {
+        "user": "user",
+        "assistant": "oscar",
+        "tool": "system",
+        "error": "system",
+        "summary": "card",
+        "restore": "card",
+        "account": "card",
+        "rating": "card",
+        "question": "card",
+    }.get(_text(kind).strip().lower(), "")
+
+
+# Labels a final answer's sections may carry (matched case-insensitively on a ``### Label`` /
+# ``**Label**`` / ``**Label:**`` line). Everything else is prose and flows as plain paragraphs.
+_ANSWER_LABELS = frozenset((
+    "understanding", "context", "plan", "approach", "done", "what i did", "what was done", "results",
+    "result", "warnings", "warning", "notes", "note", "next steps", "next", "summary", "files",
+    "open items", "issues", "todo", "what changed",
+))
+
+
+def _answer_label(line: str) -> str:
+    match = re.match(r"^#{1,4}\s+([^\n]{2,40})\s*$", line) or re.match(r"^\*\*([^*\n]{2,40}?)\*\*:?\s*$", line)
+    if match is None:
+        return ""
+    label = match.group(1).strip().rstrip(":").strip().lower()
+    return label if label in _ANSWER_LABELS else ""
+
+
+def _answer_blocks(text: str) -> list[str]:
+    """Blank-line-separated blocks of ``text``; a fenced code block is never split (a blank line
+    inside ``` ``` ``` belongs to the code)."""
+    blocks: list[str] = []
+    current: list[str] = []
+    fence = False
+    for line in _text(text).replace("\r\n", "\n").split("\n"):
+        if _FENCE.match(line) and line.count("```") == 1:
+            fence = not fence
+        if not fence and not line.strip() and current:
+            blocks.append("\n".join(current))
+            current = []
+            continue
+        current.append(line)
+    if current:
+        blocks.append("\n".join(current))
+    return blocks
+
+
+def answer_sections(markdown: str) -> "list[dict]":
+    """The blocks of a final answer as ``[{"label", "text"}]``: a block whose first line is a
+    recognised label line (``### Results``, ``**Next steps:**``) carries that label, every other
+    block is prose with an empty label (the lead paragraphs — what Oscar understood and did). No
+    content is dropped or reordered; ``[]`` for blank input."""
+    sections: list[dict] = []
+    for block in _answer_blocks(markdown):
+        if not block.strip():
+            continue
+        first = block.split("\n", 1)[0]
+        sections.append({"label": _answer_label(first), "text": block})
+    return sections
+
+
+def answer_html(markdown: str, *, muted: str = "#888888") -> str:
+    """A final answer rendered CONVERSATIONALLY: the lead paragraphs as plain prose, then each
+    labelled section under a small muted caption (understanding / done / results / warnings / next
+    steps — whatever the answer actually contains; nothing is invented or hidden). An answer with
+    no recognised labels renders exactly as ``md_to_html`` always drew it."""
+    sections = answer_sections(markdown)
+    if not any(section["label"] for section in sections):
+        return md_to_html(markdown)
+    out: list[str] = []
+    for section in sections:
+        if section["label"]:
+            out.append(f"<div style='color:{_css(muted)};font-size:small;margin:6px 0 1px 0;'>"
+                       f"{_esc(section['label'][0].upper() + section['label'][1:])}</div>")
+        out.append(md_to_html(section["text"]))
+    return "".join(out)
+
+
+# Step chips: the COLLAPSED view of a turn's tool calls. ``steps`` are the transcript's step records
+# (``StepView`` from this module or ``panel_blocks.Step`` — duck-typed: ``name`` / ``title`` /
+# ``summary``, ``ok`` (``None`` while a legacy step runs), ``skipped``, ``running``, ``dur_s`` /
+# ``dur``, ``is_thought``); thought rounds are not tool calls and never chip.
+
+def step_chips(steps: Any, *, limit: int = 6) -> "list[dict]":
+    """``[{"tone": "ok"|"error"|"live"|"mute", "text": str}]`` — the per-turn operation chips.
+
+    Successful calls of one tool collapse into a single chip with a count (``pad ×3``); failed calls
+    stay individual (``error`` tone, the user must see them); skipped calls group in the ``mute``
+    tone; a still-running call is one ``live`` chip. Order is first appearance; at most ``limit``
+    chips, then ``+N more``. Never raises."""
+    ordered: "list[dict]" = []
+    counts: "dict[int, int]" = {}
+
+    def slot(key: tuple, tone: str, text: str) -> dict:
+        chip = {"tone": tone, "text": text, "key": key}
+        if key not in counts:
+            ordered.append(chip)
+            counts[key] = 1
+        else:
+            counts[key] += 1
+        return chip
+
+    for step in steps if isinstance(steps, (list, tuple)) else []:
+        if step is None:
+            continue
+        if _flag(getattr(step, "is_thought", False)):
+            continue
+        ok = getattr(step, "ok", True)
+        running = _flag(getattr(step, "running", False)) or ok is None
+        skipped = _flag(getattr(step, "skipped", False))
+        name = _text(getattr(step, "name", "") or "op")
+        label = _text(getattr(step, "title", "") or getattr(step, "summary", "") or name)
+        if running:
+            slot(("live", label), "live", f"{label} …")
+        elif skipped:
+            slot(("skip", label), "mute", f"↷ {label}")
+        elif ok is False:
+            slot(("fail", label, len(ordered)), "error", label)
+        else:
+            slot(("ok", label), "ok", label)
+    chips: "list[dict]" = []
+    for chip in ordered:
+        count = counts.get(chip["key"], 1)
+        text = chip["text"]
+        if chip["tone"] == "ok" and count > 1:
+            text = f"{text} ×{count}"
+        elif chip["tone"] == "mute" and count > 1:
+            text = f"{text} ×{count}"
+        chips.append({"tone": chip["tone"], "text": text})
+    limit = _int(limit, 6)
+    if limit > 0 and len(chips) > limit:
+        extra = len(chips) - limit
+        chips = chips[:limit] + [{"tone": "mute", "text": f"+{extra} more"}]
+    return chips
+
+
+def chips_row_html(chips: Any, *, muted: str = "#888888") -> str:
+    """One subtle row of ``step_chips`` chips: small rounded spans on the recessed surface, failures
+    in the danger colour, a running chip in the accent. ``""`` for nothing to show."""
+    t = _Q_TOKENS
+    tones = {"ok": t["text_2"], "error": t["danger"], "live": t["accent"], "mute": t["text_3"],
+             "warn": t["warn"]}
+    spans: list[str] = []
+    for chip in chips if isinstance(chips, (list, tuple)) else []:
+        if not isinstance(chip, dict) or not _text(chip.get("text")):
+            continue
+        color = tones.get(_text(chip.get("tone")), t["text_3"])
+        spans.append(f"<span style='background:{t['bg_recessed']};border:1px solid {t['border']};"
+                     f"border-radius:4px;padding:1px 6px;margin:1px 4px 1px 0;color:{color};"
+                     f"font-size:small;'>{_esc(chip.get('text'))}</span>")
+    if not spans:
+        return ""
+    return f"<div style='margin:2px 0 2px 4px;'>{''.join(spans)}</div>"
+
+
+def question_locked(payload: Any) -> bool:
+    """True when a question payload already carries its answer (the ``answer`` the bar recorded, or a
+    terminal ``state``), so the transcript embed and the widget render the LOCKED view."""
+    data = payload if isinstance(payload, dict) else (_load(payload) or {})
+    if not isinstance(data, dict):
+        return False
+    if _text(data.get("answer")).strip():
+        return True
+    return _text(data.get("state")) in ("answered", "approved", "rejected", "timeout", "cancelled")
+
+
+def question_html(payload: Any) -> str:
+    """The transcript embed of a question (chat redesign): the question as its own line, the options
+    as chips with the recorded choice ticked (custom answers get their own line), approve payloads
+    get the Accept / Reject disposition. ``payload`` is the ``QuestionsBar`` payload
+    (``{"text", "options", "allow_custom", "approve"}``) plus the recorded ``answer`` (and optionally
+    ``state``). Every text is escaped; a malformed payload never raises. Nothing here answers
+    anything — the anchors route through the panel's link handling like every other chat action."""
+    t = _Q_TOKENS
+    data = payload if isinstance(payload, dict) else (_load(payload) or {})
+    if not isinstance(data, dict):
+        data = {}
+    text = _text(data.get("text")).strip()
+    title, _, body = text.partition("\n")
+    raw_options = data.get("options") if isinstance(data.get("options"), list) else []
+    options = [_text(option).strip() for option in raw_options][:6]
+    options = [option for option in options if option]
+    if _flag(data.get("approve")) and not options:
+        options = ["Accept", "Reject"]
+    allow_custom = _flag(data.get("allow_custom"))
+    answer = _text(data.get("answer")).strip()
+    locked = question_locked(data)
+
+    out = [f"<div style='font-weight:600;margin:2px 0;'>{_esc(title or 'Oscar asks')}</div>"]
+    if body.strip():
+        out.append(f"<div style='color:{t['text_2']};margin-top:1px;'>{_esc(body.strip())}</div>")
+    if options:
+        spans = []
+        for option in options:
+            chosen = locked and option == answer
+            style = (f"background:{t['bg_recessed']};border:1px solid "
+                     f"{t['success'] if chosen else t['border']};border-radius:4px;"
+                     f"padding:1px 8px;margin:4px 6px 0 0;color:{t['text'] if chosen else t['text_2']};")
+            spans.append(f"<span style='{style}'>{'✓ ' if chosen else ''}{_esc(option)}</span>")
+        out.append(f"<div style='margin-top:2px;'>{''.join(spans)}</div>")
+    if locked:
+        line = ""
+        if answer and answer not in options:
+            line = f"<span style='color:{t['success']};'>✓ Your answer</span> — “{_esc(answer)}”"
+        elif answer == "Accept" or answer.lower() == "accepted":
+            line = f"<span style='color:{t['success']};'>✓ You accepted</span>"
+        elif answer == "Reject" or answer.lower() == "rejected":
+            line = f"<span style='color:{t['danger']};'>✕ You rejected</span>"
+        elif not answer:
+            line = f"<span style='color:{t['text_3']};'>· Not answered</span>"
+        if line:
+            out.append(f"<div style='margin-top:4px;'>{line}</div>")
+    elif allow_custom:
+        out.append(f"<div style='color:{t['text_3']};font-size:small;margin-top:4px;'>"
+                   "…or type your own answer in the composer.</div>")
+    return _q_card("".join(out), accent=t["accent"] if not locked else t["border"])
 
 
 def unique_call_id(payload: Any, turn_seq: int) -> str:
@@ -1274,6 +1759,16 @@ def restore_card_html(title: str, messages: int, meta: Any, *, notice: str = "",
         hidden = len(steps) - 8 + _int(turn.get("more"))
         if hidden > 0:
             out.append(f"<div style='margin-left:14px;color:{muted};'>… +{hidden} more steps</div>")
+        for ask in [a for a in turn.get("asks") or [] if isinstance(a, dict)][:6]:
+            payload = ask.get("payload") if isinstance(ask.get("payload"), dict) else {}
+            titles = [q.get("title") for q in payload.get("wizard") or [] if isinstance(q, dict)]
+            title = _text(titles[0] if titles else payload.get("title")) or "(decision)"
+            answers = " | ".join(_text(a.get("answer")) for a in ask.get("answers") or []
+                                 if isinstance(a, dict) and _text(a.get("answer")))
+            state = _text(ask.get("state")) or "closed"
+            icon = "◆" if state == "answered" else "◇"
+            out.append(f"<div style='margin-left:14px;color:{muted};'>{icon} decision: {_esc(title)} — "
+                       f"{_esc(answers or state)}</div>")
         out.append("</div>")
     ids = [tid for tid, _path in restore_thumbs(meta, key) if thumbs is None or tid in thumbs]
     if ids:

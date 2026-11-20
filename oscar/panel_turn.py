@@ -39,9 +39,11 @@ import time
 
 from PySide import QtCore, QtWidgets
 
+from . import panel_theme as _theme
 from .panel_blocks import Block, Step, ThumbCache, _accent, _font_size, _muted
 from .panel_render import (TurnView, account_problem_card, artifacts_strip_html, header_text, make_turn_meta,
-                           outcome_badge, plan_strip_html, split_build_summary, trim_turn_metas, unique_call_id)
+                           outcome_badge, parse_clarification, plan_strip_html, split_build_summary,
+                           trim_turn_metas, unique_call_id)
 
 # Status texts that only mean "busy": the first streamed text supersedes them. Anything else (waiting
 # for an approval, pausing, stopping, a tool name) stays until the next status change.
@@ -97,6 +99,21 @@ class TurnMixin:
         self.artifacts_strip.linkActivated.connect(self._on_anchor_text)
         self.artifacts_strip.hide()
 
+        self.activity_dot = QtWidgets.QLabel("●")
+        self.activity_dot.setObjectName("oscarActivityDot")
+        self.activity_dot.setStyleSheet("color:#3B82F6;font-size:10px;")
+        self.activity_dot.setFixedWidth(12)
+        self.activity_effect = QtWidgets.QGraphicsOpacityEffect(self.activity_dot)
+        self.activity_effect.setOpacity(0.35)
+        self.activity_dot.setGraphicsEffect(self.activity_effect)
+        self.activity_pulse = QtCore.QPropertyAnimation(self.activity_effect, b"opacity", self)
+        self.activity_pulse.setDuration(1150)
+        self.activity_pulse.setStartValue(0.35)
+        self.activity_pulse.setEndValue(1.0)
+        self.activity_pulse.setLoopCount(-1)
+        self.activity_pulse.setEasingCurve(QtCore.QEasingCurve.InOutSine)
+        self.activity_dot.hide()
+
         self.heartbeat_label = QtWidgets.QLabel("")
         self.heartbeat_label.setObjectName("oscarHeartbeat")
         self.heartbeat_label.setTextFormat(QtCore.Qt.PlainText)   # the tool name comes from the model: never markup
@@ -109,11 +126,20 @@ class TurnMixin:
             "QPushButton { padding:1px 8px; border:1px solid rgba(128,128,128,0.4); border-radius:8px;"
             " font-size:small; }")
         self.act_now_btn.clicked.connect(self._act_now)
+        # Pause/resume lives here (shell redesign): the composer's trailing slot is the
+        # Send/Stop toggle, so the flow's pause control moved into the heartbeat row.
+        self.pause_btn = QtWidgets.QToolButton()
+        self.pause_btn.setObjectName("oscarPauseButton")
+        self.pause_btn.setText("⏸")
+        self.pause_btn.setToolTip("Pause after the current step (Esc cancels)")
+        self.pause_btn.clicked.connect(self._on_pause_button)
         self.heartbeat_row = QtWidgets.QWidget()
         row = QtWidgets.QHBoxLayout(self.heartbeat_row)
         row.setContentsMargins(2, 0, 2, 0)
         row.setSpacing(6)
+        row.addWidget(self.activity_dot)
         row.addWidget(self.heartbeat_label, 1)
+        row.addWidget(self.pause_btn)
         row.addWidget(self.act_now_btn)
         self.heartbeat_row.hide()
 
@@ -137,7 +163,8 @@ class TurnMixin:
 
     def _refresh_plan_strip(self) -> None:
         """Redraw the pinned plan strip from the live ledger (or the chat's stored one); hidden without steps.
-        The markup is compared first: a progress tick that changes nothing visible costs one string compare."""
+        The strip lives on the Chat page — the tab shell shows and hides it with that page. The
+        markup is compared first: a progress tick that changes nothing visible costs one string compare."""
         markup = plan_strip_html(self._plan_source(), accent=_accent(), muted=_muted(),
                                  collapsed=self._plan_collapsed)
         if markup == self._plan_markup:
@@ -149,8 +176,11 @@ class TurnMixin:
             return
         bar = self.plan_strip.verticalScrollBar()
         scrolled = bar.value()
+        appearing = self.plan_strip.isHidden()
         self.plan_strip.setHtml(f"<html><body style='font-size:{_font_size()}pt;'>{markup}</body></html>")
-        self.plan_strip.show()
+        self.plan_strip.setVisible(True)
+        if appearing:   # a subtle 120–180 ms appear, never blocking the GUI thread
+            _theme.fade_in(self.plan_strip)
         self._fit_plan_strip()
         bar.setValue(min(scrolled, bar.maximum()))   # a plan the user scrolled stays where it was
 
@@ -199,18 +229,48 @@ class TurnMixin:
         self._update_heartbeat()
 
     def _update_heartbeat(self) -> None:
-        """Heartbeat row: shown while a turn runs. The text comes from the latest ``progress`` payload and is
-        re-asked every second (the elapsed counters keep moving between payloads)."""
+        """Show a short, user-facing description derived from the worker's current progress state."""
         busy = self.worker is not None
         self.heartbeat_row.setVisible(busy)
+        self.activity_dot.setVisible(busy)
         if not busy:
             return
         view = self._turn_view
-        text = view.heartbeat() if view is not None else ""
-        self.heartbeat_label.setText(text or "starting…")
         activity = ""
+        phase = ""
         if view is not None and isinstance(view.progress, dict):
             activity = str(view.progress.get("activity") or "")
+            phase = str(view.progress.get("phase") or "").upper()
+        sticky = str(getattr(self, "_status", "") or "").lower()
+        if activity == "waiting_approval" or "approval" in sticky:
+            text = "Oscar is waiting for your approval…"
+        elif activity == "paused" or "paus" in sticky:
+            text = "Oscar is paused."
+        elif "stopp" in sticky:
+            text = "Oscar is stopping…"
+        elif activity == "retrying":
+            text = "Oscar is retrying the current step…"
+        elif activity == "validating" or phase == "VERIFY":
+            text = "Oscar is validating the geometry…"
+        elif activity == "running_tool":
+            text = ("Oscar is building the model…" if phase == "BUILD" else
+                    "Oscar is checking the source model…" if phase == "SOURCE" else
+                    "Oscar is working on the current step…")
+        elif phase == "PLAN":
+            text = "Oscar is planning the construction…"
+        elif phase == "SOURCE":
+            text = "Oscar is analysing the source geometry…"
+        elif phase == "DELIVER":
+            text = "Oscar is preparing the result…"
+        elif activity in _PROVIDER_ACTIVITIES:
+            text = "Oscar is thinking…"
+        else:
+            text = "Oscar is working…"
+        self.heartbeat_label.setText(text)
+        paused = bool(getattr(self, "_paused", False))
+        self.pause_btn.setVisible(busy)
+        self.pause_btn.setText("▶" if paused else "⏸")
+        self.pause_btn.setToolTip("Resume" if paused else "Pause after the current step (Esc cancels)")
         self.act_now_btn.setEnabled(self._act_now_armed and activity in _PROVIDER_ACTIVITIES
                                     and callable(getattr(self.worker, "act_now", None)))
         self.act_now_btn.setVisible(callable(getattr(self.worker, "act_now", None)))
@@ -255,40 +315,21 @@ class TurnMixin:
         header alone) and the thumbnails of a restore card. Those are protected from eviction, so the cache can
         always hold what is on screen: with more steps than the cache has room for, evicting a thumbnail that the
         next pass needs again made the retry loop re-render the whole log forever."""
-        loads, missing, pending = 0, False, False
-        wanted: list = []   # (step, view) of the rows on screen that carry a snapshot
+        missing = False
         keep: set[str] = set()
         for block in self.blocks:
             if block.kind == Block.RESTORE and block.thumbs:
                 keep |= block.thumbs
-            elif block.kind == Block.TOOL and block.expanded:
-                for step in block.steps:
-                    view = step.view
-                    if view is not None and view.snapshot_path and step.call_id:
-                        wanted.append((step, view))
-                        keep.add(step.call_id)
         for block in self.blocks:
             if block.kind == Block.RESTORE and block.thumbs:
                 alive = {t for t in block.thumbs if self._thumbs.has(t)}
                 if alive != block.thumbs:   # the cache evicted some: the card must not point at vanished images
                     block.thumbs = alive
                     missing = True
-        for step, view in wanted:
-            if self._thumbs.has(step.call_id):
-                continue
-            if self._thumbs.failed(step.call_id):
-                self._mark_snapshot_missing(view)
-                missing = True
-                continue
-            if loads >= _MAX_THUMB_LOADS_PER_PASS:
-                pending = True
-                continue
-            loads += 1
-            if self._thumbs.load(step.call_id, self._abs_snapshot(view.snapshot_path), keep=keep) is None:
-                self._mark_snapshot_missing(view)
-                missing = True
+        # Process snapshots are loaded only when the user opens the detailed Log tab; decoding them
+        # on every completed geometry step stalls the GUI on workflows with many screenshots.
         self.log.register_thumbnails(self._thumbs)
-        if (missing or pending) and not self._thumb_retry:
+        if missing and not self._thumb_retry:
             self._thumb_retry = True
             QtCore.QTimer.singleShot(0, self._retry_render)
 
@@ -542,8 +583,6 @@ class TurnMixin:
         step.dur = view.dur_s
         step.detail = ""
         step.expanded = view.default_expanded   # a failed step opens with its full output
-        if view.snapshot_path and self._thumbs.load(view.call_id, self._abs_snapshot(view.snapshot_path)) is None:
-            self._mark_snapshot_missing(view)
         if view.ok and view.mutating and not view.skipped:
             self._turn_mutated = True
             self._turn_used_cad = True
@@ -729,7 +768,24 @@ class TurnMixin:
                 if given_back:
                     self._on_notice("Your message is back in the input: send it again when you are ready.")
         elif ok and answer:
-            if self._current is not None and not self._current.text.strip():
+            clarification = parse_clarification(answer) if outcome == "needs_input" else None
+            if clarification is not None:
+                # The blocked plan is persisted in this chat; turn the grounded question into
+                # inline choices. The composer remains the custom-answer path.
+                if self._current is not None and self._current in self.blocks:
+                    self.blocks.remove(self._current)
+                body = clarification["context"] or "Choose an option, or type your own answer below."
+                question = Block(Block.QUESTION, f"{clarification['question']}\n{body}")
+                question.key = str(question.bid)
+                question.detail = "clarification_pending"
+                question.actions = [(f"oscar://clarify/{question.key}/{i}", option)
+                                    for i, option in enumerate(clarification["options"])]
+                self.blocks.append(question)
+                # the quick answer surface under the transcript (the card above stays the record)
+                shower = getattr(self, "_show_question_bar", None)
+                if callable(shower):
+                    shower(f"{clarification['question']}\n{body}", clarification["options"])
+            elif self._current is not None and not self._current.text.strip():
                 self._current.text = answer
             elif self._current is None:
                 # turn ended without any streamed text (e.g. tool-only turn)
@@ -823,6 +879,9 @@ class TurnMixin:
             root = getattr(project, "root", "") or session.get("project_dir") or ""
             meta = make_turn_meta(self._turn_request, outcome, card.text if card is not None else "",
                                   view.steps, root=root)
+            asks = list(getattr(self, "_turn_asks", None) or [])
+            if asks:
+                meta["asks"] = asks
             session["blocks_meta"] = trim_turn_metas(list(session.get("blocks_meta") or []) + [meta])
         manifest = getattr(session.get("_project"), "manifest", None)
         note = str(manifest.get("storage_note") or "") if isinstance(manifest, dict) else ""
@@ -841,6 +900,11 @@ class TurnMixin:
         self._refresh_artifacts_strip()
         self._refresh_plan_strip()
         self._update_heartbeat()
+        # Shell redesign: the turn may have changed the document — refresh the visible side
+        # views (Parameters on its page, Logs on its own)
+        refresh = getattr(self, "_refresh_side_views", None)
+        if callable(refresh):
+            refresh()
 
     def _settle_queued(self, unsent: list[dict], ok: bool) -> None:
         """End of turn for the steered ("queued") bubbles: delivered ones become plain bubbles; the ones

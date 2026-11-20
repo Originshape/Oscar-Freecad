@@ -701,3 +701,99 @@ def _set_parameter(doc_name: str, name: str, value: Any, recompute: bool = True,
     if out.get("fit"):
         lines.append(out["fit"])
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# The panel's Parameters tab (UI redesign): the same write path the tools use,
+# without the tool pipeline (no step records, no model context). Additive public
+# helper — the tools above are unchanged.
+
+def apply_parameter_edits(doc_name: str, edits: "list[dict]") -> dict:
+    """Apply several parameter edits in ONE undo transaction (the panel's Apply button).
+
+    ``edits`` are ``{"name": str, "value": str | number}`` — numbers, numbers with units or
+    ``=`` formulas, exactly what ``set_parameter`` accepts. Validation, cell writes, the
+    recompute, the dependent-stage rebuild and the rollback follow ``set_parameter``'s
+    policy, applied to the whole batch: on the FIRST failure every edited cell is restored
+    and the transaction aborted, so the document never keeps a half-applied edit set.
+
+    Returns ``{"ok": bool, "text": str, "applied": [names]}``; ``text`` is chat-ready and
+    never claims success on failure. Runs on the GUI thread (the panel calls it directly;
+    ``base.gui_call`` inlines there).
+    """
+    actual = base.require_doc(doc_name, "apply_parameter_edits")
+    clean: "list[tuple[str, Any]]" = []
+    for edit in edits or []:
+        name = str((edit or {}).get("name") or "").strip()
+        value = (edit or {}).get("value")
+        if name and value is not None and not isinstance(value, bool) and \
+                (not isinstance(value, str) or value.strip()):
+            clean.append((name, value))
+    if not clean:
+        return {"ok": False, "text": "Nothing to apply.", "applied": []}
+
+    def task() -> dict:
+        from .kit import build
+
+        doc = base.open_doc(actual)
+        if doc is None:
+            return {"error": f"document '{actual}' is not open"}
+        sheet_name = _sheet_in(doc)
+        try:
+            table = _params.Params(doc, sheet_name)
+        except _params.ParamsError:
+            return {"error": f"document '{actual}' has no 'Params' sheet"}
+        rows = table.table()
+        old: dict[str, dict] = {}
+        staged: "list[tuple[str, Any]]" = []
+        for name, value in clean:
+            row = _row(rows, name)
+            if row is None:
+                return {"error": f"'{name}' is not a parameter in sheet '{sheet_name}'"}
+            if row["expr"] and not (isinstance(value, str) and value.strip().startswith("=")):
+                return {"error": f"'{name}' is derived ({row['expr']}) — only a new '=' formula may replace it"}
+            old[name] = {"value": row["value"], "unit": row["unit"], "source": row["source"],
+                         "note": row["note"], "contents": table.sheet.getContents(row["cell"]) or ""}
+            staged.append((name, value if sheet_name == _params.SHEET_NAME else _plain_value(value)))
+        names = [n for n, _v in staged]
+        invalid_before = _invalid_names(doc)
+        recomputed = 0
+        try:
+            with build.atomic(doc, "Oscar parameters apply"):
+                for name, value in staged:
+                    table.set(name, value, source="user_requirement", note=old[name]["note"])
+                recomputed = int(doc.recompute() or 0)
+                broke = sorted(_invalid_names(doc) - invalid_before)
+                if broke:
+                    raise _Refused(f"the edit leaves {', '.join(broke[:4])} invalid")
+        except (_Refused, _params.ParamsError) as exc:
+            return {"error": f"{_clean(exc) if isinstance(exc, _params.ParamsError) else exc}; "
+                             f"nothing was applied"}
+        results, skip_note = _rebuild_dependents(doc, None, names, "")
+        failed = [r for r in results if not r.ok]
+        if failed:
+            for name in names:   # the tool's policy: a failed rebuild restores the old value
+                table.set(name, old[name]["contents"], unit=old[name]["unit"],
+                          source=old[name]["source"] or "assumption", note=old[name]["note"])
+            doc.recompute()
+            _rebuild_dependents(doc, None, names, "")
+            return {"error": f"rebuilding '{failed[0].stage}' failed ({failed[0].message}); "
+                             f"all edits were set back"}
+        table = _params.Params(doc, sheet_name)
+        fresh_rows = table.table()
+        lines = []
+        for name, _value in staged:
+            new_row = _row(fresh_rows, name) or {}
+            lines.append(f"{name}: {_value_text(old[name]['value'], old[name]['unit'])} → "
+                         f"{_value_text(new_row.get('value'), new_row.get('unit'))}")
+        text = " · ".join(lines) + f" · Applied · Recomputed {recomputed}"
+        if [r.stage for r in results]:
+            text += f" · rebuilt {', '.join(r.stage for r in results)}"
+        if skip_note:
+            text += f" ({skip_note})"
+        return {"ok": True, "text": text, "applied": names, "error": ""}
+
+    out = base.gui_call("apply_parameter_edits", task)
+    if out.get("error"):
+        return {"ok": False, "text": str(out["error"]), "applied": []}
+    return {"ok": True, "text": str(out.get("text") or "Applied."), "applied": list(out.get("applied") or [])}
