@@ -211,7 +211,7 @@ class AgentWorker(ContextWiring, QtCore.QThread):
                  clock: Callable[[], float] | None = None,
                  on_round: Callable[[list[Message]], None] | None = None,
                  request_text: str | None = None, flow: bool | None = None, attachments: Sequence[str] = (),
-                 session_id: str = ""):
+                 session_id: str = "", origin: str = ""):
         """Build a worker for one turn over ``history`` (the panel owns the list).
 
         ``project`` / ``ledger`` / ``validator`` / ``on_round`` / ``request_text`` / ``flow`` carry the turn's
@@ -221,7 +221,8 @@ class AgentWorker(ContextWiring, QtCore.QThread):
         ``models.ModelCaps`` (``None``: resolved cache-only here and
         refreshed from the provider's metadata in ``run()``, else defaults); ``attachments`` are the PATHS of
         attached files (they reach only the intent classifier); ``session_id`` is the chat id the provider may name
-        in its requests (``request_context``; default: the bound Project's chat id). ``validator`` is
+        in its requests (``request_context``; default: the bound Project's chat id); ``origin`` is ``"workspace"``
+        for a turn from the OriginShape workspace (tools read it as ``ctx.state["origin"]``). ``validator`` is
         ``validator(doc, ctx)``:
         ``None`` = the real ``tools_verify.run_validation`` (no claim while that module is absent), a callable =
         that function (tests inject fakes), ``False`` = never validate. Never raises when ``provider`` is
@@ -238,6 +239,7 @@ class AgentWorker(ContextWiring, QtCore.QThread):
         self._request_text = request_text
         self._attachments = list(attachments or ())
         self._session_id = session_id if isinstance(session_id, str) else ""
+        self._origin = origin if origin in ("workspace", "freecad") else "freecad"
         self._account_problem: dict | None = None    # set when the turn failed for an account reason
         self.project = project
         # a private copy: the kill-switch resolution below must never change a config object the caller shares
@@ -575,7 +577,7 @@ class AgentWorker(ContextWiring, QtCore.QThread):
         self._plan_revision = -1
         self.init_wiring()
         self._note_prior_build()
-        self._state = {"lite": self._lite}
+        self._state = {"lite": self._lite, "origin": self._origin}
         self._turn_started = self._clock()
         self._act_now.clear()
         self._can_lower_effort, self._slow_host = self._watchdog_traits()

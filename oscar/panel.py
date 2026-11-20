@@ -1175,6 +1175,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
                 attachments=[att.path for att in attachments],
                 on_round=self._round_persister(session) if session is not None else None,
                 session_id=str(session.get("id") or "") if session is not None else "",
+                origin="workspace" if workspace is not None else "freecad",
                 **({"profile": profile} if workspace is not None else {}))
         except Exception as e:
             self._append(Block.ERROR, str(e))

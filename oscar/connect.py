@@ -176,14 +176,17 @@ class JobFile:
     size: int
     sha256: str
     page: int = 0    # a page image of the PDF before it (1-based); 0 for the user's own files
+    repaired_from: str = ""   # the original's name, for a mesh the browser repaired (Repair, then Use the repaired copy)
 
     @classmethod
     def parse(cls, data: Any) -> JobFile:
         size, sha256 = int(data["size"]), str(data["sha256"]).lower()
         if size < 0 or not re.fullmatch(r"[0-9a-f]{64}", sha256):
             raise ValueError("size or sha256")
+        repaired = data.get("repaired_from")
         return cls(id=str(data["id"]), name=str(data.get("name") or "attachment"), format=str(data.get("format") or ""),
-                   kind=str(data.get("kind") or ""), size=size, sha256=sha256, page=int(data.get("page") or 0))
+                   kind=str(data.get("kind") or ""), size=size, sha256=sha256, page=int(data.get("page") or 0),
+                   repaired_from=_clip(repaired, 200) if isinstance(repaired, str) else "")
 
 
 @dataclass(frozen=True)
