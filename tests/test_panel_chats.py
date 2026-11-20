@@ -1,4 +1,4 @@
-"""Renaming and searching chats in the panel (oscar.panel_chats, the ⋯ menu), and the pen's button (oscar.panel_markup):
+"""Renaming and searching chats in the panel (oscar.panel_chats, the ⋯ menu):
 a real ``OscarPanel`` on an offscreen QApplication, as in test_panel_logic (nothing is shown to the user)."""
 
 import os
@@ -15,7 +15,7 @@ isolation.isolate_process()
 _IMPORT_ERROR = ""
 try:
     from PySide import QtCore, QtWidgets
-    from oscar import chats, panel_chats, panel_markup
+    from oscar import chats, panel_chats
     from oscar.providers import Message
     from test_panel_logic import FakeWorker, PanelTestCase
 except Exception as exc:   # pragma: no cover - plain interpreter without FreeCAD / Qt
@@ -122,17 +122,23 @@ class SearchTest(_Case):
         self.assertIs(self.p._current_session(), self.bracket)
 
 
-class PenButtonTest(_Case):
-    def test_the_pen_opens_the_markup_unless_a_turn_runs(self):
-        with mock.patch.object(panel_markup, "start") as start:
-            self.p.worker = FakeWorker()
-            self.p.markup_btn.click()
-            start.assert_not_called()
-            self.p.worker = None
-            self.p.markup_btn.click()
-        start.assert_called_once()
-        self.assertIs(start.call_args.args[0], self.p)
-        self.assertEqual(os.path.basename(start.call_args.args[1]), "markup")
+class QuestionBarGrowthTest(_Case):
+    """A long interactive question must stay inside the panel's fixed strip: the panel's size
+    hints may not grow with the question (the dock takes its size from them when floating)."""
+
+    def test_a_long_question_does_not_grow_the_panel_size_hint(self):
+        long_text = ("Should Oscar fillet the bracket's load-bearing edges, and at what radius "
+                     "should the transition run to keep the part printable? ") * 40
+        self.p._show_question_bar(long_text, [f"Option {i}" for i in range(6)])
+        QtWidgets.QApplication.instance().processEvents()
+        bar = self.p.findChild(QtWidgets.QWidget, "oscarQuestionsBar")
+        self.assertIsNotNone(bar)
+        self.assertFalse(bar.isHidden())
+        self.assertLessEqual(self.p._chat_page.sizeHint().height(), 1000,
+                             "the chat page hint grew with the question text")
+        self.assertLessEqual(self.p.sizeHint().height(), 1000,
+                             "the panel hint grew with the question text")
+        self.assertFalse(self.p.input_frame.isHidden())   # the composer stays in the layout
 
 
 def QtGui_key(key):

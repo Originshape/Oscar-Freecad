@@ -23,8 +23,10 @@ from collections import OrderedDict
 import FreeCAD as App
 from PySide import QtCore, QtGui, QtWidgets
 
-from .panel_render import (DETAIL_LIMIT, StepView, account_card_html, clip_text, md_to_html, outcome_color,
-                           restore_card_html, step_row_html, summary_block_html, thumb_url)
+from .panel_render import (DETAIL_LIMIT, StepView, account_card_html, answer_html, cad_preview_html, clip_text, md_to_html,
+                           outcome_color, question_card_html, restore_card_html, step_row_html,
+                           summary_block_html, thumb_url)
+from .panel_theme import TOKENS as _TOKENS
 
 _BLOCK_SEQ = itertools.count(1)
 
@@ -37,33 +39,21 @@ def _font_size() -> int:
 
 
 def _accent() -> str:
-    color = App.ParamGet("User parameter:BaseApp/Preferences/View").GetUnsigned("DefaultHighlightColor", 0x1E6EE8)
-    return f"#{(color >> 16) & 0xFF:02x}{(color >> 8) & 0xFF:02x}{color & 0xFF:02x}"
+    return _TOKENS["accent"]
 
 
 def _fg() -> str:
-    return "palette(text)"
+    return _TOKENS["text"]
 
 
 def _muted() -> str:
-    """Dimmed gray that works in Qt rich text (the CSS palette(mid) form
-    does not reliably apply inside QTextBrowser HTML). Derived from the
-    live theme's text color with alpha, so it reads as gray in light and
-    dark themes alike."""
-    try:
-        color = QtGui.QGuiApplication.palette().color(QtGui.QPalette.WindowText)
-        return f"rgba({color.red()},{color.green()},{color.blue()},165)"
-    except Exception:
-        return "#888888"
+    """Muted fixed-theme text, explicit for QTextBrowser rich text."""
+    return _TOKENS["text_2"]
 
 
 def _text_color() -> str:
-    """Explicit theme text color (same rationale as _muted)."""
-    try:
-        color = QtGui.QGuiApplication.palette().color(QtGui.QPalette.WindowText)
-        return color.name()
-    except Exception:
-        return "#dddddd"
+    """Explicit fixed-theme text color for QTextBrowser rich text."""
+    return _TOKENS["text"]
 
 
 class Step:
@@ -164,6 +154,11 @@ class Block:
     RESTORE = "restore"  # the card shown when a saved chat is opened again
     ACCOUNT = "account"  # an OriginShape account card: ``detail`` is its kind (panel_render.ACCOUNT_CARD_KINDS)
     RATING = "rating"    # a sampled "How did Oscar do?" card under a turn: ``detail`` is its state (oscar.rating)
+    QUESTION = "question"  # an in-chat approval/clarification card (netguard.ask_user via panel_surface):
+    PREVIEW = "preview"    # a successful step's saved CAD snapshot and nearby model actions
+    #                      ``detail`` = state ("pending" | "approved" | "rejected" | "timeout" | "cancelled"),
+    #                      ``text`` = the question, ``actions`` = the Choice anchors, ``key`` = the approval id,
+    #                      ``reason`` = the optional reason given with the answer
 
     def __init__(self, kind: str, text: str = "", detail: str = "", expanded: bool = False):
         self.kind = kind
@@ -187,6 +182,9 @@ class Block:
         self.thumbs: set[str] = set()  # RESTORE blocks: thumbnail ids the panel could load
         self.reason = ""             # ACCOUNT onboarding cards: why the account is offered ("signed_out" | "no_key")
         self.key = ""                # RATING cards: the random key of their links (``rating.new_key``)
+        self.snapshot_path = ""      # PREVIEW: existing project snapshot, never newly captured here
+        self.call_id = ""            # PREVIEW: ThumbCache key for the snapshot
+        self.status = "Updated"      # PREVIEW: compact state chip beneath the image
         self.bid = next(_BLOCK_SEQ)
 
     @property
@@ -207,27 +205,33 @@ class Block:
         return (
             self.kind, hash(self.text), hash(self.detail), self.expanded, self.revertible, self.reverted,
             self.revert_enabled, self.queued, self.header_kind, tuple(self.actions), self.messages,
-            len(self.meta), len(self.thumbs),
-            tuple(s.sig() for s in self.steps),
+            len(self.meta), len(self.thumbs), self.key, self.reason,
+            self.snapshot_path, self.call_id, self.status, tuple(s.sig() for s in self.steps),
         )
 
     def html(self) -> str:
         if self.kind == Block.USER:
+            # Chat redesign: the user's message is a compact right-aligned bubble on the card
+            # surface — one visual system with the question cards, distinct from Oscar's prose
+            # (ASSISTANT renders unboxed, left-aligned) purely by shape and alignment.
             body = md_to_html(self.text)
             if self.queued:
-                body += (f"<div style='color:{_muted()};font-size:small;'>"
+                body += (f"<div style='color:{_TOKENS['text_3']};font-size:small;'>"
                          f"queued · Oscar will see it at the next step</div>")
             return (
                 f"<table width='100%' cellpadding='0' cellspacing='0'><tr>"
                 f"<td align='right'><table cellpadding='8' style="
-                f"'background:rgba(128,128,128,0.16);color:{_text_color()};"
-                f"border-radius:14px;'><tr>"
+                f"'background:{_TOKENS['user_bg']};color:{_TOKENS['text']};"
+                f"border:1px solid {_TOKENS['border']};"
+                f"border-radius:5px;'><tr>"
                 f"<td>{body}</td></tr></table></td></tr></table>"
             )
         if self.kind == Block.ASSISTANT:
+            # Oscar's reply reads as conversation, not a card: lead paragraphs first, then the
+            # labelled sections (results / warnings / next steps) under small muted captions.
             return (
-                f"<div style='color:{_text_color()};margin:2px 0 2px 4px;'>"
-                f"{md_to_html(self.text)}</div>"
+                f"<div style='color:{_TOKENS['text']};margin:4px 0 2px 4px;'>"
+                f"{answer_html(self.text, muted=_TOKENS['text_2'])}</div>"
             )
         if self.kind == Block.SUMMARY:
             return summary_block_html(self.text, self.actions, muted=_muted())
@@ -237,6 +241,10 @@ class Block:
             from .rating import card_html
 
             return card_html(self.key, self.detail, muted=_muted())
+        if self.kind == Block.PREVIEW:
+            return cad_preview_html(self.snapshot_path, self.call_id, self.text, self.actions, self.status)
+        if self.kind == Block.QUESTION:
+            return question_card_html(self)
         if self.kind == Block.RESTORE:
             return restore_card_html(self.text, self.messages, self.meta, notice=self.detail, muted=_muted(),
                                      key=str(self.bid), thumbs=self.thumbs)
@@ -279,7 +287,7 @@ class Block:
             )
         # error
         return (
-            f"<div style='color:#e06c5a;'>⚠ {md_to_html(self.text)}</div>"
+            f"<div style='color:{_TOKENS['danger']};'>⚠ {md_to_html(self.text)}</div>"
         )
 
 
