@@ -17,8 +17,9 @@ Test in FreeCAD) only at the provider and base URL the user approved at this com
 made or edited in FreeCAD is approved as it is; one a sync created, or whose provider or base URL a sync changed, waits
 until the user confirms that exact address in the settings dialog. The account profile (``originshape``) has a fixed
 endpoint and needs none. So a stolen website session can neither send a key to its own server nor have prompts sent
-there. (An Oscar from before approvals drops ``approved`` when it saves the file; its profiles then read as approved,
-as they were saved by the user in that Oscar.)
+there. A profile without ``approved`` (a 0.2.1 settings file, or one an older Oscar saved) is approved for the address
+it has here when it is read (``ensure_approvals``, on every read and before a pull is applied), never for one a pull
+gives it.
 
 **The wire format** (``to_wire``): exactly ``WIRE_FIELDS``; never a key, a piece of one or a hash of one. A base URL
 that is not a plain http(s) URL (a user, password, query, fragment, anything key-shaped, ``..`` or ``xxxx`` in it) goes
@@ -128,6 +129,25 @@ def ensure_ids(state: dict) -> bool:
     return changed
 
 
+def ensure_approvals(state: dict) -> bool:
+    """Give every profile of a settings ``state`` its ``approved`` (in place); True when one was added. A profile
+    without one (a file from before approvals, or one an Oscar that doesn't know them saved) is approved for the
+    address it has HERE, at this moment: run on every read of the settings file and before anything from the server is
+    applied, so a provider or base URL the server changes is never approved by default. A value that isn't a dict is
+    "not approved"."""
+    changed = False
+    for profile in state.get("profiles") or ():
+        if not isinstance(profile, dict):
+            continue
+        if profile.get("approved") is None:
+            profile["approved"] = approval_for(profile)
+            changed = True
+        elif not isinstance(profile.get("approved"), dict):
+            profile["approved"] = {}
+            changed = True
+    return changed
+
+
 # -- the active profile ------------------------------------------------------------------------------------------
 
 
@@ -226,7 +246,7 @@ def unusable_reason(profile: Any) -> str:
     if profile is None or field_of(profile, "provider") == ACCOUNT_PROVIDER:
         return ""
     approved = field_of(profile, "approved")
-    if approved is None:      # a profile from before approvals: made in FreeCAD
+    if approved is None:      # never set (ensure_approvals runs on every read): approved where it is, as made here
         return ""
     name = field_of(profile, "name") or "Profile"
     where = display_host(field_of(profile, "base_url")) or "its address"

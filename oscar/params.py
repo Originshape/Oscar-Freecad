@@ -510,6 +510,7 @@ def _read_state(*, for_write: bool = False) -> dict[str, Any]:
     if not isinstance(state.get("model_caps"), dict):
         state["model_caps"] = {}
     _sync.ensure_ids(state)   # in memory: the same ids on every read of the same file; a write keeps them
+    _sync.ensure_approvals(state)   # approved where each profile is now: a pull's address change asks for confirmation
     return state
 
 

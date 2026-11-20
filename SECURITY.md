@@ -44,7 +44,8 @@ What Oscar can do on your machine, and how it is limited:
   address at this computer, in **⚙ → AI model**. A confirmation is of the address shown: a later change asks again,
   and a key typed in the dialog confirms nothing. If the website makes such a profile (or one whose key is on another
   computer) the one in use, chat keeps the profile it used. Only the OriginShape account profile, whose server is
-  fixed, needs no confirmation. Profiles made or edited in FreeCAD's own settings need none either.
+  fixed, needs no confirmation. Profiles made or edited in FreeCAD's own settings need none either, and a profile from
+  an older settings file is approved only for the address it has on this computer, never for one a sync gives it.
 - **A website session can't delete your keys.** A sync removes a profile here only when it has no key and you didn't
   change it here; one with a key stays, with the key, until you remove it in Oscar's settings. A sync that would remove
   more than half of your profiles is not applied at all.

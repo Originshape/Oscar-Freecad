@@ -41,7 +41,7 @@ from .settings_merge import (DERIVED_FIELDS, Entry, Merged, Plan, adopt_remote_i
                              usable_snapshot)
 from .settings_wire import (ACCOUNT_PROVIDER, MAX_PROFILES, NEEDS_CONFIRMATION_TEXT, OVERRIDE_KEYS,  # noqa: F401
                             PENDING_KEY, PROVIDERS, STATE_KEY, WIRE_FIELDS, active_index, approval_for, display_host,
-                            endpoint, endpoint_of, ensure_ids, field_of, local_secrets, local_settings, masked_fields,
+                            endpoint, endpoint_of, ensure_approvals, ensure_ids, field_of, local_secrets, local_settings, masked_fields,
                             needs_confirmation, new_profile_id, normalise_remote, overrides_of, pending_active,
                             pending_text, publishable_url, same_settings, set_active, syncable, to_wire,
                             unusable_reason, valid_id, wire_profile)

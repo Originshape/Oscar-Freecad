@@ -669,6 +669,57 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(added["notes"], "")
 
 
+class OldFileTest(unittest.TestCase):
+    """Profiles from a 0.2.1 settings file (no ``approved``): approved where they are, never where a pull moves them."""
+
+    @staticmethod
+    def old(name, pid, **fields):
+        profile = stored(name, pid, **fields)
+        del profile["approved"], profile["removed_remotely"]
+        return profile
+
+    def test_a_pulled_address_or_provider_change_waits_for_confirmation_and_back_it_is_usable(self):
+        changes = {"base_url": {"base_url": "https://attacker.example/v1"}, "provider": {"provider": "openai_compat"}}
+        for key in (KEY, ""):
+            for label, change in changes.items():
+                with self.subTest(label, keyed=bool(key)):
+                    state = state_of(self.old("Claude", "c", api_key=key), self.old("Other", "o"))
+                    self.assertNotIn("approved", state["profiles"][0])
+                    sent = confirmed(state, plan(state, settings()), 1)
+                    self.assertEqual(state["profiles"][0]["approved"],
+                                     {"provider": "anthropic", "base_url": "https://api.anthropic.com"})
+                    web = copy.deepcopy(sent)
+                    web["version"] = 2
+                    web["profiles"][0].update(change)
+                    plan(state, web)
+                    claude = state["profiles"][0]
+                    self.assertTrue(settings_sync.unusable_reason(claude))
+                    passed, message, _ = settings_sync.run_profile_test(
+                        "c", store=MemoryStore(state), run=lambda *a, **k: self.fail("nothing is sent"))
+                    self.assertEqual((passed, message), (False, settings_sync.NEEDS_CONFIRMATION_TEXT))
+                    back = copy.deepcopy(sent)
+                    back["version"] = 3
+                    plan(state, back)
+                    self.assertEqual(settings_sync.unusable_reason(state["profiles"][0]), "")
+
+    def test_a_first_sync_that_matches_and_moves_an_old_profile_waits_too(self):
+        state = state_of(self.old("Claude", "mine", api_key=KEY))
+        remote = settings(wire("claude", "srv", base_url="https://attacker.example/v1", has_key=True), version=4)
+        plan(state, remote)
+        profile = state["profiles"][0]
+        self.assertEqual((profile["id"], profile["base_url"]), ("srv", "https://attacker.example/v1"))
+        self.assertEqual(profile["approved"], {"provider": "anthropic", "base_url": "https://api.anthropic.com"})
+        self.assertTrue(settings_sync.unusable_reason(profile))
+
+    def test_apply_merge_pins_an_unpinned_profile_where_it_was(self):
+        state = {"profiles": [self.old("Claude", "c", api_key=KEY)], "active_profile_id": "c"}
+        local = settings_sync.local_settings(state)
+        remote = settings(dict(local["profiles"][0], base_url="https://attacker.example/v1"))
+        merged = settings_sync.merge(settings(*local["profiles"]), local, remote)
+        settings_sync.apply_merge(state, merged, remote)
+        self.assertTrue(settings_sync.unusable_reason(state["profiles"][0]))
+
+
 class MergeSavedTest(unittest.TestCase):
     """The settings dialog's Save while a pull changed the file under it."""
 

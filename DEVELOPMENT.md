@@ -326,9 +326,11 @@ triggers, the website's test; it re-exports what other modules use) and `keyguar
   never writes; the next write keeps them. The active profile is `active_profile_id` plus its name in
   `active_profile` (`active_index`: an older Oscar switches by name, so a name that names another profile wins).
 - **The gate** (`settings_wire.unusable_reason`, the one place): a profile is used only at the provider and base URL
-  approved at this computer (`Profile.approved`; `None` in a `Profile()` = approved as made, so profiles made or edited
-  in FreeCAD and files from before approvals are approved). A profile a sync created has `{}`; one whose provider or
-  base URL a sync changed keeps its old approval. Both fail the gate (the account profile never does). Asked by
+  approved at this computer (`Profile.approved`; `None` in a `Profile()` = approved as made here). A profile without
+  `approved` in the file (0.2.1, or saved by an older Oscar) is approved for the address it has when it is read:
+  `settings_wire.ensure_approvals` runs on every read (`params._read_state`) and in `plan_sync` before anything of the
+  server's is applied, and `apply_merge` pins any unpinned profile before changing it. A profile a sync created has
+  `{}`; one whose provider or base URL a sync changed keeps its old approval. Both fail the gate (the account profile never does). Asked by
   `providers.make_provider` (raises `ProviderError`, `code="endpoint_changed"`), `provider_probe.probe` and
   `list_models` (so the connection test and the agent's metadata probe send nothing), the panel's `_send_blocker`
   (`endpoint`) and `run_profile_test` (failed, `NEEDS_CONFIRMATION_TEXT`). The key stays in `api_key`: nothing can send

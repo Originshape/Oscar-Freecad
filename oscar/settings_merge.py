@@ -28,7 +28,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .settings_wire import (ACCOUNT_PROVIDER, MAX_PROFILES, NAME_LIMIT, OVERRIDE_KEYS, PENDING_KEY, STATE_KEY,
-                            active_index, ensure_ids, local_secrets, local_settings, masked_fields, normalise_remote,
+                            active_index, approval_for, ensure_approvals, ensure_ids, local_secrets, local_settings,
+                            masked_fields, normalise_remote,
                             pending_active, same_settings, set_active, syncable, unusable_reason, wire_profile)
 
 _REGULAR = ("name", "provider", "model", "reasoning", *(f"overrides.{key}" for key in OVERRIDE_KEYS))
@@ -333,6 +334,8 @@ def apply_merge(state: dict, merged: Merged, remote: dict | None = None,
             profile, touched = stored_from_wire(entry.wire), True
         else:
             profile = copy.deepcopy(current)
+            if profile.get("approved") is None:   # approved where it is now, never where the server moves it
+                profile["approved"] = approval_for(current)
             for name, value in entry.apply.items():
                 _set_field(profile, name, value)
             if entry.url is not None:
@@ -422,6 +425,7 @@ def plan_sync(state: dict, remote: dict, *, prefer: str, account: str,
     """Merge the server's ``remote`` settings into the settings ``state`` (in place); ``(write, Plan)``. The snapshot
     becomes ``remote`` (the next merge's base), so what is still to be pushed stays a local change."""
     ensure_ids(state)
+    ensure_approvals(state)   # before anything of the server's: a profile without approval is approved where it is
     pristine = copy.deepcopy(state)
     before = _profile_view(state)
     old_snapshot = copy.deepcopy(state.get(STATE_KEY))

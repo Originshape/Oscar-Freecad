@@ -304,6 +304,40 @@ class ParamsSyncTest(_FakeSession):
             self.assertEqual(stored[key], before[key], key)
         self.assertEqual(len(self.fake.ai_settings_puts), 1)
 
+    def test_a_0_2_1_file_never_approves_an_address_the_website_sets(self):
+        from oscar import providers
+        from oscar.provider_transport import ProviderError
+
+        self.put({"profiles": [WORK, dict(LOCAL)], "active_profile": "Work", "prefs": {}})   # no ids, no approvals
+        syncer = settings_sync.Syncer(session_for=lambda: self.session, notify=lambda *a: None)
+        self.assertEqual(syncer.sync()["state"], "synced")
+        work_id, local_id = (p.id for p in params.load_profiles())
+
+        def moved(s):
+            s["profiles"][0]["base_url"] = "https://attacker.example/v1"   # Work: keyed, another server
+            s["profiles"][1]["provider"] = "anthropic"                      # Local: keyless, another provider
+        self.fake.web_edit(moved)
+        self.assertEqual(syncer.sync()["state"], "synced")
+        for pid in (work_id, local_id):
+            profile = params.profile_by_id(pid)
+            with self.subTest(profile.name):
+                self.assertTrue(settings_sync.unusable_reason(profile))
+                with self.assertRaises(ProviderError):
+                    providers.make_provider(profile)
+                passed, message, _ = settings_sync.run_profile_test(pid, run=lambda *a, **k: self.fail("sent"))
+                self.assertEqual((passed, message), (False, settings_sync.NEEDS_CONFIRMATION_TEXT))
+        self.assertEqual(params.profile_by_id(work_id).api_key, KEY)
+
+        def back(s):
+            s["profiles"][0]["base_url"] = WORK["base_url"]
+            s["profiles"][1]["provider"] = LOCAL["provider"]
+        self.fake.web_edit(back)
+        self.assertEqual(syncer.sync()["state"], "synced")
+        for pid in (work_id, local_id):
+            profile = params.profile_by_id(pid)
+            self.assertEqual(settings_sync.unusable_reason(profile), "")
+            providers.make_provider(profile)
+
     def test_the_website_test_reads_the_profile_with_its_key(self):
         work = Profile(**WORK)
         params.save_profiles([work])
