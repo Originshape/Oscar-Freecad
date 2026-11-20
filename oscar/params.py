@@ -20,10 +20,10 @@ so. Move to the OS keychain if that ever stops being acceptable. The
 OriginShape account's sign-in is never stored here (``oscar.auth.keystore``):
 its profile (``account_profile()``) carries no key and no URL.
 
-Every profile has a stable ``id`` (``settings_sync.ensure_ids``: a file from before ids reads with ids derived from the
+Every profile has a stable ``id`` (``settings_wire.ensure_ids``: a file from before ids reads with ids derived from the
 names, the same on every read, kept by the next write). The active profile is ``active_profile_id`` plus its name in
 ``active_profile`` (what an Oscar from before ids reads; a name that disagrees wins, see
-``settings_sync.active_index``), so a rename never changes which profile is in use. ``ai_sync`` is the snapshot of
+``settings_wire.active_index``), so a rename never changes which profile is in use. ``ai_sync`` is the snapshot of
 the last sync with the OriginShape account (``oscar.settings_sync``). An older Oscar ignores the profile ids and keeps
 ``active_profile_id`` / ``ai_sync`` as they are (they are top-level keys it does not know); when it saves the
 profiles without their ids, they are found again by name.
@@ -45,7 +45,8 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 from . import context_guard as _context_guard
 from . import fsretry as _fsretry
-from . import settings_sync as _sync
+from . import settings_merge as _merge
+from . import settings_wire as _sync
 from .auth import account as _auth_account
 
 import FreeCAD
@@ -342,11 +343,13 @@ class Profile:
     reasoning: str = field(default="auto")           # "off" | "low" | "medium" | "high" | "auto"
     caps_override: dict = field(default_factory=dict)  # ModelCaps field overrides, e.g. {"tools": "text", "context_window": 8192}
     id: str = field(default_factory=_sync.new_profile_id)   # stable: made once, kept across renames (and synced)
-    # A key a sync set aside because the account's settings changed this profile's provider or base URL: {"key",
-    # "provider", "base_url"} of where it was entered for. While it is set the profile is not used (no chat, no Test
-    # connection, no model list: settings_sync.needs_confirmation) and the key is sent nowhere, until the user decides
-    # in the settings dialog (use the key there, or remove it), types another key, or a sync points it back there.
-    held_key: dict = field(default_factory=dict)
+    # The provider and base URL the user approved at this computer: {"provider", "base_url"}. A profile made or edited
+    # in FreeCAD is approved as it is (None here = "as it is now"); one a sync created has {} and one whose provider or
+    # base URL a sync changed keeps the old approval: either is not used (no chat, no Test connection, no model list,
+    # no probe: settings_wire.unusable_reason) until the user confirms its address in the settings dialog.
+    approved: dict | None = None
+    # The website removed this profile; it has a key, so it stays (not synced) until the user removes or keeps it.
+    removed_remotely: bool = False
 
     def __post_init__(self):
         # A hand-edited settings file must not be able to break the provider layer.
@@ -356,11 +359,13 @@ class Profile:
             self.caps_override = {}
         if not _sync.valid_id(self.id):
             self.id = _sync.new_profile_id()
-        if not isinstance(self.held_key, dict) or not isinstance(self.held_key.get("key"), str):
-            self.held_key = {}
+        if self.approved is None:          # made here, or from before approvals: approved as it is
+            self.approved = _sync.approval_for(self)
+        elif not isinstance(self.approved, dict):
+            self.approved = {}             # unreadable: not approved
+        self.removed_remotely = self.removed_remotely is True
         # Every provider key loaded from the settings file stays out of the model's context (context_guard).
         _context_guard.remember(self.api_key)
-        _context_guard.remember(self.held_key.get("key"))
 
 
 def effective_limits(profile) -> tuple[float, int]:
@@ -762,6 +767,8 @@ def ensure_account_profile(*, activate: bool) -> str:
             wanted = None
         if wanted is not None and _sync.set_active(state, next(i for i, p in enumerate(profiles) if p is wanted)):
             changed = True
+        if activate and _merge.settle_pending(state, True):
+            changed = True
         if changed:
             _write_state(state)
         return account["name"]
@@ -817,7 +824,8 @@ def save_profiles(profiles: list[Profile], *, active_id: str | None = None,
 
     ``base`` (``{"profiles": [dicts], "active_profile_id"}``, what the settings dialog loaded) merges instead of
     replacing: what the caller changed since ``base`` wins, and what changed in the file meanwhile (a sync with the
-    OriginShape account) is kept (``settings_sync.merge_saved``)."""
+    OriginShape account) is kept (``settings_merge.merge_saved``). A profile chosen here ends the website's pending choice
+    (``active_pending``); otherwise that choice is followed once this computer can use it."""
     with _LOCK:
         state = _read_state(for_write=True)
         current = state["profiles"][_sync.active_index(state)].get("id") if state["profiles"] else None
@@ -826,7 +834,7 @@ def save_profiles(profiles: list[Profile], *, active_id: str | None = None,
             def normalised(dicts):
                 return [asdict(p) for p in _profiles_from(dicts)]
 
-            merged = _sync.merge_saved(
+            merged = _merge.merge_saved(
                 {"profiles": normalised(base.get("profiles") or []), "active_profile_id": base.get("active_profile_id")},
                 {"profiles": new, "active_profile_id": active_id},
                 {"profiles": normalised(state["profiles"]), "active_profile_id": current})
@@ -835,6 +843,8 @@ def save_profiles(profiles: list[Profile], *, active_id: str | None = None,
         ids = [p.get("id") for p in new]
         wanted = active_id if active_id in ids else current if current in ids else (ids[0] if ids else None)
         _sync.set_active(state, ids.index(wanted) if wanted in ids else -1)
+        chosen_here = base is not None and active_id != base.get("active_profile_id")
+        _merge.settle_pending(state, chosen_here or (base is None and active_id is not None))
         _write_state(state)
 
 
@@ -881,11 +891,21 @@ def profile_by_id(profile_id: str) -> Profile | None:
 
 
 def set_active_profile(name: str) -> None:
+    """Make the profile named ``name`` the active one (a choice made here: the website's pending one is dropped)."""
     with _LOCK:
         state = _read_state(for_write=True)
         index = next((i for i, p in enumerate(state["profiles"]) if p.get("name") == name), -1)
-        if index >= 0 and _sync.set_active(state, index):
-            _write_state(state)
+        if index >= 0:
+            changed = _sync.set_active(state, index)
+            if _merge.settle_pending(state, True) or changed:
+                _write_state(state)
+
+
+def pending_notice() -> str:
+    """The notice for the website's active profile this computer doesn't follow yet (``""`` when there is none)."""
+    with _LOCK:
+        state = _read_state()
+    return _sync.pending_text(_sync.pending_active(state))
 
 
 

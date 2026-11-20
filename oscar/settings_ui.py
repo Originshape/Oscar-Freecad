@@ -76,11 +76,15 @@ Signed in with OriginShape, the AI model settings (never the API keys) sync with
 dialog asks for a sync when it opens and after Save, and the AI model tab says how the last one went
 (``oscarSyncStatus``). A pull that changes the settings while the dialog is open reloads the tab, or, when the user has
 unsaved changes there, says so and offers *Reload* (``oscarSyncReload``); Save keeps the user's changes and what the
-pull changed elsewhere (``params.save_profiles(base=...)``). When a sync changed the provider or base URL of a profile
-that has a key, the key is set aside (``Profile.held_key``) and the profile is not used until the user decides here,
-under the API key field (``oscarProfileHeldKey``): *Use my key with <host>* (``oscarProfileUseHeldKey``) or *Remove
-the key* (``oscarProfileRemoveHeldKey``); typing another key decides too. A change made in this dialog needs no
-confirmation.
+pull changed elsewhere (``params.save_profiles(base=...)``).
+
+A profile a sync made, or whose provider or base URL a sync changed, is not used until the user confirms its address
+here (``settings_wire.unusable_reason``): the notice under the API key field (``oscarProfilePending``) offers *Use
+<host>* or *Use my key with <host>* (``oscarProfileConfirm``, which approves exactly the address shown) and, with a
+key, *Remove the key* (``oscarProfileRemoveKey``). A profile the website removed while it has a key is kept until the
+user decides: *Remove here* (``oscarProfileRemoveHere``) or *Keep* (``oscarProfileKeep``). Editing a profile's
+provider or base URL here approves it as edited; typing a key approves nothing. The sync line also says when the
+website picked a profile this computer doesn't follow yet (``params.pending_notice``).
 """
 
 import copy
@@ -1151,13 +1155,20 @@ class SettingsDialog(QtWidgets.QDialog):
             return ("Not synced: signed out. Signed in with OriginShape, these settings (never your API keys) are on "
                     "the OriginShape website too.")
         status = _settings_sync.status()
+        try:
+            pending = _params.pending_notice()
+        except Exception:  # noqa: BLE001 - the settings file is busy: the line goes without it
+            pending = ""
         if status["state"] == "synced":
-            return "Synced with your OriginShape account. Your API keys stay on this computer."
-        if status["state"] == "syncing":
-            return "Syncing with your OriginShape account…"
-        if status["state"] in ("unavailable", "error"):
-            return f"{status['message']} Oscar tries again later."
-        return status.get("message") or ""
+            text = "Synced with your OriginShape account. Your API keys stay on this computer."
+            text = f"{text} {status['message']}".strip() if status.get("message") else text
+        elif status["state"] == "syncing":
+            text = "Syncing with your OriginShape account…"
+        elif status["state"] in ("unavailable", "error"):
+            text = f"{status['message']} Oscar tries again later."
+        else:
+            text = status.get("message") or ""
+        return f"{text} {pending}".strip() if pending else text
 
     def _show_sync_state(self, *_args) -> None:
         if not hasattr(self, "sync_label"):
@@ -1366,30 +1377,26 @@ class SettingsDialog(QtWidgets.QDialog):
         self.key_edit.setEchoMode(QtWidgets.QLineEdit.Password)
         self.key_edit.setPlaceholderText("Paste your provider's API key")
         form.addRow("API key", self.key_edit)
-        # A sync changed this profile's provider or base URL while it had a key: the key is set aside and the profile
-        # is not used until the user decides here.
-        self.held_key_row = QtWidgets.QWidget()
-        held = QtWidgets.QVBoxLayout(self.held_key_row)
-        held.setContentsMargins(0, 0, 0, 0)
-        held.setSpacing(4)
-        self.held_key_label = _StatusLabel("oscarProfileHeldKey")
-        self._tone(self.held_key_label, "error")
-        held_buttons = QtWidgets.QHBoxLayout()
-        self.held_key_btn = QtWidgets.QPushButton("Use my key")
-        self.held_key_btn.setObjectName("oscarProfileUseHeldKey")
-        self.held_key_btn.setAutoDefault(False)
-        self.held_key_btn.clicked.connect(lambda *_: self._use_held_key())
-        self.held_key_remove_btn = QtWidgets.QPushButton("Remove the key")
-        self.held_key_remove_btn.setObjectName("oscarProfileRemoveHeldKey")
-        self.held_key_remove_btn.setAutoDefault(False)
-        self.held_key_remove_btn.clicked.connect(lambda *_: self._remove_held_key())
-        held_buttons.addWidget(self.held_key_btn)
-        held_buttons.addWidget(self.held_key_remove_btn)
-        held_buttons.addStretch(1)
-        held.addWidget(self.held_key_label)
-        held.addLayout(held_buttons)
-        self.held_key_row.setVisible(False)
-        form.addRow("", self.held_key_row)
+        # What a sync left for the user to decide about this profile: an address to confirm (made or redirected on the
+        # website), or a removal on the website to follow or not.
+        self.pending_row = QtWidgets.QWidget()
+        pending = QtWidgets.QVBoxLayout(self.pending_row)
+        pending.setContentsMargins(0, 0, 0, 0)
+        pending.setSpacing(4)
+        self.pending_label = _StatusLabel("oscarProfilePending")
+        self._tone(self.pending_label, "error")
+        pending_buttons = QtWidgets.QHBoxLayout()
+        self.confirm_btn = self._small_button("Use this address", "oscarProfileConfirm", self._confirm_address)
+        self.remove_key_btn = self._small_button("Remove the key", "oscarProfileRemoveKey", self._remove_key)
+        self.remove_here_btn = self._small_button("Remove here", "oscarProfileRemoveHere", self._remove)
+        self.keep_btn = self._small_button("Keep", "oscarProfileKeep", self._keep_removed)
+        for button in (self.confirm_btn, self.remove_key_btn, self.remove_here_btn, self.keep_btn):
+            pending_buttons.addWidget(button)
+        pending_buttons.addStretch(1)
+        pending.addWidget(self.pending_label)
+        pending.addLayout(pending_buttons)
+        self.pending_row.setVisible(False)
+        form.addRow("", self.pending_row)
 
         # Model: dropdown populated from the provider's /models endpoint;
         # still editable for endpoints without a listing.
@@ -1447,6 +1454,14 @@ class SettingsDialog(QtWidgets.QDialog):
                           "OriginShape sign-in is kept separately, in the system keychain.", "oscarKeyStorageNote")
         outer.addWidget(note)
         return self.byok_box
+
+    @staticmethod
+    def _small_button(text: str, name: str, action) -> QtWidgets.QPushButton:
+        button = QtWidgets.QPushButton(text)
+        button.setObjectName(name)
+        button.setAutoDefault(False)
+        button.clicked.connect(lambda *_: action())
+        return button
 
     def _account_profile(self) -> Profile | None:
         """The account profile the AI model tab edits: the active one when that is an account profile, else the
@@ -2399,6 +2414,7 @@ class SettingsDialog(QtWidgets.QDialog):
             return
         profile = self.profiles[row]
         self._apply_predefined()  # normalize before storing
+        before = _settings_sync.endpoint_of(profile)
         profile.name = self._unique_name(self.name_edit.text().strip() or profile.name, exclude=profile)
         preset = self._preset()
         if preset:
@@ -2408,12 +2424,11 @@ class SettingsDialog(QtWidgets.QDialog):
         profile.temperature = float(self.temp_spin.value())
         profile.max_tokens = int(self.max_tokens_spin.value())
         _model.apply_advanced(profile, self._advanced_values())
-        key = self.key_edit.text().strip()
-        if key != profile.api_key:
-            profile.held_key = {}     # the user chose the key for this profile: a key a sync set aside is dropped
-        profile.api_key = key
+        profile.api_key = self.key_edit.text().strip()   # a key approves nothing: only an edited address does
         if preset.get("account"):     # never: the account's preset is not offered here; kept as a guard
             profile.base_url, profile.api_key = "", ""
+        if _settings_sync.endpoint_of(profile) != before:   # the user edited the provider or base URL: approved
+            profile.approved = _settings_sync.approval_for(profile)
 
     def _load_editor(self, profile: Profile | None, row: int = -1):
         self._editor_row = row
@@ -2427,7 +2442,7 @@ class SettingsDialog(QtWidgets.QDialog):
             self.model_combo.setEditText("")
             self._load_advanced(None)
             self._apply_predefined()
-            self._show_held_key(None)
+            self._show_pending(None)
             return
         self._loading = True
         self.name_edit.setText(profile.name)
@@ -2442,37 +2457,53 @@ class SettingsDialog(QtWidgets.QDialog):
         self._loading = False
         self._load_advanced(profile)
         self._apply_predefined()
-        self._show_held_key(profile)
+        self._show_pending(profile)
 
-    def _show_held_key(self, profile: Profile | None) -> None:
-        """The notice of a profile whose provider or base URL a sync changed while it had a key."""
-        shown = bool(profile is not None and _settings_sync.needs_confirmation(profile) and not profile.api_key)
-        if shown:
-            held = profile.held_key
-            before = _settings_sync.display_host(held.get("base_url")) or held.get("provider") or "another server"
-            where = _settings_sync.display_host(profile.base_url) or "the new address"
-            self.held_key_label.setText(
-                f"This profile's provider or base URL was changed on your OriginShape account (your key was saved for "
-                f"{before}). Oscar doesn't use this profile until you decide: use your key with {where}, or remove "
-                "it. Only do so if you made this change.")
-            self.held_key_btn.setText(f"Use my key with {where}")
-        self.held_key_row.setVisible(shown)
+    def _show_pending(self, profile: Profile | None) -> None:
+        """The notice of a profile a sync left for the user to decide about (see the module docstring)."""
+        removed = bool(profile is not None and profile.removed_remotely)
+        reason = _settings_sync.unusable_reason(profile) if profile is not None else ""
+        if removed:
+            self.pending_label.setText("This profile was removed on your OriginShape account. It is kept here, with "
+                                       "its key, until you decide: remove it here too, or keep it (it is then synced "
+                                       "again).")
+        elif reason:
+            where = _settings_sync.display_host(profile.base_url) or profile.provider or "this address"
+            approved = profile.approved or {}
+            was = _settings_sync.display_host(approved.get("base_url")) or approved.get("provider") or ""
+            before = f" (it was {was})" if was and approved.get("provider") else ""
+            self.pending_label.setText(
+                f"{reason.split('. ')[0]}{before}. Oscar doesn't use this profile until you confirm {where} here. "
+                "Only confirm an address you chose yourself.")
+            self.confirm_btn.setText(f"Use my key with {where}" if profile.api_key else f"Use {where}")
+        self.confirm_btn.setVisible(bool(reason) and not removed)
+        self.remove_key_btn.setVisible(bool(reason) and not removed and bool(profile.api_key))
+        self.remove_here_btn.setVisible(removed)
+        self.keep_btn.setVisible(removed)
+        self.pending_row.setVisible(removed or bool(reason))
 
-    def _use_held_key(self) -> None:
-        """Confirmed: the key goes with the profile as it is now (Save keeps it)."""
-        profile = self._selected()
-        if profile is not None and _settings_sync.needs_confirmation(profile):
-            self.key_edit.setText(profile.held_key["key"])
-            self._stash_editor()             # the key is the profile's again; the set-aside copy is dropped
-            self.held_key_row.setVisible(False)
-
-    def _remove_held_key(self) -> None:
-        """Declined: the key is dropped from this profile (Save keeps that); the profile can be used without it."""
+    def _confirm_address(self) -> None:
+        """Approved: exactly the provider and base URL shown (a later change on the website asks again)."""
+        self._stash_editor()
         profile = self._selected()
         if profile is not None:
-            profile.held_key = {}
+            profile.approved = _settings_sync.approval_for(profile)
+            self._show_pending(profile)
+
+    def _remove_key(self) -> None:
+        """The key is dropped from this profile (Save keeps that); its address still waits for confirmation."""
+        profile = self._selected()
+        if profile is not None:
             self.key_edit.clear()
-            self.held_key_row.setVisible(False)
+            self._stash_editor()
+            self._show_pending(profile)
+
+    def _keep_removed(self) -> None:
+        """Kept although the website removed it: it is a profile like the others again (and synced again)."""
+        profile = self._selected()
+        if profile is not None:
+            profile.removed_remotely = False
+            self._show_pending(profile)
 
     def _unique_name(self, wanted: str, exclude=None) -> str:
         """``wanted``, or ``wanted 2`` / ``wanted 3`` ... when another profile (not ``exclude``) already uses it: two

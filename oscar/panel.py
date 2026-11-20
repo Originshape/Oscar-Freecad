@@ -546,6 +546,9 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         if changed:
             try:
                 self._reload_profiles()
+                notice = _params.pending_notice()   # the website picked a profile this computer can't use yet
+                if notice:
+                    self._flash_status(notice, 12000)
             except Exception as e:  # noqa: BLE001
                 self._log_panel_error("settings_sync", e)
 
@@ -723,7 +726,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
 
     def _send_blocker(self, profile) -> str:
         """Why a send must not start a turn, from LOCAL facts only (no network): ``no_profile``, ``endpoint`` (a sync
-        changed the profile's provider or base URL and the user hasn't confirmed it yet), ``no_key``, ``server``
+        made the profile or changed its provider or base URL, and the user hasn't confirmed it yet), ``no_key``, ``server``
         (the configured OriginShape server is refused), ``signed_out``, ``waitlisted``, ``outdated`` (this Oscar is
         older than the server's minimum version), ``consent`` (the account has not accepted OriginShape's current
         Terms: never for another provider); ``""`` lets the turn go. The
@@ -731,7 +734,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         some), and a sign-in that is not known yet (the OS keychain is still being read) is left to the turn."""
         if profile is None:
             return "no_profile"
-        if _settings_sync.needs_confirmation(profile):   # its provider or URL was changed on the account: confirm first
+        if _settings_sync.unusable_reason(profile):   # made or redirected on the website: its address is confirmed first
             return "endpoint"
         if not _params.is_account_profile(profile):
             if not profile.api_key and profile.provider == "anthropic":
@@ -764,7 +767,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
             self._append(Block.ERROR, "No chat profile is configured — open ⚙ settings and add one.")
             self._render()
         elif blocker == "endpoint":
-            self._append(Block.ERROR, _settings_sync.confirmation_text(_params.active_profile()))
+            self._append(Block.ERROR, _settings_sync.unusable_reason(_params.active_profile()))
             self._render()
         elif blocker == "server":
             problem = self._account_state().get("error") or "The OriginShape server URL cannot be used."
@@ -1067,6 +1070,9 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
                 return
             self._steer_while_busy()
             return
+        # The latest AI model settings first, for the user's turns and the workspace's alike: a pull older than a
+        # minute is renewed, waited for up to two seconds (then the turn goes on with what is here).
+        _settings_sync.pull_before_turn()
         if workspace is not None:
             text, pending, profile = workspace.text.strip(), list(workspace.attachments), workspace.profile
         else:
@@ -1081,8 +1087,6 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
             elif blocker == "consent":   # the user is here and wants to chat: the prompt, at once
                 QtCore.QTimer.singleShot(0, lambda: consent_gui.open_dialog(self))
             return
-        if workspace is None:
-            _settings_sync.pull_if_stale()   # a minute since the last pull: one in the background (never waited for)
         typed = text
 
         if workspace is None:

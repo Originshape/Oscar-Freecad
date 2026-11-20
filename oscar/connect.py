@@ -83,7 +83,7 @@ from typing import Any, Protocol
 from urllib.parse import urlencode
 
 from . import __version__
-from . import context_guard as _context_guard
+from . import keyguard as _keyguard
 from .auth import account as _account
 from .auth import transport
 from .auth.transport import AuthError, AuthUnavailable, SignedOut
@@ -476,7 +476,7 @@ class Client:
         """Report a profile test this FreeCAD ran: ``passed``, a short ``message`` (already scrubbed of the key; at most
         ``PROFILE_TEST_MESSAGE_LIMIT`` characters) and ``checks`` (``reply``, ``tools``, ``image``: True, False or
         None). False when the server no longer waits for this report (it expired, or was answered)."""
-        text = _context_guard.redact_fragments(_context_guard.redact(str(message or "")))   # again, at the door
+        text = _keyguard.scrub(str(message or ""))   # once more at the door: keys and pieces of keys by their shape
         body = {"passed": bool(passed), "message": self._out(text)[:PROFILE_TEST_MESSAGE_LIMIT],
                 "checks": {name: checks.get(name) if checks.get(name) in (True, False) else None
                            for name in PROFILE_TEST_CHECKS}}

@@ -24,7 +24,8 @@ is framed on it. The connector hands the loop ``open_model``, which is what make
 
 The website's **Test in FreeCAD** (Settings → AI model) arrives as a ``connect.ProfileTest``: the connector hands the
 loop ``test_profile``, which runs the settings dialog's Test connection for that local profile, with its local key, on
-the loop's thread (``settings_sync.run_profile_test``); only the outcome and a message scrubbed of the key go back.
+the loop's thread after a sync (``settings_sync.run_website_test``); only the outcome and a message scrubbed of the key
+go back.
 
 Nothing here changes what a turn may do: scripts and network access keep their approvals. Each question is one
 step in the workspace that changes in place: "Waiting for your approval in FreeCAD", then approved, declined or no
@@ -850,10 +851,11 @@ class WorkspaceConnector(QtCore.QObject):
 
     @staticmethod
     def _test_profile(test: connect.ProfileTest) -> tuple[bool, str, dict]:
-        """The website's Test in FreeCAD (loop thread): the Test connection of the local profile, with its key."""
+        """The website's Test in FreeCAD (loop thread): the latest settings, then the Test connection of the local
+        profile, with its key (a profile this computer may not use yet is not tested)."""
         from . import settings_sync
 
-        return settings_sync.run_profile_test(test.profile_id)
+        return settings_sync.run_website_test(test.profile_id)
 
     def _revert(self, job: connect.RevertJob) -> connect.RevertOutcome:
         """Undo a revert job's turns (on the GUI thread), then read the model after them: the preview and the

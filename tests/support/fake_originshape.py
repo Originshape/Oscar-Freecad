@@ -312,8 +312,21 @@ def _ai_field_problem(names, allowed) -> str:
 
 _AI_CREDENTIAL_RE = re.compile(
     r"sk-ant-[A-Za-z0-9_\-]{20,}|\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_\-]{32,}|\bos_live_[A-Za-z0-9_\-]{20,}"
+    r"|\bgsk_[A-Za-z0-9]{32,}|\bxai-[A-Za-z0-9]{32,}|\bpplx-[A-Za-z0-9]{32,}|\bcsk-[A-Za-z0-9]{32,}|\bfw_[A-Za-z0-9]{20,}"
     r"|\bAIza[0-9A-Za-z_\-]{35}|\bgh[pousr]_[A-Za-z0-9]{36,}|\bxox[abprs]-[A-Za-z0-9\-]{10,}"
     r"|(?<![A-Za-z0-9_\-])eyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}")   # as the API's guard
+
+
+_AI_MASKED = re.compile(r"[*•●∙]{3,}|[xX]{4,}|(?:…|\.{2,})(?=[A-Za-z0-9])")   # the API's keys.py, word by word
+_AI_MASKED_IN_KEYISH = re.compile(r"[*•●]{2}|(?<=[A-Za-z0-9])(?:…|\.{3,})")
+
+
+def _ai_looks_like_a_key(text: str) -> bool:
+    """The API's ``keys.looks_like_a_key``: a credential's shape, or a word that is (or holds) a masked key."""
+    if _AI_CREDENTIAL_RE.search(text):
+        return True
+    return any(_AI_MASKED.search(w) or (re.search(r"[0-9_-]", w) and _AI_MASKED_IN_KEYISH.search(w))
+               for w in text.split())
 
 
 def _strings(value):
@@ -342,7 +355,7 @@ def _ai_settings_problem(body) -> str:
     ``ai_settings/schemas.py`` checks it), or ""."""
     if not isinstance(body, dict):
         return "A JSON object is required."
-    if any(_AI_CREDENTIAL_RE.search(text) or "\x00" in text for text in _strings(body)):
+    if any(_ai_looks_like_a_key(text) or "\x00" in text for text in _strings(body)):
         return "Provider keys never leave FreeCAD."
     problem = _ai_field_problem(body, AI_TOP_FIELDS)
     if problem:
