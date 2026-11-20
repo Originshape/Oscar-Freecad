@@ -15,12 +15,18 @@ and versions follow [Semantic Versioning](https://semver.org/): the version is i
   chat when the last check is more than a minute old, always in the background. Each setting is merged on its own; when
   both sides changed the same one, the website's wins on a fetch and yours on a Save. **API keys never leave this
   computer** (the website only learns whether a key is saved here), nor does a base URL with a user, password, query or
-  fragment in it, nor the profiles' notes. When a change on the website gives a profile that has a key another base
-  URL or provider, Oscar doesn't use that profile or its key until you confirm in its settings (**Use my key with
-  ...** or **Remove the key**). A setting OriginShape refuses is named in the settings, with the profile.
-  `OSCAR_SETTINGS_SYNC=0` keeps the settings local.
+  fragment in it, nor the profiles' notes. A profile made on the website, or whose base URL or provider the website
+  changed, is not used (nor its key sent) until you confirm its address in Oscar's settings; a website pick of such a
+  profile, or of one whose key is on another computer, doesn't switch chat until then. A profile with a key that the
+  website removed stays until you remove or keep it here, and a sync that would remove more than half of your profiles
+  is not applied. Keys, and pieces of keys providers echo in errors, are masked in everything sent. A setting
+  OriginShape refuses is named in the settings, with the profile. `OSCAR_SETTINGS_SYNC=0` keeps the settings local.
 - **Test in FreeCAD**: with Connect on, the website can ask FreeCAD to test a profile; the test runs here with the key
-  saved here, and only its result comes back, scrubbed of the key.
+  saved here, on the latest settings, and only its result comes back, scrubbed of the key.
+- **A mesh with holes points at the OriginShape workspace's Repair**: when `import_file` can't make a solid of an open
+  mesh, the model is told that the user can repair it in the workspace (Repair, then "Use the repaired copy"), as the
+  way to go for a task from the workspace and as an option for a chat in FreeCAD. A workspace attachment's
+  `repaired_from` (the original's name) is read.
 
 ### Changed
 

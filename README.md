@@ -180,27 +180,36 @@ in FreeCAD or on the website (**Settings → AI model** on app.originshape.desig
 keys are added and changed here, in **⚙ → AI model**.
 
 - **When:** when the Oscar panel opens, after you sign in, when you open **⚙**, after **Save** there (and when you pick a
-  profile in the panel header), and before a chat when the last check is more than a minute old. It runs in the
-  background and never holds up a chat or the settings; the line at the top of **⚙ → AI model** says how the last sync
-  went (or, when OriginShape refused a setting, which profile and setting to fix), and a failed one is tried again
-  next time. Signed out, nothing is synced and everything works as before.
+  profile in the panel header), before a chat (yours or a workspace task's) when the last check is more than a minute
+  old, and before the website's Test in FreeCAD. It runs in the background: a chat waits for it two seconds at most,
+  the settings not at all. The line at the top of **⚙ → AI model** says how the last sync went (or, when OriginShape
+  refused a setting, which profile and setting to fix), and a failed one is tried again next time. Signed out,
+  nothing is synced and everything works as before.
 - **Changed in both places:** each setting of each profile is merged on its own, so a profile you edited here and one
   edited on the website are both kept. When the same setting changed in both places, the website's change wins when
-  Oscar fetches it, and yours wins when you press **Save**. A profile removed on the website is removed here too, with
-  its key, unless you changed it here since the last sync. If the website changes the settings while **⚙** is open,
+  Oscar fetches it, and yours wins when you press **Save**. If the website changes the settings while **⚙** is open,
   the tab reloads, or, when you have unsaved changes there, offers **Reload** (**Save** keeps yours and theirs).
+- **Removed on the website:** a profile without a key that you didn't change here since the last sync is removed here
+  too. One with a key stays, with its key, until you choose in **⚙ → AI model**: **Remove here** or **Keep** (it is
+  then synced again). If the website's settings would remove more than half of your profiles here, Oscar applies none
+  of them and says so.
 - **Kept on this computer only:** API keys; a base URL with a user name, password, query or fragment in it (the
-  website shows it as kept in FreeCAD); a profile's notes; what Oscar learned about each model; all of Oscar's other
-  settings.
-- **A key stays with its server:** when a change on the website gives a profile that has a key another base URL or
-  another provider (including a website URL in place of one kept in FreeCAD), Oscar takes the change but doesn't use
-  that profile, or send its key anywhere, until you confirm in **⚙ → AI model**: **Use my key with <the new server>**,
-  or **Remove the key** (typing another key works too). Chats, **Test connection** and the website's **Test in
-  FreeCAD** with that profile say so instead of running. Changes you make in FreeCAD itself need no confirmation.
-  This way a stolen website session can't redirect your key to another server.
+  website shows it as kept in FreeCAD); a profile's notes; a profile whose provider OriginShape doesn't know, and any
+  past the 50 OriginShape keeps; what Oscar learned about each model; all of Oscar's other settings.
+- **New or redirected on the website: confirm it here first.** A profile made on the website, or one whose base URL or
+  provider the website changed (with or without a key, including a website URL in place of one kept in FreeCAD), is
+  not used at all until you confirm its address in **⚙ → AI model**: **Use <server>** or **Use my key with <server>**
+  (that exact address: a later change asks again); with a key you can also **Remove the key**. Until then chats,
+  **Test connection**, the model list and the website's **Test in FreeCAD** with it say so instead of sending
+  anything. If the website makes such a profile the one in use, FreeCAD keeps using its own until you confirm ("The
+  website picked ... Confirm it in Oscar's settings to use it."), and the same for a profile whose key is on another
+  computer. Profiles you make or edit in FreeCAD need no confirmation, and typing a key confirms nothing. This way a
+  stolen website session can't send your key, or your prompts, to its own server.
 - **Test in FreeCAD:** with **Connect to the OriginShape workspace** on, the website can ask this FreeCAD to run **Test
   connection** for a profile. The test runs here, with the key saved here; only its result (passed or not, which
-  checks passed, and a short message with the key, and any piece of it the provider repeated, removed) goes back.
+  checks passed, and a short message) goes back. The message, and every name and model sent, loses any key: by its
+  shape, by value with any piece of it (such as its last characters), and as providers echo it masked
+  (`sk-proj-****…Ab9Z`, `**** abcd`).
 - `OSCAR_SETTINGS_SYNC=0` (an environment variable) keeps these settings on this computer only.
 
 ## Your first part
