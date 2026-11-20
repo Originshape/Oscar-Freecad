@@ -28,15 +28,22 @@ What Oscar can do on your machine, and how it is limited:
   after a damaged file was replaced). They are entered, stored and used only on this computer: OriginShape never
   receives a key, a part of one or a hash of one.
 - **AI model settings sync with your OriginShape account** while you are signed in with OriginShape (not with a
-  personal API key; `OSCAR_SETTINGS_SYNC=0` turns it off). What is sent, for each provider profile: its name, provider,
-  base URL, model, reasoning level, Advanced overrides, notes, and whether this computer holds a key for it; and which
-  profile is in use. What is not: the key; a base URL with a user name, password, query or fragment (sent as empty and
-  marked as kept in FreeCAD); a key or anything shaped like a credential found in a name, model or notes (masked);
-  what Oscar learned about each model; the rest of Oscar's settings. A change made on the website never sends a key
-  somewhere new: when it moves a profile to another provider or server, the profile's key is set aside on this
-  computer until you confirm it in Oscar's settings. The website's **Test in FreeCAD** (with Connect on) runs the
-  connection test here, with the key saved here; only the outcome and a short message, scrubbed of the key and of a
-  local base URL's secrets, are sent back.
+  personal API key; `OSCAR_SETTINGS_SYNC=0` turns it off). What is sent, for each provider profile: its id, name,
+  provider, base URL, model, reasoning level, Advanced overrides, and whether a key for it is saved in FreeCAD; and
+  which profile is in use. What is not: the key; a base URL with a user name, password, query or fragment (sent as
+  empty and marked as kept in FreeCAD); a key or anything shaped like a credential found in a name or model (masked,
+  and logged by field name only); the profile's notes; what Oscar learned about each model; the rest of Oscar's
+  settings.
+- **A change made on the website never sends a key somewhere new.** When a sync changes the base URL or the provider
+  of a profile that has a key (also a website URL replacing one kept in FreeCAD), Oscar takes the change, sets the key
+  aside on this computer and does not use the profile at all (no chat, no Test connection, no model list; the
+  website's Test in FreeCAD fails with "Confirm the new address in Oscar's settings in FreeCAD before its key is
+  used.") until you confirm at this computer, in **⚙ → AI model**: use the key with the new address, or remove it
+  (entering another key confirms too). So a stolen website session can't redirect a key to its own server. A change
+  made in FreeCAD's own settings needs no confirmation. The website's **Test in FreeCAD** (with Connect on) runs the
+  connection test here, with the key saved here; only the outcome and a short message are sent back, scrubbed of the
+  key, of any piece of a key a provider echoed in its error (`sk-proj-****…Ab9Z`, `****abcd`, a word that starts like
+  a key) and of a local base URL's secrets.
 - **Your OriginShape sign-in** (a refresh token or a personal API key) is kept in the system keychain (macOS Keychain,
   Windows Credential Manager, the Secret Service on Linux), else in `oscar_credentials.json` next to the settings file,
   readable by your user account only. It is only ever sent to the OriginShape server set in Oscar's settings (https,

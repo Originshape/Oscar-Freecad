@@ -285,8 +285,9 @@ Oscar runs tasks started in the OriginShape workspace on the website (`/studio` 
   `settings_sync.run_profile_test` on the loop's thread: the settings dialog's Test connection for that local profile,
   with its local key, stopped after 150 s (the server expires a claimed test after 3 minutes). `Loop._run_profile_test`
   posts `POST /v1/connect/profile-tests/{id}/result` `{"passed", "message", "checks": {"reply", "tools", "image"}}`;
-  the message is scrubbed (`settings_sync.scrub_test_message`: `context_guard`, the key, any run of it, a key echoed
-  with stars, a local base URL's secrets) and at most 500 characters. An unknown profile is a failed test with a
+  the message is scrubbed (`settings_sync.scrub_test_message`: `context_guard.redact`, the key and any run of it,
+  `context_guard.redact_fragments` for a key a provider echoed masked or a word that starts like a key, a local base
+  URL's secrets; `Client.profile_test_result` scrubs again) and at most 500 characters. An unknown profile is a failed test with a
   message that says so. The capability is announced only while the settings sync is on (`OSCAR_SETTINGS_SYNC`).
 - **Tests**: `tests/test_connect.py` (pure: the client, the batch, the loop, attachment downloads and revert jobs
   against `support/fake_workspace.py`) and `tests/test_connect_panel.py` (FreeCAD: a job, with and without
@@ -300,10 +301,15 @@ with OriginShape (OAuth; a personal API key gets 403 and is not tried). The cont
 
 - **The rule**: provider keys never leave FreeCAD. `settings_sync.to_wire` builds what the server sees of a stored
   profile from a whitelist of fields: `id`, `name`, `provider`, `base_url`, `base_url_local`, `model`, `reasoning`,
-  `overrides` (the five Advanced keys of `caps_override`, `None` = automatic), `notes`, `has_key`. A base URL that is
-  not a plain http(s) URL (user, password, query, fragment, the key in it, no scheme) goes as `""` with
-  `base_url_local: true`; every local key (and anything `context_guard` recognises) is masked in the name, model and
-  notes. `model_caps`, `prefs`, other `caps_override` keys, `temperature` / `max_tokens` and the grants stay local.
+  `overrides` (exactly the five Advanced keys of `caps_override`, `None` = automatic), `has_key`
+  (`settings_sync.WIRE_FIELDS`; the PUT body is exactly `version`, `active_profile_id`, `profiles`, since the server
+  refuses any other field). A base URL that is not a plain http(s) URL (user, password, query, fragment, a
+  credential's shape, no scheme) goes as `""` with `base_url_local: true`; an empty one is an unfinished profile
+  (`""`, false). Every local key, and anything `context_guard` recognises, is masked in the name and model (the server
+  refuses a credential-shaped string anywhere; `ai_settings_masked` logs the field names). `notes`, `model_caps`,
+  `prefs`, other `caps_override` keys, `temperature` / `max_tokens` and the grants stay local and a pull never touches
+  them. An account profile's model goes as `origin1` or `origin1-super` (a retired alias as its tier, an alias the
+  server doesn't take yet as `origin1`).
 - **Ids**: `Profile.id` (32 hex characters for a new profile). `settings_sync.ensure_ids` runs on every read of the
   settings file (`params._read_state`): a profile without an id (a file from before ids, or saved by an older Oscar)
   gets back the id the last sync knew it by (its name in the snapshot), else one derived from its name, so every read
@@ -318,7 +324,9 @@ with OriginShape (OAuth; a personal API key gets 403 and is not tried). The cont
   (`params.update_state`), `plan_sync` merges and writes; then `PUT` with the version it merged against when the result
   differs from the server's. A 409 is merged again with `details.current` (or a fresh GET) and pushed once more; a
   second one waits for the next trigger. Failures are logged as `ai_settings_sync` events with an outcome and a code,
-  never a value, and shown on the AI model tab (`oscarSyncStatus`).
+  never a value, and shown on the AI model tab (`oscarSyncStatus`); a 400 shows the server's `details` field and
+  message there with the profile's name (`settings_sync.refusal`) and is logged as `ai_settings_refused` with the
+  field name.
 - **The merge** (`merge`): per profile and per field against the snapshot of the last sync (`ai_sync` in the settings
   file: the server's settings then, the account they belong to as a hash of server and email, and this FreeCAD's
   `has_key` and URL as last accepted). One side changed: taken. Both: the server's on a pull, ours after a Save. A
@@ -329,9 +337,17 @@ with OriginShape (OAuth; a personal API key gets 403 and is not tried). The cont
   account, or a server whose version went back) means no deletions: profiles are matched by id, then by name and the
   account profile (`adopt_remote_ids`), and everything else is kept on both sides.
 - **Applying a pull** (`apply_merge`): only the fields the server changed; never `api_key`, never a local URL replaced
-  by `""` (a real URL set on the website replaces it, as the contract says). When the provider or the base URL's
-  origin changes, the key moves to `Profile.held_key` instead of going to the new address; it comes back when the
-  profile points there again, or through the dialog's **Use it here** (`oscarProfileUseHeldKey`).
+  by `""` (a real URL set on the website replaces it, as the contract says).
+- **A changed endpoint waits for confirmation** (`_guard_key`): when a pull changes the provider or the base URL (any
+  difference but case and a trailing `/`, including a website URL replacing a local one) of a profile with a key, the
+  key moves to `Profile.held_key` (`{"key", "provider", "base_url"}` of where it was entered for) and
+  `settings_sync.needs_confirmation(profile)` is true. Then nothing uses the profile: `providers.make_provider` raises
+  (`code="endpoint_changed"`), `provider_check.run_connection_test`, `provider_probe.list_models` and
+  `provider_probe.probe` send nothing, the panel's `_send_blocker` returns `endpoint`, and `run_profile_test` answers
+  failed with `NEEDS_CONFIRMATION_TEXT`. The dialog shows the notice (`oscarProfileHeldKey`) with **Use my key with
+  <host>** (`oscarProfileUseHeldKey`) and **Remove the key** (`oscarProfileRemoveHeldKey`); typing a key decides too
+  (also over a hold that arrived while the dialog was open: `merge_saved`). A pull that points the profile back where
+  the key was entered gives the key back. `has_key` stays true meanwhile (the key is still saved in FreeCAD).
 - **The dialog**: `params.load_profiles_for_edit()` gives it the profiles and what the file held for them (`base`);
   `params.save_profiles(profiles, active_id=..., base=...)` merges its edits with what a pull wrote meanwhile
   (`settings_sync.merge_saved`). A pull while it is open reloads the tab, or, over unsaved changes, offers Reload.

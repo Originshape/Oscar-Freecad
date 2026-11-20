@@ -174,7 +174,7 @@ Larger models give better results; small local models work best on simple parts.
 
 Signed in with OriginShape (**Sign in with OriginShape** or **Sign in with a code**, not a personal API key), Oscar
 keeps its AI model settings in step with your account: whether you use your OriginShape account or your own provider,
-your profiles (name, provider, base URL, model, reasoning, **Advanced overrides**, notes) and the one in use. Change them
+your profiles (name, provider, base URL, model, reasoning, **Advanced overrides**) and the one in use. Change them
 in FreeCAD or on the website (**Settings → AI model** on app.originshape.design) and the other side follows.
 **Your API keys never leave this computer**: the website only learns whether FreeCAD holds a key for a profile, so
 keys are added and changed here, in **⚙ → AI model**.
@@ -182,20 +182,25 @@ keys are added and changed here, in **⚙ → AI model**.
 - **When:** when the Oscar panel opens, after you sign in, when you open **⚙**, after **Save** there (and when you pick a
   profile in the panel header), and before a chat when the last check is more than a minute old. It runs in the
   background and never holds up a chat or the settings; the line at the top of **⚙ → AI model** says how the last sync
-  went, and a failed one is tried again next time. Signed out, nothing is synced and everything works as before.
+  went (or, when OriginShape refused a setting, which profile and setting to fix), and a failed one is tried again
+  next time. Signed out, nothing is synced and everything works as before.
 - **Changed in both places:** each setting of each profile is merged on its own, so a profile you edited here and one
   edited on the website are both kept. When the same setting changed in both places, the website's change wins when
   Oscar fetches it, and yours wins when you press **Save**. A profile removed on the website is removed here too, with
   its key, unless you changed it here since the last sync. If the website changes the settings while **⚙** is open,
   the tab reloads, or, when you have unsaved changes there, offers **Reload** (**Save** keeps yours and theirs).
 - **Kept on this computer only:** API keys; a base URL with a user name, password, query or fragment in it (the
-  website shows it as kept in FreeCAD); what Oscar learned about each model; all of Oscar's other settings.
-- **A key stays with its server:** when a change on the website points a profile at another provider or another
-  server, Oscar sets that profile's key aside instead of sending it there. **⚙ → AI model** offers it back (**Use it
-  here**), and it comes back by itself when the profile points at its old server again.
+  website shows it as kept in FreeCAD); a profile's notes; what Oscar learned about each model; all of Oscar's other
+  settings.
+- **A key stays with its server:** when a change on the website gives a profile that has a key another base URL or
+  another provider (including a website URL in place of one kept in FreeCAD), Oscar takes the change but doesn't use
+  that profile, or send its key anywhere, until you confirm in **⚙ → AI model**: **Use my key with <the new server>**,
+  or **Remove the key** (typing another key works too). Chats, **Test connection** and the website's **Test in
+  FreeCAD** with that profile say so instead of running. Changes you make in FreeCAD itself need no confirmation.
+  This way a stolen website session can't redirect your key to another server.
 - **Test in FreeCAD:** with **Connect to the OriginShape workspace** on, the website can ask this FreeCAD to run **Test
   connection** for a profile. The test runs here, with the key saved here; only its result (passed or not, which
-  checks passed, and a short message with the key removed) goes back.
+  checks passed, and a short message with the key, and any piece of it the provider repeated, removed) goes back.
 - `OSCAR_SETTINGS_SYNC=0` (an environment variable) keeps these settings on this computer only.
 
 ## Your first part
