@@ -195,6 +195,42 @@ def visible_tips(doc) -> list:
     return tips
 
 
+def hide_source_meshes(doc) -> list:
+    """The imported source meshes of ``doc`` that were hidden now: every visible ``Mesh::Feature`` is hidden
+    once the document holds at least one visible solid tip (the rebuilt body is the deliverable, the mesh was
+    its trace-over source — the enclosure kit hides its reference the same way). W-2: the CALLER only invokes
+    this after a verified outcome. The mesh object itself is never deleted. GUI thread only."""
+    if not visible_tips(doc):
+        return []
+    hidden = []
+    for obj in geometry_objects(doc):
+        if getattr(obj, "TypeId", "") != "Mesh::Feature" or not getattr(obj, "Visibility", True):
+            continue
+        try:
+            obj.Visibility = False
+        except Exception:  # noqa: BLE001 - a headless object may have no visibility
+            continue
+        hidden.append(obj.Name)
+    return hidden
+
+
+def show_source_meshes(doc, names: "list[str]") -> list:
+    """W-2: make ``names`` visible again (an outcome that lost verification must not
+    keep the scan hidden). Returns the names actually shown. GUI thread only."""
+    shown = []
+    by_name = {o.Name: o for o in doc.Objects}
+    for name in names or []:
+        obj = by_name.get(str(name))
+        if obj is None or getattr(obj, "Visibility", True):
+            continue
+        try:
+            obj.Visibility = True
+            shown.append(obj.Name)
+        except Exception:  # noqa: BLE001
+            continue
+    return shown
+
+
 def object_names(doc) -> tuple[list[str], list[str]]:
     """``(geometry-or-container names, every object name)`` of ``doc`` (the checkpoint sidecar's fields)."""
     primary = [o.Name for o in doc.Objects if is_container(o) or is_geometry(o)]
@@ -298,6 +334,24 @@ def _sample_image(path: str, columns: int = 64, rows: int = 48):
         return None
 
 
+def _dump_blank_diagnostics(abs_path: str, attempt: int, note: str, size: str) -> None:
+    """Phase 8 instrumentation: keep the failing frame + facts (attempt, note, viewport) next to
+    the target, mirrored into OSCAR_SNAPSHOT_DEBUG_DIR when set (CI uploads that directory as
+    an artifact). Pure best-effort: diagnostics must never break the capture."""
+    import json
+    import shutil
+    try:
+        debug = os.environ.get("OSCAR_SNAPSHOT_DEBUG_DIR") or os.path.dirname(abs_path)
+        os.makedirs(debug, exist_ok=True)
+        stem = os.path.splitext(os.path.basename(abs_path))[0]
+        shutil.copyfile(abs_path, os.path.join(debug, stem + ".blank" + str(attempt) + ".png"))
+        with open(os.path.join(debug, stem + ".blank.json"), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"attempt": attempt, "note": note, "viewport": size,
+                                 "path": abs_path}) + chr(10))
+    except Exception:
+        pass
+
+
 def capture_snapshot(doc_name: str, abs_path: str, width: int, height: int) -> tuple[bool, str]:
     """The default ``Project`` snapshot function (GUI thread only): isometric capture of ``doc_name`` at
     ``width x height`` into ``abs_path`` through ``cad.views.capture``, which restores the user's camera.
@@ -319,28 +373,54 @@ def capture_snapshot(doc_name: str, abs_path: str, width: int, height: int) -> t
         from .cad import views
     except Exception as e:  # noqa: BLE001
         return False, f"no 3D view ({type(e).__name__})"
-    checked = getattr(views, "capture_checked", None)
-    if checked is not None:   # cad.views already does the blank-frame test + retry and says WHY it failed
+    import time
+
+    def _once() -> tuple[bool, str]:
+        checked = getattr(views, "capture_checked", None)
+        if checked is not None:   # cad.views already does the blank-frame test + retry and says WHY
+            try:
+                ok, reason = checked(abs_path, "Isometric", width, height, None, doc_name)
+            except Exception as e:  # noqa: BLE001
+                return False, f"capture failed: {type(e).__name__}: {e}"
+            return (True, "") if ok else (False, reason or "no 3D view available")
         try:
-            ok, reason = checked(abs_path, "Isometric", width, height, None, doc_name)
-        except Exception as e:  # noqa: BLE001
-            return False, f"capture failed: {type(e).__name__}: {e}"
-        return (True, "") if ok else (False, reason or "no 3D view available")
-    try:
-        if not views.capture(abs_path, "Isometric", width, height, None, doc_name):
-            return False, "no 3D view available"
-        grid = _sample_image(abs_path)
-        if grid is not None and is_blank_grid(grid):
-            views.fit_view()
-            Gui.updateGui()
             if not views.capture(abs_path, "Isometric", width, height, None, doc_name):
                 return False, "no 3D view available"
             grid = _sample_image(abs_path)
             if grid is not None and is_blank_grid(grid):
-                return False, "blank frame"
-    except Exception as e:  # noqa: BLE001
-        return False, f"capture failed: {type(e).__name__}: {e}"
-    return True, ""
+                views.fit_view()
+                Gui.updateGui()
+                if not views.capture(abs_path, "Isometric", width, height, None, doc_name):
+                    return False, "no 3D view available"
+                grid = _sample_image(abs_path)
+                if grid is not None and is_blank_grid(grid):
+                    return False, "blank frame"
+        except Exception as e:  # noqa: BLE001
+            return False, f"capture failed: {type(e).__name__}: {e}"
+        return True, ""
+
+    # Phase 8: xvfb renders can legitimately need event-loop spins before the first presented
+    # frame; poll BOUNDED (OSCAR_SNAPSHOT_ATTEMPTS, default 6) instead of failing on the first
+    # blank, dump every blank attempt as evidence, and still fail honestly when the viewport
+    # stays genuinely blank. Structural reasons (no view / capture errors) are not retried.
+    attempts = max(1, int(os.environ.get("OSCAR_SNAPSHOT_ATTEMPTS", "6")))
+    last = ""
+    for attempt in range(1, attempts + 1):
+        ok, reason = _once()
+        if ok:
+            return True, ""
+        last = reason
+        if "blank" not in reason:
+            return False, reason
+        _dump_blank_diagnostics(abs_path, attempt, reason, str(width) + "x" + str(height))
+        try:
+            from PySide import QtWidgets
+            QtWidgets.QApplication.processEvents()
+            time.sleep(0.25)
+            QtWidgets.QApplication.processEvents()
+        except Exception:
+            time.sleep(0.25)
+    return False, last or "blank frame"
 
 
 # ---------------------------------------------------------------------------

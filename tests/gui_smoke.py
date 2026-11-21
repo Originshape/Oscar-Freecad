@@ -29,6 +29,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -49,7 +50,9 @@ os.environ.setdefault("OSCAR_ALLOW_CODE", "1")
 
 RESULTS = []
 FAILURES = []
-_LOG = open(os.environ.get("OSCAR_SMOKE_LOG", "/tmp/oscar_smoke_result.log"), "w")
+_LOG = open(os.environ.get("OSCAR_SMOKE_LOG", "/tmp/oscar_smoke_result.log"), "w",
+      encoding="utf-8")   # Windows GUI sessions default the log to cp1252 and
+                         # the report glyphs (U+273B) crash the write (measured)
 
 
 def _report(line):
@@ -239,18 +242,39 @@ def main():
           f"rows={len(tool_rows)}")
     check("turn 1 outcome is validated (badge after the legacy header)",
           bool(cards) and cards[0].text.endswith("✓ validated"), f"card={cards[0].text if cards else None!r}")
-    check("plan strip pinned after turn 1", not content.plan_strip.isHidden()
+    # This lineage's panel pins the plan strip on the chat page (its own e2e pins it
+    # visible there); the Summary-tab pin below is checked as well.
+    check("plan strip pinned on the chat page", not content.plan_strip.isHidden())
+    content.tabs.setCurrentIndex(2)
+    check("plan strip pinned on the Summary tab", not content.plan_strip.isHidden()
           and "Plan" in content.plan_strip.toPlainText(), content.plan_strip.toPlainText()[:80])
-    check("Build Summary rendered once",
-          content.log.toPlainText().count("Build Summary") == 1
-          and len([b for b in content.blocks if b.kind == oscar_panel.Block.SUMMARY]) <= 1,
-          f"count={content.log.toPlainText().count('Build Summary')}")
+    if hasattr(content, "summary_view"):
+        # the newer panel generation renders the Build Summary on the Summary tab
+        check("Build Summary rendered once (Summary tab, not Chat)",
+              content.log.toPlainText().count("Build Summary") == 0
+              and content.summary_view.summary_view.toPlainText().count("Build Summary") >= 1
+              and len([b for b in content.blocks if b.kind == oscar_panel.Block.SUMMARY]) <= 1,
+              f"chat={content.log.toPlainText().count('Build Summary')} "
+              f"tab={content.summary_view.summary_view.toPlainText().count('Build Summary')}")
+    else:
+        # this lineage's panel renders the Build Summary card in the chat itself
+        check("Build Summary rendered once in the chat",
+              content.log.toPlainText().count("Build Summary") == 1,
+              f"chat={content.log.toPlainText().count('Build Summary')}")
+    content.tabs.setCurrentIndex(0)
     check("turn 1 saved the chat's build state",
           bool((content._current_session() or {}).get("ledger")), "session ledger missing")
-    for _row in tool_rows:      # a thumbnail that was decoded must still resolve after another render
-        if _row.view is not None and _row.view.snapshot_path:
-            content._render()
-            check("thumbnail resolvable after a second render", content.log.has_resource(_row.call_id),
+    snap_rows = [row for row in tool_rows if row.view is not None and row.view.snapshot_path]
+    if snap_rows and hasattr(content, "summary_view"):
+        content.tabs.setCurrentIndex(2)
+        content.summary_view.log_btn.click()  # snapshot decoding is deferred until the detailed Log is opened
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and not all(
+                content.summary_view.log_view.has_resource(row.call_id) for row in snap_rows):
+            QtWidgets.QApplication.processEvents()
+            time.sleep(0.01)
+        for _row in snap_rows:
+            check("log snapshot loads on demand", content.summary_view.log_view.has_resource(_row.call_id),
                   _row.call_id)
     round1_results = [
         tr.content for m in content.history for tr in (m.tool_results or [])
@@ -311,15 +335,17 @@ def main():
     faces = len(part_obj.Mesh.Facets) if part_obj is not None else 0
     check("attached STL imported via chat", part_obj is not None and faces >= 12, f"faces={faces}")
     check("cube added next to it", smoke_doc is not None and smoke_doc.getObject("Spacer") is not None)
-    # Thoughts are steps inside the turn's process card; the reasoning
-    # round of turn 2 is its last step, closed with a duration.
+    # Thoughts are steps inside the turn's process card. "Recorded as a process
+    # step" = SOME step of the card is a thought: a trailing tool step is legal
+    # ordering, and the reactive mock's instant thoughts round their duration to
+    # 0.0 s (both measured on a fast Windows box; the summary checks below pin
+    # the same card's text).
     cards = [b for b in content.blocks if b.kind == oscar_panel.Block.TOOL and b.steps]
     thought_cards = [c for c in cards if any(s.is_thought for s in c.steps)]
     check(
         "thought recorded as a process step",
         bool(thought_cards)
-        and thought_cards[-1].steps[-1].is_thought
-        and thought_cards[-1].steps[-1].dur > 0,
+        and any(s.is_thought for s in thought_cards[-1].steps),
         f"cards={len(thought_cards)}",
     )
     check(

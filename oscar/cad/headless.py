@@ -343,12 +343,12 @@ def _remove(path: str) -> None:
 def _is_crash(returncode: int) -> bool:
     """A native crash: a negative return code (killed by a signal, POSIX) or an NTSTATUS error code (Windows,
     ``0xC0000005`` = access violation)."""
-    return returncode < 0 or returncode >= 0xC0000000
+    return returncode < 0 or returncode >= 0xC0000000 or (os.name != "nt" and 128 < returncode < 256)
 
 
 def _signal_text(returncode: int) -> str:
-    if returncode < 0:
-        number = -returncode
+    if returncode < 0 or (os.name != "nt" and 128 < returncode < 256):
+        number = -returncode if returncode < 0 else returncode - 128
         try:
             return f"signal {number} ({signal.Signals(number).name})"
         except ValueError:

@@ -15,10 +15,23 @@ plan, restore card), ``panel_turn`` what the worker's signals do to the screen
 fallback), ``panel_rewind`` the per-step rewind and ``panel_follow`` follow-the-build;
 this module is the widget itself and re-exports their public names.
 
+Shell (2026-11-16 redesign): one compact header row (logo, chat selector, new /
+rename / delete chat, project folder, account badge, overflow menu, settings) over a
+QTabWidget with exactly three pages — Chat (transcript, pinned plan strip, heartbeat,
+question bar, composer), Parameters and Logs. The two side pages mount their own
+modules defensively (``panel_tabs.make_params_tab`` / ``make_timeline_tab``:
+``panel_params.ParamsTab`` / ``panel_timeline.TimelineTab``, with built-in fallbacks so a
+missing module never crashes); the chat page mounts ``panel_questions.QuestionsBar``
+below the transcript the same way (``_mount_questions_bar``). There is no Summary page.
+
 Widgets located by object name (GUI tests): ``oscarLog``, ``oscarPlanStrip``,
-``oscarArtifactsStrip``, ``oscarHeartbeat``, ``oscarStopButton``,
+``oscarArtifactsStrip``, ``oscarHeartbeat``, ``oscarStopButton``, ``oscarPauseButton``,
 ``oscarActNowButton``, ``oscarMenuButton`` (header menu with the ``oscarFollowAction`` toggle),
-``oscarAccountBadge`` (the OriginShape account badge, menu ``oscarAccountMenu``).
+``oscarAccountBadge`` (the OriginShape account badge, menu ``oscarAccountMenu``);
+header buttons ``oscarLogoLabel``, ``oscarChatSelector``, ``oscarNewChatButton``,
+``oscarRenameChatButton``, ``oscarDeleteChatButton``, ``oscarFolderButton``,
+``oscarSettingsButton``; the composer's ``oscarComposer`` / ``oscarSendButton`` /
+``oscarCredits`` and the tabs widget ``oscarTabs``.
 
 The OriginShape account: the badge before ⚙ reads *Sign in* / *42 credits* / *0 credits* (warning colour) /
 *Waitlist* and carries the account menu; it shows for the account profile or a sign-in. Its state comes from the
@@ -52,6 +65,7 @@ from PySide import QtCore, QtGui, QtWidgets
 from . import __version__
 from . import attachments as _attach
 from . import consent_gui, panel_chats, panel_markup, paths
+from . import panel_theme as _theme
 from . import params as _params
 from . import settings_sync as _settings_sync
 from . import settings_ui
@@ -62,7 +76,8 @@ from .panel_blocks import (  # noqa: F401 - re-exported: tests and gui_smoke imp
     _BLOCK_SEQ, _DETAIL_LIMIT, Block, LogBrowser, Step, ThumbCache, _accent, _font_size, _fg, _muted, _text_color)
 from .panel_follow import FollowMixin
 from .panel_render import (  # noqa: F401 - md_to_html stays importable from oscar.panel
-    classify_file_link, md_to_html, TurnView, account_badge, account_card, account_menu, on_trial)
+    _account_snapshot, account_balance, classify_file_link, md_to_html, TurnView, account_badge,
+    account_card, account_menu, on_trial)
 from .panel_revert import RevertMixin
 from .panel_rewind import RewindMixin
 from .panel_session import WELCOME, SessionMixin  # noqa: F401 - WELCOME stays importable from oscar.panel
@@ -147,6 +162,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         self._init_turn_state()  # TurnView, plan / artifacts strips, thumbnails (panel_turn)
         self._frag_cache: dict[int, tuple[tuple, str]] = {}  # bid -> (signature, html) of settled blocks
         self._frag_style = ("", "")
+        self._rendered_chat_items: list[tuple[int, tuple, str, int]] = []
         # Scroll bookkeeping across setHtml (Qt lays long documents out lazily, so the scroll range
         # keeps growing for a few ms after setHtml): see _render / _on_range_changed.
         self._scroll_mode = ""      # "" | "follow" (stay at the bottom) | "hold" (return to _scroll_target)
@@ -164,6 +180,9 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         self._orphan_notes: list[str] = []
 
         self._build_ui()
+        self._init_tabs()          # the Chat / Parameters / Summary pages live in the tab shell
+        self._register_question_surface()
+        self._register_ask_surface()
         self._register_netguard_hook()
         self._register_quit_hook()
         self._init_account()
@@ -221,6 +240,24 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
     def _shutdown(self) -> None:
         """The application is quitting (``aboutToQuit``): stop connect mode, ask the running turn to stop and give its
         thread a few seconds to end (it polls its stop flag between provider chunks and tool calls). Never raises."""
+        try:   # stop being the question surface so nothing waits on a dying panel
+            from . import netguard as _netguard
+
+            surface = getattr(_netguard, "panel_surface", None)
+            if surface is not None and getattr(surface, "__self__", None) is self:
+                _netguard.panel_surface = None
+        except Exception:  # noqa: BLE001
+            pass
+        try:   # release every ask_user waiter and stop being its surface
+            from . import askuser as _askuser
+            from . import tools_ask as _tools_ask
+
+            surface = getattr(_tools_ask, "surface", None)
+            if surface is not None and getattr(surface, "__self__", None) is self:
+                _tools_ask.surface = None
+            _askuser.REGISTRY.shutdown()
+        except Exception:  # noqa: BLE001
+            pass
         workspace = getattr(self, "_workspace", None)
         if workspace is not None:
             try:
@@ -280,44 +317,65 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(4)
 
-        # Header: title + settings (the model picker lives at the input)
+        # Header (shell redesign): one compact row — logo, chat selector, new / rename /
+        # delete chat, project folder, account badge, overflow menu, settings. The ⋯ menu
+        # keeps every historical action (clear / search / exports …); the hidden buttons
+        # stay as attributes so tests and muscle memory keep working.
         header = QtWidgets.QHBoxLayout()
-        title = QtWidgets.QLabel("Oscar")
-        title.setStyleSheet("font-weight:bold;")
-        header.addWidget(title)
-        subtitle = QtWidgets.QLabel("copilot")
-        subtitle.setStyleSheet(f"color:{_muted()};font-size:small;padding-right:6px;")
-        subtitle.setTextFormat(QtCore.Qt.RichText)    # "copilot", or a link when a newer Oscar is out
-        subtitle.setTextInteractionFlags(QtCore.Qt.LinksAccessibleByMouse)
-        subtitle.linkActivated.connect(lambda _link: self._on_account_action("download"))
-        header.addWidget(subtitle)
-        self.subtitle = subtitle          # hidden while the account badge shows: the 280 px dock has no room for both
-        header.addStretch(0)
-
-        # Task chats: switcher + new + clear (each task keeps its own context)
+        header.setSpacing(3)
+        self.subtitle = QtWidgets.QLabel("")   # the "Oscar x.y is out" link — shown only when it applies
+        self.subtitle.setTextFormat(QtCore.Qt.RichText)
+        self.subtitle.setTextInteractionFlags(QtCore.Qt.LinksAccessibleByMouse)
+        self.subtitle.linkActivated.connect(lambda _link: self._on_account_action("download"))
+        self.subtitle.hide()
+        logo = QtGui.QIcon(paths.icon("Oscar.svg"))
+        logo_pixmap = logo.pixmap(18, 18) if not logo.isNull() else None
+        self.logo_label = QtWidgets.QLabel()
+        self.logo_label.setObjectName("oscarLogoLabel")
+        if logo_pixmap is not None and not logo_pixmap.isNull():
+            self.logo_label.setPixmap(logo_pixmap)
+        else:   # no SVG icon plugin (headless): the compact wordmark stands in
+            self.logo_label.setText("Oscar")
+        self.logo_label.setToolTip(f"Oscar {__version__} — the FreeCAD building copilot")
+        header.addWidget(self.logo_label)
         self.chat_combo = QtWidgets.QComboBox()
+        self.chat_combo.setObjectName("oscarChatSelector")
         self.chat_combo.setMinimumWidth(90)
         self.chat_combo.setToolTip("Task chats — switch between separate "
                                    "conversations")
         self.chat_combo.activated.connect(self._on_chat_picked)
         header.addWidget(self.chat_combo, 1)
-        new_chat_btn = QtWidgets.QToolButton()
-        new_chat_btn.setText("＋")
-        new_chat_btn.setToolTip("New chat (fresh task context)")
-        new_chat_btn.clicked.connect(self._new_chat)
-        header.addWidget(new_chat_btn)
+        self.new_chat_btn = QtWidgets.QToolButton()
+        self.new_chat_btn.setObjectName("oscarNewChatButton")
+        self.new_chat_btn.setText("＋")
+        self.new_chat_btn.setToolTip("New chat (fresh task context)")
+        self.new_chat_btn.clicked.connect(self._new_chat)
+        header.addWidget(self.new_chat_btn)
+        self.rename_chat_btn = QtWidgets.QToolButton()
+        self.rename_chat_btn.setObjectName("oscarRenameChatButton")
+        self.rename_chat_btn.setText("✎")
+        self.rename_chat_btn.setToolTip("Rename this chat…")
+        self.rename_chat_btn.clicked.connect(lambda: panel_chats.rename(self))
+        header.addWidget(self.rename_chat_btn)
         clear_chat_btn = QtWidgets.QToolButton()
         clear_chat_btn.setText("🗑")
-        clear_chat_btn.setToolTip("Clear this chat's messages (the chat "
-                                  "itself stays)")
+        clear_chat_btn.setToolTip("Clear this chat's messages (the chat itself stays)")
         clear_chat_btn.clicked.connect(self._clear_chat)
-        header.addWidget(clear_chat_btn)
-        del_chat_btn = QtWidgets.QToolButton()
-        del_chat_btn.setText("✕")
-        del_chat_btn.setToolTip("Delete this chat")
-        del_chat_btn.clicked.connect(self._delete_chat)
-        header.addWidget(del_chat_btn)
-        self.del_chat_btn = del_chat_btn
+        clear_chat_btn.hide()
+        self.clear_chat_btn = clear_chat_btn
+        self.del_chat_btn = QtWidgets.QToolButton()
+        self.del_chat_btn.setObjectName("oscarDeleteChatButton")
+        self.del_chat_btn.setText("🗑")
+        self.del_chat_btn.setToolTip("Delete this chat")
+        self.del_chat_btn.clicked.connect(self._delete_chat)
+        header.addWidget(self.del_chat_btn)
+        self.folder_btn = QtWidgets.QToolButton()
+        self.folder_btn.setObjectName("oscarFolderButton")
+        self.folder_btn.setText("📁")
+        self.folder_btn.setToolTip("Open the project folder of this chat")
+        self.folder_btn.clicked.connect(
+            lambda: self._on_anchor_text("oscar://artifact/open-dir"))
+        header.addWidget(self.folder_btn)
 
         # The OriginShape account: "Sign in" / "42 credits" / "0 credits" / "Waitlist", with the account menu
         self.account_btn = QtWidgets.QToolButton()
@@ -330,11 +388,6 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         self.account_btn.hide()           # shown for the account profile or a sign-in (_apply_account_state)
         header.addWidget(self.account_btn)
 
-        settings_btn = QtWidgets.QToolButton()
-        settings_btn.setText("⚙")
-        settings_btn.setToolTip("Settings (OriginShape account, providers, models, API keys)")
-        settings_btn.clicked.connect(lambda _checked=False: self._open_settings())
-        header.addWidget(settings_btn)
         menu_btn = QtWidgets.QToolButton()
         menu_btn.setObjectName("oscarMenuButton")
         menu_btn.setText("⋯")
@@ -357,13 +410,46 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         search_action.setObjectName("oscarSearchChatsAction")
         search_action.setToolTip("Find a chat by its title, what you asked or what Oscar answered")
         search_action.triggered.connect(lambda _checked=False: panel_chats.search(self))
+        self.header_menu.addSeparator()
+        self.header_menu.addAction("Clear this chat…").triggered.connect(
+            lambda _checked=False: self._clear_chat())
+        self.header_menu.addAction("Delete this chat…").triggered.connect(
+            lambda _checked=False: self._delete_chat())
+        self.header_menu.addSeparator()
+        self.header_menu.addAction("Open project folder").triggered.connect(
+            lambda _checked=False: self._on_anchor_text("oscar://artifact/open-dir"))
+        self.header_menu.addAction("Exports folder").triggered.connect(
+            lambda _checked=False: self._on_anchor_text("oscar://artifact/open-exports"))
+        self.header_menu.addSeparator()
+        self.header_menu.addAction("Settings…").triggered.connect(
+            lambda _checked=False: self._open_settings())
         menu_btn.setMenu(self.header_menu)
         header.addWidget(menu_btn)
+        self.settings_btn = QtWidgets.QToolButton()
+        self.settings_btn.setObjectName("oscarSettingsButton")
+        self.settings_btn.setText("⚙")
+        self.settings_btn.setToolTip("Settings — profiles, account, permissions")
+        self.settings_btn.clicked.connect(lambda: self._open_settings())
+        header.addWidget(self.settings_btn)
         root.addLayout(header)
 
-        # Pinned plan strip (above the log, never auto-collapses), chat log, artifacts strip, heartbeat row
+        # The flow widgets (plan strip, artifacts strip, heartbeat row) are built once;
+        # the plan strip is PINNED at the top of the Chat page (the only page that shows
+        # it — the Summary page is gone), then the tab shell with exactly one visible
+        # page (Chat / Parameters / Logs).
         self._build_flow_widgets()
-        root.addWidget(self.plan_strip)
+        self.tabs = QtWidgets.QTabWidget()
+        self.tabs.setObjectName("oscarTabs")
+        self.tabs.setDocumentMode(True)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+        chat_page = QtWidgets.QWidget()
+        chat_layout = QtWidgets.QVBoxLayout(chat_page)
+        chat_layout.setContentsMargins(0, 4, 0, 0)
+        chat_layout.setSpacing(4)
+        self._chat_page = chat_page
+
+        # Pinned plan strip, then the transcript
+        chat_layout.addWidget(self.plan_strip)
 
         # Chat log
         self.log = LogBrowser()
@@ -372,9 +458,12 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         self.log.setOpenExternalLinks(False)
         self.log.anchorClicked.connect(self._on_anchor)
         self.log.verticalScrollBar().rangeChanged.connect(self._on_range_changed)
-        root.addWidget(self.log, 1)
-        root.addWidget(self.artifacts_strip)
-        root.addWidget(self.heartbeat_row)
+        chat_layout.addWidget(self.log, 1)
+        chat_layout.addWidget(self.artifacts_strip)
+        chat_layout.addWidget(self.heartbeat_row)
+        # The chat question bar (seam: panel_questions.QuestionsBar, below the transcript,
+        # above the composer; a hidden placeholder while that module is absent)
+        chat_layout.addWidget(self._mount_questions_bar())
 
         # Pending attachments (chips; hidden while empty)
         self.attach_bar = QtWidgets.QWidget()
@@ -382,27 +471,28 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         attach_layout.setContentsMargins(0, 0, 0, 0)
         attach_layout.setSpacing(4)
         self.attach_bar.hide()
-        root.addWidget(self.attach_bar)
+        chat_layout.addWidget(self.attach_bar)
 
-        # Input area: one rounded container (z.ai-style) holding the text
-        # edit and the controls row — attach, model picker, key hint.
+        # Input area: the composer (UI redesign) — one recessed frame that lights its border
+        # on focus, holding the auto-expanding text edit and the controls row.
         input_frame = QtWidgets.QFrame()
-        input_frame.setStyleSheet(
-            "QFrame { background: rgba(128,128,128,0.08);"
-            " border: 1px solid rgba(128,128,128,0.25); border-radius: 14px; }"
-        )
+        input_frame.setObjectName("oscarComposer")
         input_box = QtWidgets.QVBoxLayout(input_frame)
         input_box.setContentsMargins(10, 6, 10, 6)
         input_box.setSpacing(4)
+        self.input_frame = input_frame
 
         self.input = QtWidgets.QPlainTextEdit()
         self.input.setPlaceholderText(
             "Ask Oscar… (Enter to send · Shift+Enter for a new line · Esc stops)"
         )
-        self.input.setFixedHeight(64)
+        self.input.setFixedHeight(48)
+        self.input.setMinimumHeight(48)
+        self.input.setMaximumHeight(140)
+        self.input.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Minimum)
         self.input.setFrameShape(QtWidgets.QFrame.NoFrame)
-        self.input.setStyleSheet("QPlainTextEdit { background: transparent; border: none; }")
         self.input.installEventFilter(self)
+        self.input.textChanged.connect(self._grow_input)
         input_box.addWidget(self.input)
 
         controls = QtWidgets.QHBoxLayout()
@@ -444,36 +534,42 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         self.model_label = QtWidgets.QLabel("")
         self.model_label.setStyleSheet(f"color:{_muted()};font-size:small;")
         controls.addWidget(self.model_label)
+        # Credit balance of the signed-in account (display only — the badge and Settings
+        # keep the full account surface). Hidden when there is nothing to show.
+        self.credits_label = QtWidgets.QLabel("")
+        self.credits_label.setObjectName("oscarCredits")
+        self.credits_label.setStyleSheet(f"color:{_muted()};font-size:small;"
+                                         f"font-family:Consolas,monospace;")
+        self.credits_label.hide()
+        controls.addWidget(self.credits_label)
 
-        # Stop: visible only while a turn runs; same
-        # effect as Esc.
+        # The trailing Send/Stop toggle: one slot, two widgets. Idle → ➤ Send; while a
+        # turn runs → ■ Stop (same effect as Esc). Pause/Resume lives in the heartbeat row.
         self.stop_btn = QtWidgets.QPushButton("■")
         self.stop_btn.setObjectName("oscarStopButton")
-        self.stop_btn.setFixedWidth(34)
+        self.stop_btn.setFixedWidth(40)
         self.stop_btn.setToolTip("Stop the running turn (Esc)")
         self.stop_btn.clicked.connect(self._stop)
-        self.stop_btn.setStyleSheet(
-            "QPushButton { background:#e06c5a; color:white; border:none;"
-            " border-radius:8px; padding:4px 0; font-weight:600; }"
-        )
         self.stop_btn.hide()
         controls.addWidget(self.stop_btn)
 
-        # Enter sends; the trailing button mirrors the flow state
-        # (send -> pause -> resume). Esc cancels a running turn.
         self.send_btn = QtWidgets.QPushButton("➤")
-        self.send_btn.setFixedWidth(42)
+        self.send_btn.setObjectName("oscarSendButton")
+        self.send_btn.setFixedWidth(40)
         self.send_btn.setToolTip("Send (Enter)")
         self.send_btn.clicked.connect(self._on_flow_button)
-        self.send_btn.setStyleSheet(
-            f"QPushButton {{ background:{_accent()}; color:white; border:none;"
-            f" border-radius:8px; padding:4px 0; font-weight:600; }}"
-            f" QPushButton:disabled {{ background:palette(mid);"
-            f" color:palette(window-text); }}"
-        )
         controls.addWidget(self.send_btn)
         input_box.addLayout(controls)
-        root.addWidget(input_frame)
+        chat_layout.addWidget(input_frame)
+
+        # Parameters and Logs pages (shell redesign) — _init_tabs mounts them through the
+        # seam factories (panel_params / panel_timeline, with built-in fallbacks)
+        self._params_page = QtWidgets.QWidget()
+        self._logs_page = QtWidgets.QWidget()
+        self.tabs.addTab(chat_page, "Chat")
+        self.tabs.addTab(self._params_page, "Parameters")
+        self.tabs.addTab(self._logs_page, "Logs")
+        root.addWidget(self.tabs, 1)
 
         # Esc stops a running turn from ANYWHERE in the panel (the input's own
         # key filter only saw it while the input had focus). Enabled only
@@ -610,11 +706,20 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         self.account_btn.setStyleSheet("QToolButton { color: #d9902b; font-weight: 600; }" if tone == "warn" else "")
         self._rebuild_account_menu(state)
         self.account_btn.setVisible(show)
-        self.subtitle.setVisible(not show)
+        # The composer's compact credit chip (display only — the badge/menu hold the real account)
+        snapshot = _account_snapshot(state)
+        balance, held = account_balance(snapshot)
+        if show and balance > 0:
+            self.credits_label.setText(f"{balance:,.2f} cr")
+            self.credits_label.setToolTip("Credit balance" + (f" ({held:,.2f} held by running requests)" if held else ""))
+            self.credits_label.show()
+        else:
+            self.credits_label.hide()
         # Without the badge (your own provider), a newer Oscar shows here instead: a link to the download page.
         newer = state.get("update") in ("available", "required") and state.get("latest_version")
         self.subtitle.setText(f"<a href='oscar://account/download'>Oscar {html.escape(str(newer))} is out</a>"
                               if newer else "copilot")
+        self.subtitle.setVisible(not show)
         self.subtitle.setToolTip(f"A newer Oscar is available (this is {__version__}). Click to get it."
                                  if newer else "")
         changed = self._sync_onboarding(profile, state)
@@ -1087,6 +1192,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
             elif blocker == "consent":   # the user is here and wants to chat: the prompt, at once
                 QtCore.QTimer.singleShot(0, lambda: consent_gui.open_dialog(self))
             return
+        self._settle_typed_clarification(text, pending)
         typed = text
 
         if workspace is None:
@@ -1167,6 +1273,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
             block.revert_enabled = False
         self._turn_seq += 1
         self._turn_view = TurnView()
+        self._turn_asks = []
         self._steps_by_call = {}
         self._turn_outcome = ("", "")
         self._turn_request = text
@@ -1257,44 +1364,47 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
             self._set_status("stopping…")
 
     def _on_flow_button(self):
-        """The trailing button mirrors the flow: send / pause / resume."""
+        """The trailing Send button (idle only — while a turn runs the Stop square takes
+        its place; pause/resume lives in the heartbeat row)."""
         if self.worker is None:
             self._send()
+
+    def _on_pause_button(self):
+        """The heartbeat row's pause/resume toggle: pause after the current step, resume a
+        paused turn (the same flow ``Esc``'s stop releases before stopping)."""
+        if self.worker is None:
             return
         if self._paused:
             self._paused = False
             self.worker.resume()
-            self.send_btn.setText("⏸")
-            self.send_btn.setToolTip("Pause after the current step (Esc cancels)")
             self._set_status("Thinking")
         else:
             self.worker.pause()
-            self.send_btn.setText("…")
-            self.send_btn.setToolTip("Pausing after the current step")
+            self._set_status("Pausing after the current step…")
 
     def _on_flow_paused(self, paused: bool):
-        if paused:
-            self._paused = True
-            self.send_btn.setText("▶")
-            self.send_btn.setToolTip("Resume")
-            self._set_status("⏸ Paused")
-        else:
-            self._paused = False
-            self.send_btn.setText("⏸")
-            self.send_btn.setToolTip("Pause after the current step (Esc cancels)")
-            self._set_status("Thinking")
+        self._paused = bool(paused)
+        self._update_heartbeat()
+        self._set_status("⏸ Paused" if paused else "Thinking")
 
     def _set_busy(self, busy: bool):
         self.profile_combo.setEnabled(not busy)
+        # the Send/Stop toggle: exactly one of the two trailing widgets is shown
         self.stop_btn.setVisible(bool(busy))
+        self.send_btn.setVisible(not busy)
         self._esc_shortcut.setEnabled(bool(busy))
-        if busy:
-            self.send_btn.setText("⏸")
-            self.send_btn.setToolTip("Pause after the current step (Esc cancels)")
-        else:
+        pulse = getattr(self, "activity_pulse", None)
+        if pulse is not None:
+            if busy:
+                if pulse.state() != QtCore.QAbstractAnimation.Running:
+                    pulse.start()
+            else:
+                pulse.stop()
+                effect = getattr(self, "activity_effect", None)
+                if effect is not None:
+                    effect.setOpacity(1.0)
+        if not busy:
             self._paused = False
-            self.send_btn.setText("➤")
-            self.send_btn.setToolTip("Send (Enter)")
 
     # -- turn status (Thinking… / Running tool… / live card timer) -----------
 
@@ -1303,6 +1413,10 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         narrates the steps, but only the status line can say WHY nothing moves (waiting for an approval,
         pausing, stopping), so it is never suppressed while a card exists."""
         self._status = text
+        if self.worker is not None:
+            refresh = getattr(self, "_update_heartbeat", None)
+            if callable(refresh):
+                refresh()
         if (text or self._turn_card is not None) and self.worker is not None:
             if not self._status_timer.isActive():
                 self._status_timer.start()
@@ -1379,8 +1493,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
                 self._scroll_mode = ""
 
     def _render(self):
-        """Rebuild the log. Scroll position: pinned to the bottom stays pinned; a user who scrolled up
-        keeps the exact position (``setHtml`` resets it to the top otherwise)."""
+        """Update only the changed transcript suffix; keep scroll position when the user scrolled up."""
         self._dirty = False
         bar = self.log.verticalScrollBar()
         value = bar.value()
@@ -1394,19 +1507,46 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         if style != self._frag_style:  # theme changed: cached colours are stale
             self._frag_cache.clear()
             self._frag_style = style
-        parts = [self._fragment(b) for b in self.blocks]
-        self._frag_cache = {b.bid: self._frag_cache[b.bid] for b in self.blocks if b.bid in self._frag_cache}
-        if self._status:
+        # Chat is the user-facing conversation. Process cards collapse into the turn header; the
+        # Build Summary stays in Chat as ONE card at the end of its turn — there is no Summary tab
+        # (redesign 2026-11-16) and no other page shows it, so hiding it here loses the model's
+        # report and its Continue link entirely.
+        visible = [b for b in self.blocks if (b.kind != Block.TOOL or not b.steps)]
+        items = [(b.bid, b.signature(), self._fragment(b)) for b in visible]
+        self._frag_cache = {b.bid: self._frag_cache[b.bid] for b in visible if b.bid in self._frag_cache}
+        if self._status and self.worker is None:
+            status = self._status
             dots = "." * self._status_dots
-            parts.append(
-                f"<div style='color:{_muted()};font-size:small;margin-top:6px;'>"
-                f"{html.escape(self._status)}{dots}</div>"
+            items.append(
+                (0, (status, self._status_dots),
+                 f"<div style='color:{_muted()};font-size:small;margin-top:6px;'>"
+                 f"{html.escape(status)}{dots}</div>")
             )
-        body = "<br>".join(parts)
         self._scroll_mode = ""
-        self.log.setHtml(
-            f"<html><body style='font-size:{_font_size()}pt;'>{body}</body></html>"
-        )
+        old = self._rendered_chat_items
+        prefix = 0
+        while (prefix < len(old) and prefix < len(items)
+               and old[prefix][0] == items[prefix][0]
+               and old[prefix][1] == items[prefix][1]
+               and old[prefix][2] == items[prefix][2]):
+            prefix += 1
+        cursor = QtGui.QTextCursor(self.log.document())
+        if prefix < len(old):
+            cursor.setPosition(old[prefix][3])
+            cursor.movePosition(QtGui.QTextCursor.End, QtGui.QTextCursor.KeepAnchor)
+            cursor.removeSelectedText()
+            updated = old[:prefix]
+        else:
+            cursor.movePosition(QtGui.QTextCursor.End)
+            updated = list(old)
+        for index in range(prefix, len(items)):
+            if updated or index:
+                cursor.insertHtml("<br>")
+            bid, signature, fragment = items[index]
+            start = cursor.position()
+            cursor.insertHtml(f"<span style='font-size:{_font_size()}pt;'>{fragment}</span>")
+            updated.append((bid, signature, fragment, start))
+        self._rendered_chat_items = updated
         self._register_thumbnails()   # the new document needs its images again (see panel_turn)
         if pinned:
             bar.setValue(bar.maximum())
@@ -1416,19 +1556,797 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
             self._scroll_mode = "hold"
             self._scroll_target = value
         self._scroll_set = bar.value()
+        self._refresh_side_views()   # the Summary/Log page, when visible, follows the transcript
 
     # -- events ---------------------------------------------------------------
 
     def eventFilter(self, obj, event):
-        if obj is self.input and event.type() == QtCore.QEvent.KeyPress:
-            if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
-                if not event.modifiers() & QtCore.Qt.ShiftModifier:
-                    self._send()
+        if obj is self.input:
+            if event.type() == QtCore.QEvent.KeyPress:
+                if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+                    # Enter (and Ctrl+Enter, the spec's composer shortcut) send; Shift+Enter is a newline
+                    if not event.modifiers() & QtCore.Qt.ShiftModifier:
+                        self._send()
+                        return True
+                if event.key() == QtCore.Qt.Key_Escape and self._busy():
+                    self._stop()
                     return True
-            if event.key() == QtCore.Qt.Key_Escape and self._busy():
-                self._stop()
-                return True
+            if event.type() == QtCore.QEvent.FocusIn:
+                self._composer_focus(True)
+            elif event.type() == QtCore.QEvent.FocusOut:
+                self._composer_focus(False)
         return super().eventFilter(obj, event)
+
+    # -- tabs, parameters, logs (shell redesign) ------------------------------
+
+    def _init_tabs(self) -> None:
+        """Mount the Parameters and Logs pages through the seam factories and apply the
+        theme. Runs after ``_build_ui``."""
+        from . import panel_tabs as _tabs
+
+        self.setProperty("oscarTheme", True)
+        self.setStyleSheet(_theme.panel_qss())
+        self._open_questions: dict[str, dict] = {}
+
+        params_layout = QtWidgets.QVBoxLayout(self._params_page)
+        params_layout.setContentsMargins(0, 6, 0, 0)
+        self.params_view = _tabs.make_params_tab(on_apply=self._apply_params)
+        try:
+            self.params_view.on_refresh = self._refresh_params   # the fallback view's refresh hook
+        except Exception:   # noqa: BLE001 - a seam tab that rejects the attribute keeps its own refresh
+            pass
+        params_layout.addWidget(self.params_view)
+
+        logs_layout = QtWidgets.QVBoxLayout(self._logs_page)
+        logs_layout.setContentsMargins(0, 6, 0, 0)
+        self.logs_view = _tabs.make_timeline_tab()
+        logs_layout.addWidget(self.logs_view)
+
+    def _on_tab_changed(self, index: int) -> None:
+        if index:   # a light side page: subtle fade, never the heavy chat document
+            _theme.fade_in(self.tabs.widget(index))
+        if index == 1:
+            self._refresh_params()
+        elif index == 2:
+            self._refresh_logs()
+
+    def _grow_input(self) -> None:
+        """Auto-expanding composer: one line up front, up to ~5 lines, then it scrolls."""
+        doc_height = self.input.document().size().height()
+        frame = self.input.frameWidth()
+        self.input.setFixedHeight(max(48, min(140, int(doc_height + frame + 12))))
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Becoming visible reflows the log (the tab shell's first show does it too) and the
+        # reflow's scrollbar jump would read as a user scroll, cancelling follow-the-bottom.
+        # Stay glued to the newest content — unless the user had deliberately scrolled up.
+        log = getattr(self, "log", None)
+        if log is None or getattr(self, "_scroll_mode", "") == "hold":
+            return
+        bar = log.verticalScrollBar()
+        bar.setValue(bar.maximum())
+        self._scroll_mode = "follow"
+        self._scroll_set = bar.value()
+
+    def _composer_focus(self, focused: bool) -> None:
+        frame = getattr(self, "input_frame", None)
+        if frame is None:
+            return
+        frame.setProperty("focused", bool(focused))
+        frame.style().unpolish(frame)
+        frame.style().polish(frame)
+
+    def _active_doc(self):
+        try:
+            doc = App.ActiveDocument
+        except Exception:   # noqa: BLE001 - headless test harnesses
+            doc = None
+        return doc
+
+    def _refresh_params(self) -> None:
+        """Re-read the active document's parameter sheet (GUI thread; on demand, never polling).
+
+        Two seam contracts exist: the built-in ``panel_tabs.ParamsView`` takes ``load(table)``,
+        the redesigned ``panel_params.ParamsTab`` takes ``refresh_from(table)``. Both are fed the
+        same ``project_gui.param_table`` output — the panel must not assume one of them."""
+        view = getattr(self, "params_view", None)
+        if view is None:
+            return
+        table = {"sheet": "", "rows": []}
+        doc = self._active_doc()
+        if doc is not None:
+            try:
+                from . import project_gui as _pgui
+
+                table = _pgui.param_table(doc)
+            except Exception as e:   # noqa: BLE001 - a read failure must not break the panel
+                self._log_panel_error("params_refresh", e)
+        setter = getattr(view, "load", None) or getattr(view, "refresh_from", None)
+        if callable(setter):
+            setter(table)
+
+    def _apply_params(self, edits: "list[dict]") -> dict:
+        """Apply (N) on the Parameters page: the real write path (one undo transaction, dependent
+        rebuild, rollback on failure), then the outcome is recorded in the chat."""
+        doc = self._active_doc()
+        if doc is None:
+            self._flash_status("No open document to apply parameters to.")
+            return {"ok": False, "text": "no document"}
+        try:
+            from .tools_kit_params import apply_parameter_edits
+
+            result = apply_parameter_edits(doc.Name, edits)
+        except Exception as e:   # noqa: BLE001 - the helper reports failures itself
+            self._log_panel_error("params_apply", e)
+            result = {"ok": False, "text": f"Apply failed: {type(e).__name__}: {e}"}
+        text = str(result.get("text") or ("Applied." if result.get("ok") else "Apply failed."))
+        self._append(Block.TOOL, ("⚙ " + text) if result.get("ok") else ("⚠ " + text))
+        self._dirty = True
+        self._render()
+        self._refresh_params()
+        return result
+
+    def _refresh_logs(self) -> None:
+        """The Logs page, fed through whichever seam the tab exposes.
+
+        ``panel_timeline.TimelineTab`` (the redesign) rebuilds itself from the chat's
+        ``Project`` step journal — the authoritative record with the snapshot paths, which is
+        what a *visual* timeline needs. The built-in fallback ``panel_tabs.LogsView`` takes the
+        panel's in-memory ``load_events(events, thumbs)`` instead. Neither is polled: this runs on
+        the tab switch and at the end of a turn, and the rebuild is skipped while the journal has
+        not changed (``build_timeline`` hashes neighbouring snapshots, so a no-op must not run at
+        streaming frequency)."""
+        view = getattr(self, "logs_view", None)
+        if view is None:
+            return
+        loader = getattr(view, "load_events", None)
+        if callable(loader):
+            loader(self._log_events(), getattr(self, "_thumbs", None))
+            return
+        refresh = getattr(view, "refresh_from", None)
+        if not callable(refresh):
+            return
+        project = self._project_of(self._current_session())
+        if project is None:
+            return
+        try:
+            records, _starts = project.read_steps()
+        except Exception as e:   # noqa: BLE001 - an unreadable journal shows the empty state
+            self._log_panel_error("logs_refresh", e)
+            return
+        signature = (str(getattr(project, "root", "") or ""), len(records),
+                     str((records[-1].to_line().get("ts") if records else "") or ""))
+        if signature == getattr(self, "_logs_signature", None):
+            return   # nothing new in the journal: keep the rendered rows
+        self._logs_signature = signature
+        refresh(project)
+
+    def _refresh_side_views(self) -> None:
+        tabs = getattr(self, "tabs", None)
+        if tabs is None:
+            return
+        if tabs.currentIndex() == 1:
+            self._refresh_params()
+        elif tabs.currentIndex() == 2:
+            self._refresh_logs()
+
+    def _log_lines(self) -> "list[str]":
+        """Execution events only, derived from the same recorded blocks and steps as the conversation."""
+        lines: list[str] = []
+        for block in self.blocks:
+            if block.kind == Block.ERROR:
+                detail = block.text.strip().splitlines()[0] if block.text.strip() else "Operation failed"
+                lines.append(f"FAILED  | {detail[:140]}")
+            elif block.kind == Block.QUESTION:
+                state = block.detail or "pending"
+                clarification = any(target.startswith("oscar://clarify/") for target, _ in block.actions)
+                if clarification and state == "superseded":
+                    continue
+                title = block.text.splitlines()[0][:90]
+                category = "User input" if clarification else "Approval"
+                mark = state.upper()
+                lines.append(f"{mark:7} | {category}: {title}"
+                             + (f" — {block.reason}" if block.reason else ""))
+            elif block.kind == Block.TOOL:
+                if not block.steps:
+                    if block.text.strip():
+                        lines.append(f"EVENT   | {block.text.strip().splitlines()[0][:140]}")
+                    continue
+                for step in block.steps:
+                    if step.is_thought or step.plain:
+                        continue
+                    skipped = bool(getattr(step.view, "skipped", False)) if step.view is not None else False
+                    mark = "SKIPPED" if skipped else (
+                        "RUNNING" if step.ok is None else ("SUCCESS" if step.ok else "FAILED"))
+                    label = step.summary or step.name or "Operation"
+                    duration = f" · {max(0.0, float(step.dur or 0.0)):.1f}s" if step.dur else ""
+                    started_at = float(getattr(getattr(step, "view", None), "started_at", 0.0) or 0.0)
+                    when = time.strftime("%H:%M:%S", time.localtime(started_at)) + " | " if started_at > 0 else ""
+                    lines.append(f"{when}{mark:7} | {step.name or 'operation'} · {label[:100]}{duration}")
+                    if step.detail.strip() and (not step.ok or "warn" in step.detail.lower()):
+                        lines.append(f"        | {step.detail.strip().splitlines()[0][:140]}")
+        return lines
+
+    def _log_events(self) -> list[dict]:
+        """Full execution records and the current chat's real workflow milestones."""
+        events: list[dict] = []
+        session = self._current_session()
+        ledger = session.get("ledger") if isinstance(session, dict) else None
+        if not isinstance(ledger, dict) and self._turn_view is not None:
+            ledger = self._turn_view.plan
+        steps = ledger.get("steps") if isinstance(ledger, dict) else None
+        if isinstance(steps, list) and steps:
+            events.append({"kind": "workflow", "title": "Workflow · " + str(ledger.get("intent") or "current task"),
+                           "steps": steps})
+        for block in self.blocks:
+            if block.kind == Block.ERROR:
+                events.append({"status": "FAILED", "tool": "Execution", "title": block.text.strip(),
+                               "error": block.text.strip()})
+            elif block.kind == Block.QUESTION:
+                events.append({"status": (block.detail or "pending").upper(), "tool": "User input",
+                               "title": block.text.splitlines()[0] if block.text else "Question",
+                               "result": block.reason})
+            elif block.kind == Block.TOOL:
+                if not block.steps:
+                    if block.text.strip():
+                        events.append({"status": "EVENT", "tool": "Oscar", "title": block.text.strip()})
+                    continue
+                for step_index, step in enumerate(block.steps):
+                    if step.is_thought or step.plain:
+                        continue
+                    view = step.view
+                    skipped = bool(getattr(view, "skipped", False)) if view is not None else False
+                    status = "SKIPPED" if skipped else (
+                        "RUNNING" if step.ok is None else ("SUCCESS" if step.ok else "FAILED"))
+                    started = float(getattr(view, "started_at", 0.0) or 0.0)
+                    timestamp = time.strftime("%H:%M:%S", time.localtime(started)) if started > 0 else ""
+                    delta = getattr(view, "delta", {}) if view is not None else {}
+                    delta_text = "; ".join(f"{key}: {', '.join(map(str, value))}"
+                                            for key, value in delta.items() if value)
+                    health = getattr(view, "health", None) if view is not None else None
+                    validation = str(health.get("line") or "") if isinstance(health, dict) else ""
+                    snapshot = str(getattr(view, "snapshot_path", "") or "") if view is not None else ""
+                    events.append({
+                        "status": status, "timestamp": timestamp, "tool": step.name,
+                        "title": step.summary, "duration": float(step.dur or 0.0),
+                        "input": (getattr(view, "args_summary", "") or getattr(view, "args_json", "")
+                                  or "" if view is not None else ""),
+                        "result": (getattr(view, "text", "") or step.detail or "" if view is not None else step.detail),
+                        "delta": delta_text, "validation": validation,
+                        "warning": str(health.get("warnings") or "") if isinstance(health, dict) and health.get("warnings") else "",
+                        "error": str(health.get("errors") or "") if isinstance(health, dict) and health.get("errors") else "",
+                        "snapshot": self._abs_snapshot(snapshot) if snapshot else "",
+                        "snapshot_key": str(getattr(view, "call_id", "") or step.call_id) if snapshot else "",
+                        "block_id": block.bid, "step_index": step_index,
+                    })
+        return events
+
+    # -- the in-chat question surface (netguard.panel_surface) -----------------
+
+    def _register_question_surface(self) -> None:
+        """Offer in-chat question cards; the modal dialog stays the fallback (netguard decides)."""
+        self._open_questions = getattr(self, "_open_questions", {})
+        try:
+            from . import netguard as _netguard
+
+            _netguard.panel_surface = self._question_surface
+        except Exception:   # noqa: BLE001
+            pass
+
+    def _question_append(self, text: str) -> Block:
+        """A QUESTION card goes to the RUNNING TURN's chat (its own context), or the shown
+        chat when nothing runs — the same isolation rule every turn write follows."""
+        blocks = self.blocks
+        turn_blocks = getattr(self, "_turn_blocks", None)
+        if getattr(self, "worker", None) is not None and turn_blocks is not None:
+            blocks = turn_blocks
+        block = Block(Block.QUESTION, text)
+        blocks.append(block)
+        return block
+
+    def _question_surface(self, info, choices, remaining_s, cancelled, take_remote, by_remote):
+        """``netguard.panel_surface``: render the question as a card and wait. Returns the clicked
+        ``Choice.key``, ``""`` (settled unanswered) or ``None`` (cannot show → modal dialog)."""
+        if self._current_session() is None:
+            return None
+        from PySide import QtCore as _qc
+
+        qid = str(info.get("id"))
+        title = str(info.get("title") or "Oscar needs your decision")
+        body = str(info.get("text") or "")
+        block = self._question_append(f"{title}\n{body}")
+        block.actions = [(f"oscar://answer/{qid}/{choice.key}", choice.label) for choice in choices]
+        block.key = qid
+        block.detail = "pending"
+        self._dirty = True
+        self._render()
+        # The bar under the transcript is the quick answer surface; the card above is the record.
+        self._show_question_bar(f"{title}\n{body}" if body else title,
+                                [choice.label for choice in (choices or [])], approve=True)
+        self._bar_question_qid = qid      # the bar now speaks for THIS question (answer routing)
+
+        loop = _qc.QEventLoop(self)
+        settled: list[str] = []
+
+        def settle(key: str) -> None:
+            if settled:
+                return
+            settled.append(key)
+            loop.quit()
+
+        self._open_questions[qid] = {"settle": settle, "block": block,
+                                     "choices": list(choices or [])}
+
+        def _expire() -> None:
+            settle("")
+
+        timer = _qc.QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(_expire)
+        timer.start(max(1, int(float(remaining_s) * 1000)))
+
+        def _poll() -> None:
+            if cancelled():
+                settle("")
+                return
+            remote_choice = take_remote()
+            if remote_choice is not None:
+                by_remote.append(True)
+                settle(remote_choice.key)
+
+        poller = _qc.QTimer(self)
+        poller.timeout.connect(_poll)
+        poller.start(200)
+        try:
+            loop.exec_()
+        finally:
+            timer.stop()
+            poller.stop()
+            self._open_questions.pop(qid, None)
+
+        key = settled[0] if settled else ""
+        self._settle_question(block, key, choices or [], cancelled(), int(float(remaining_s)))
+        return key or ""
+
+    def _deliver_question_answer(self, qid: str, key: str) -> None:
+        """Settle the open question ``qid`` with ``key`` — the ONE tail every answer path (card
+        anchor, QuestionsBar) funnels into, so an answer reaches the waiting worker exactly once."""
+        open_q = self._open_questions.pop(qid, None)   # close the double-click window first
+        if open_q is None:
+            self._flash_status("That question is no longer open.")
+            return
+        open_q["settle"](key)
+        self._dirty = True
+        self._render()
+
+    def _on_question_answer(self, spec: str) -> None:
+        """`oscar://answer/<id>/<key>` — a click on a QUESTION card's button."""
+        qid, _, key = spec.partition("/")
+        open_q = self._open_questions.get(qid)
+        if open_q is None:
+            self._flash_status("That question is no longer open.")
+            return
+        block = open_q["block"]
+        if block not in self.blocks:
+            # the card belongs to another chat: chat isolation — answer where it was asked
+            self._flash_status("Open this chat to answer that question.")
+            return
+        choice = next((c for c in open_q["choices"] if c.key == key), None)
+        if choice is not None and getattr(choice, "role", "") in ("RejectRole", "NoRole"):
+            text, ok = QtWidgets.QInputDialog.getText(
+                self, "Reason (optional)", "Tell Oscar why (optional):")
+            if ok and text.strip():
+                block.reason = text.strip()
+        self._deliver_question_answer(qid, key)
+
+    def _question_bar_answer(self, label: str) -> bool:
+        """A QuestionsBar option click answers the netguard question the bar was armed with (the
+        same waiting worker a card click settles). True = consumed — the label never falls through
+        to the chat as a message while a question waits for it."""
+        qid = getattr(self, "_bar_question_qid", None)
+        if qid is None:
+            return False                       # the bar is not showing a netguard question
+        open_q = self._open_questions.get(qid)
+        if open_q is None:
+            self._flash_status("That question is no longer open.")
+            return True                        # answered after it settled: report it, never re-send it
+        if open_q["block"] not in self.blocks:
+            # the question belongs to another chat: chat isolation — answer where it was asked
+            self._flash_status("Open this chat to answer that question.")
+            return True
+        choice = next((c for c in open_q["choices"] if c.label == label), None)
+        if choice is None:
+            self._flash_status("Pick one of the listed choices.")
+            return True                  # not an option: tell the user, do not send it as a message
+        self._deliver_question_answer(qid, choice.key)
+        return True
+
+    def _question_bar_custom(self, text: str) -> bool:
+        """A typed bar answer cannot settle a netguard question (its choices are keyed, not free
+        text): say so and consume it — never send it into the chat as if it had been accepted."""
+        if getattr(self, "_bar_question_qid", None) is None:
+            return False
+        self._flash_status("That question needs one of the listed choices.")
+        return True
+
+    def _settle_question(self, block, key: str, choices, was_cancelled: bool, timeout_s: int) -> None:
+        """Flip the card to its final state (approved / rejected / timeout / cancelled)."""
+        if key:
+            role = next((getattr(c, "role", "") for c in choices if getattr(c, "key", "") == key), "")
+            block.detail = "approved" if role in ("YesRole", "AcceptRole") else "rejected"
+        elif was_cancelled:
+            block.detail = "cancelled"
+        else:
+            block.detail = "timeout"
+            block.reason = str(timeout_s or 120)
+        self._dirty = True
+        self._render()
+        self._clear_question_bar()   # the question is no longer open
+
+    # -- ask_user decision cards (tools_ask renders through here; the WORKER waits on askuser's registry) ----
+
+    def _register_ask_surface(self) -> None:
+        """Become ``tools_ask.surface``: the ask_user tool renders its decision/wizard cards here. The
+        card call is render-and-return — the agent worker waits on ``askuser.REGISTRY``, not on it."""
+        self._open_asks = getattr(self, "_open_asks", {})
+        self._turn_asks = getattr(self, "_turn_asks", [])
+        try:
+            from . import tools_ask as _tools_ask
+
+            _tools_ask.surface = self._ask_surface
+        except Exception:   # noqa: BLE001
+            pass
+
+    def _ask_questions(self, request) -> list:
+        return request.payload.get("wizard") or [request.payload]
+
+    def _ask_active_index(self, state) -> int:
+        return next(i for i in range(len(self._ask_questions(state["request"]))) if i not in state["answers"])
+
+    def _ask_card_text(self, request, active: int) -> str:
+        """The card body: the question headline (and wizard progress / answered summary)."""
+        questions = self._ask_questions(request)
+        lines = []
+        if request.wizard:
+            lines.append(f"Decision wizard — question {active + 1} of {len(questions)}")
+        question = questions[active]
+        lines.append(question["title"])
+        if question.get("subtitle"):
+            lines.append(question["subtitle"])
+        for i in range(active):
+            lines.append("answered: " + questions[i]["title"])
+        return "\n".join(lines)
+
+    def _ask_actions(self, request, active: int):
+        return [(f"oscar://ask/{request.id}/{active}/{i}", option["label"])
+                for i, option in enumerate(self._ask_questions(request)[active]["options"])]
+
+    def _ask_bar(self, request, active: int) -> None:
+        question = self._ask_questions(request)[active]
+        title = question["title"] + (f"\n{question['subtitle']}" if question.get("subtitle") else "")
+        self._show_question_bar(title, [o["label"] for o in question["options"]])
+        self._bar_ask_id = request.id     # the bar now speaks for THIS decision card (answer routing)
+
+    def _ask_surface(self, request) -> None:
+        """``tools_ask.surface`` (GUI thread): append the decision card for ``request``, arm the bar and
+        the settle poller. Raises when no chat is open or the card belongs to another chat — the tool
+        then fails honestly instead of leaving an unanswerable question hanging."""
+        session = self._current_session()
+        if session is None:
+            raise RuntimeError("no chat is open to show the decision card in")
+        if str(session.get("id") or "") != request.conversation_id:
+            raise RuntimeError("the decision belongs to another chat")
+        block = self._question_append(self._ask_card_text(request, 0))
+        block.key = request.id
+        block.detail = "pending"
+        block.actions = self._ask_actions(request, 0)
+        state = {"request": request, "block": block, "answers": {}, "done": False}
+        self._open_asks[request.id] = state
+        self._dirty = True
+        self._render()
+        self._ask_bar(request, 0)
+
+        from PySide import QtCore as _qc
+
+        def _poll() -> None:
+            if request.event.is_set():      # settled elsewhere: timeout, Stop, shutdown
+                self._settle_ask(state)
+
+        poller = _qc.QTimer(self)
+        poller.timeout.connect(_poll)
+        poller.start(200)
+        state["poller"] = poller
+
+    def _on_ask_answer(self, spec: str) -> None:
+        """`oscar://ask/<id>/<question-index>/<option-index>` — an option click on a decision card."""
+        rid, _, rest = spec.partition("/")
+        qi_text, _, index_text = rest.partition("/")
+        state = self._open_asks.get(rid)
+        if state is None or state["done"]:
+            self._flash_status("That decision is no longer open.")
+            return
+        try:
+            qi, index = int(qi_text), int(index_text)
+        except ValueError:
+            return
+        questions = self._ask_questions(state["request"])
+        if not 0 <= qi < len(questions) or qi in state["answers"]:
+            return
+        options = questions[qi]["options"]
+        if not 0 <= index < len(options):
+            return
+        state["answers"][qi] = {"answer": options[index]["label"], "index": index}
+        self._ask_advance(state, qi)
+
+    def _ask_advance(self, state, answered_qi: int) -> None:
+        """Record the per-question answer, move the card to the next unanswered question, or resolve
+        the request in the registry when the last one is in (the worker wakes on its Event)."""
+        from . import askuser
+
+        request = state["request"]
+        questions = self._ask_questions(request)
+        nxt = next((i for i in range(len(questions)) if i not in state["answers"]), None)
+        if nxt is None:
+            state["done"] = True
+            session = self._current_session()
+            conversation = str(session.get("id") or "") if session else request.conversation_id
+            payload = ({"answers": [state["answers"][i] for i in range(len(questions))]}
+                       if request.wizard else dict(state["answers"][0]))
+            ok, err = askuser.REGISTRY.submit_answer(request.id, payload, conversation_id=conversation,
+                                                     run_id=request.run_id)
+            if not ok:
+                state["done"] = False
+                state["answers"].pop(answered_qi, None)   # the refused answer must not block the retry
+                self._flash_status(f"Answer could not be submitted ({err}). Please try again.")
+                return
+            self._settle_ask(state)
+            return
+        block = state["block"]
+        block.text = self._ask_card_text(request, nxt)
+        block.actions = self._ask_actions(request, nxt)
+        self._dirty = True
+        self._render()
+        self._ask_bar(request, nxt)
+
+    def _open_ask_of_current_chat(self):
+        session = self._current_session()
+        chat = str(session.get("id") or "") if session else ""
+        if not chat:
+            return None
+        for state in reversed(list(self._open_asks.values())):
+            if not state["done"] and state["request"].conversation_id == chat:
+                return state
+        return None
+
+    def _tracked_ask_state(self):
+        """The decision-card state the bar was armed with: ``(state, err)`` — ``err`` flashes and
+        consumes when the tracked card settled meanwhile or belongs to another chat."""
+        rid = getattr(self, "_bar_ask_id", None)
+        if rid is None:
+            if getattr(self, "_bar_question_qid", None) is not None:
+                return None, ""    # the bar speaks for a netguard question, never a decision card
+            return self._open_ask_of_current_chat(), ""      # untracked: the per-chat fallback
+        state = self._open_asks.get(rid)
+        if state is None:
+            return None, "That decision is no longer open."
+        session = self._current_session()
+        chat = str(session.get("id") or "") if session else ""
+        if chat and state["request"].conversation_id != chat:
+            return None, "Open this chat to answer that decision."
+        return state, ""
+
+    def _ask_bar_answer(self, label: str) -> bool:
+        """A QuestionsBar option click answers the open decision card of THIS chat. True = consumed —
+        the label never falls through to the chat as a message while the decision waits."""
+        state, err = self._tracked_ask_state()
+        if err:
+            self._flash_status(err)
+            return True
+        if state is None:
+            return False
+        qi = self._ask_active_index(state)
+        for i, option in enumerate(self._ask_questions(state["request"])[qi]["options"]):
+            if option["label"] == label:
+                state["answers"][qi] = {"answer": option["label"], "index": i}
+                self._ask_advance(state, qi)
+                return True
+        if getattr(self, "_bar_ask_id", None) is not None:
+            self._flash_status("Pick one of the listed choices.")
+            return True                  # the bar speaks for this decision: no fall-through to send
+        return False
+
+    def _ask_bar_custom(self, text: str) -> bool:
+        """A typed bar answer becomes the custom value of the open decision card (when it accepts
+        one). True = consumed — never sent into the chat while the decision waits."""
+        state, err = self._tracked_ask_state()
+        if err:
+            self._flash_status(err)
+            return True
+        if state is None:
+            return False
+        qi = self._ask_active_index(state)
+        question = self._ask_questions(state["request"])[qi]
+        if not (question.get("allow_free_text") or question.get("custom_value")):
+            if getattr(self, "_bar_ask_id", None) is not None:
+                self._flash_status("That decision takes one of the listed choices, not text.")
+                return True              # the bar speaks for this decision: no fall-through to send
+            return False
+        state["answers"][qi] = {"answer": text, "index": -1, "value": text}
+        self._ask_advance(state, qi)
+        return True
+
+    def _settle_ask(self, state) -> None:
+        """Flip the decision card to its final state (answered summary / cancelled / timeout)."""
+        from . import askuser
+
+        request = state["request"]
+        poller = state.pop("poller", None)
+        if poller is not None:
+            poller.stop()
+            poller.deleteLater()
+        self._open_asks.pop(request.id, None)
+        self._turn_asks = getattr(self, "_turn_asks", None) or []
+        self._turn_asks.append(request.record())      # persisted with the turn (blocks_meta["asks"])
+        block = state["block"]
+        if request.state == askuser.ANSWERED:
+            answers = request.answer.get("answers") if request.wizard else [request.answer]
+            block.detail = "answered"
+            block.reason = " | ".join(str(a.get("answer")) for a in answers if a)
+        else:
+            block.detail = str(request.state)
+            if request.state == askuser.TIMEOUT:
+                # the honest duration the waiter allowed (the render otherwise assumes 120 s)
+                block.reason = str(int(round(request.timeout_s)))
+        self._dirty = True
+        self._render()
+        self._clear_question_bar()
+
+    def _settle_typed_clarification(self, text: str, attachments) -> None:
+        """Record a custom answer or a new request on this chat's latest open clarification."""
+        if not text.strip() and not attachments:
+            return
+        block = next((b for b in reversed(self.blocks)
+                      if b.kind == Block.QUESTION and b.detail == "clarification_pending"), None)
+        if block is None:
+            return
+        try:
+            from .flow_intent import answers_open_question
+
+            answered = answers_open_question(
+                text, self._session_ledger(), [str(path or "") for path in attachments])
+        except Exception:  # noqa: BLE001 - presentation state must not prevent the user's send
+            answered = bool(text.strip() or attachments)
+        block.detail = "answered" if answered else "superseded"
+        block.reason = text.strip() or ("Attached file" if len(attachments) == 1 else "Attached files")
+        self._dirty = True
+        self._render()
+        self._clear_question_bar()   # a typed answer settled the open question
+
+    def _on_clarification_option(self, spec: str) -> None:
+        """Send a selected option as the next user turn in the chat that asked it."""
+        qid, _, index_text = spec.partition("/")
+        block = next((b for b in self.blocks if b.kind == Block.QUESTION and b.key == qid), None)
+        if block is None or block.detail != "clarification_pending":
+            self._flash_status("That clarification is no longer open.")
+            return
+        try:
+            index = int(index_text)
+            target, answer = block.actions[index]
+        except (ValueError, IndexError):
+            self._flash_status("That answer option is no longer available.")
+            return
+        if not target.startswith(f"oscar://clarify/{qid}/") or self._busy():
+            self._flash_status("This clarification cannot be answered right now.")
+            return
+        block.detail = "answered"
+        block.reason = answer
+        self._render()
+        self._clear_question_bar()
+        self._send_text(answer)
+
+    # -- the chat question bar (seam: panel_questions.QuestionsBar) -----------
+
+    def _mount_questions_bar(self) -> QtWidgets.QWidget:
+        """The strip below the transcript, above the composer: ``panel_questions.QuestionsBar``
+        when that module exists, a hidden placeholder while it does not (a missing module never
+        crashes the shell). ``answered`` / ``custom_answered`` route into the existing steer
+        path: an option click answers the open clarification and sends; a custom answer settles
+        the question and sends. The in-transcript question cards are unchanged."""
+        try:
+            from .panel_questions import QuestionsBar
+            bar = QuestionsBar()
+        except ImportError:
+            bar = QtWidgets.QWidget()
+            bar.setObjectName("oscarQuestionsBar")
+            bar.hide()
+            return bar
+        bar.setObjectName("oscarQuestionsBar")
+        loading = getattr(bar, "load", None)
+        if callable(loading):
+            self._questions_show = loading       # present a question in the bar
+        clearing = getattr(bar, "reset", None)
+        if callable(clearing):
+            self._questions_clear = clearing
+        answered = getattr(bar, "answered", None)
+        if answered is not None and hasattr(answered, "connect"):
+            answered.connect(lambda text: self._on_bar_answer(str(text)))
+        custom = getattr(bar, "custom_answered", None)
+        if custom is not None and hasattr(custom, "connect"):
+            custom.connect(lambda text: self._on_bar_custom(str(text)))
+        return bar
+
+    def _show_question_bar(self, text: str, options, *, approve: bool = False) -> None:
+        """Put an OPEN question in the bar under the transcript (a no-op when the seam is absent).
+
+        ``options`` are the (label) choices; ``text`` may carry a title and body on two lines.
+        The transcript card remains the durable record — the bar is the quick way to answer it.
+        A new question re-arms the bar: previous answer routing (netguard question / decision
+        card) is dropped — the caller re-declares what the bar now speaks for."""
+        self._bar_question_qid = None
+        self._bar_ask_id = None
+        show = getattr(self, "_questions_show", None)
+        if not callable(show):
+            return
+        labels = [str(option) for option in (options or [])][:6]
+        try:
+            show({"text": str(text or ""), "options": labels, "approve": bool(approve),
+                  "allow_custom": True})
+        except Exception as e:   # noqa: BLE001 - the transcript cards still work
+            self._log_panel_error("question_bar", e)
+
+    def _clear_question_bar(self) -> None:
+        self._bar_question_qid = None
+        self._bar_ask_id = None
+        clear = getattr(self, "_questions_clear", None)
+        if callable(clear):
+            try:
+                clear()
+            except Exception as e:   # noqa: BLE001
+                self._log_panel_error("question_bar_clear", e)
+
+    def _on_bar_answer(self, text: str) -> None:
+        """``QuestionsBar.answered``: the chosen option settles whatever the bar speaks for — the
+        open decision card, the open netguard question, or the open clarification (which becomes
+        the next user message). An answer for a waiting question is NEVER sent as a message."""
+        answer = str(text or "").strip()
+        if not answer:
+            return
+        if self._ask_bar_answer(answer):
+            return
+        if self._question_bar_answer(answer):
+            return
+        block = next((b for b in reversed(self.blocks)
+                      if b.kind == Block.QUESTION and b.detail == "clarification_pending"), None)
+        if block is not None:
+            block.detail = "answered"
+            block.reason = answer
+            self._dirty = True
+            self._render()
+        self._send_or_steer(answer)
+
+    def _on_bar_custom(self, text: str) -> None:
+        """``QuestionsBar.custom_answered``: a typed answer settles the open clarification the
+        same way the composer's would, then sends; a waiting question that cannot take free text
+        reports that instead of silently sending the text into the chat."""
+        answer = str(text or "").strip()
+        if not answer:
+            return
+        if self._ask_bar_custom(answer):
+            return
+        if self._question_bar_custom(answer):
+            return
+        self._settle_typed_clarification(answer, [])
+        self._send_or_steer(answer)
+
+    def _send_or_steer(self, text: str) -> None:
+        """Deliver ``text`` from the question bar: a new turn when idle, the steer path
+        (queued bubble) while a turn runs."""
+        if self._busy():
+            self.input.setPlainText(text)
+            self._steer_while_busy()
+            return
+        self._send_text(text)
 
 
 # ---------------------------------------------------------------------------

@@ -160,7 +160,7 @@ def editability_test(doc: Any, table: dict, *, delta: float = DELTA, max_params:
             moved = False
             out_of_time = False
             for sign, key in ((+1, "plus"), (-1, "minus")):
-                if clock() - started > budget_s or stopped():
+                if clock() - started >= budget_s or stopped():
                     out_of_time = True
                     break
                 value = _perturbed(base_value, sign, delta, unit)
