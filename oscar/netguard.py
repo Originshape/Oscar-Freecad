@@ -748,7 +748,7 @@ _BENIGN_PROGRAMS = frozenset({"echo", "ls", "pwd", "true", "false", "sleep", "da
 _SHELL_META_RE = re.compile(r"[;&|`$<>()\n\\]")
 
 
-_SYSTEM_BIN_DIRS = ("/bin", "/usr/bin", "/sbin", "/usr/sbin")
+_SYSTEM_BIN_DIRS = ("/bin", "/usr/bin", "/sbin", "/usr/sbin", "/usr/lib/cargo/bin/coreutils")
 
 
 def _spawn_executable(event: str, args) -> str:
@@ -802,8 +802,8 @@ def _spawn_executable(event: str, args) -> str:
 
 
 def _is_system_binary(path: str) -> bool:
-    """True only for an absolute path (as looked up AND after symlinks) inside a system directory the current user cannot
-    write: a file the script could have planted is never one of these."""
+    """True only for an absolute path (as looked up AND after symlinks) inside a system directory not writable by
+    group or other users: a file the script could have planted is never one of these."""
     try:
         if not path or not os.path.isabs(path):
             return False
@@ -817,6 +817,10 @@ def _is_system_binary(path: str) -> bool:
         # the lookup path AND the real file (after symlinks; merged-/usr links such as /bin -> /usr/bin stay inside the set)
         if norm(os.path.dirname(path)) not in trusted or norm(os.path.dirname(real)) not in trusted:
             return False
+        # Check permission bits when running as root, for which os.access reports every directory writable. For an
+        # ordinary user, os.access also accounts for group membership, which can be narrower than the mode bits.
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            return not (os.stat(os.path.dirname(real)).st_mode & 0o022)
         return not os.access(os.path.dirname(real), os.W_OK)
     except Exception:  # noqa: BLE001
         return False

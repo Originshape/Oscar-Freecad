@@ -1,13 +1,5 @@
-# Changelog
-
-All notable changes to Oscar for FreeCAD. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and versions follow [Semantic Versioning](https://semver.org/): the version is in `package.xml` and
-`oscar/__init__.py`, and each release is a `v<version>` tag with a ZIP attached.
-
 ## [Unreleased]
-
 ### Added
-
 - **AI model settings synced with your OriginShape account**: signed in with OriginShape, whether you use the account
   or your own provider, your provider profiles (name, provider, base URL, model, reasoning, Advanced overrides)
   and the one in use are the same in FreeCAD and on the website (Settings → AI model). Oscar syncs when the panel
@@ -27,12 +19,20 @@ and versions follow [Semantic Versioning](https://semver.org/): the version is i
   mesh, the model is told that the user can repair it in the workspace (Repair, then "Use the repaired copy"), as the
   way to go for a task from the workspace and as an option for a chat in FreeCAD. A workspace attachment's
   `repaired_from` (the original's name) is read.
-
 ### Changed
-
 - **Every provider profile has a stable id** in `oscar_settings.json`, and the profile in use is remembered by it, so a
   rename never switches profiles. Older settings files get their ids when they are read (nothing is rewritten until
   the next save), and an older Oscar can still read and save the file.
+
+### Fixed
+- **The source mesh no longer appears as a second model after a rebuild** (#5): when a finished turn
+  rebuilds an imported STL/OBJ into a solid body, the mesh it traced over is hidden at the end of the
+  turn (the body is the deliverable; the mesh stays in the tree as a reference and the saved model
+  carries the hidden state). Only meshes Oscar itself imported are hidden, and only in the document the
+  turn built the deliverable in — a scan imported for a fit check or measurement is never touched, a
+  capped or unverified build keeps its mesh visible, and a later turn does not hide a mesh the user
+  showed again on purpose. Reverting the turn brings the mesh back: the engine's turn snapshot now
+  records mesh visibility and the revert restores it.
 
 ## [0.2.1] - 2026-10-28
 
