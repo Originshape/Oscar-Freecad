@@ -80,7 +80,6 @@ _CALL_BLOCK_TYPES = frozenset({"tool_use", "server_tool_use"})   # provider bloc
 
 def build_system_prompt(caps=None, *, lite: bool | None = None, playbooks=(), tool_names=None) -> str:
     """The static system prompt: ``prompt.build_system_prompt``; no argument = the full text.
-
     Deliberately static: it never embeds live state. The system prompt is the first thing in every request; any
     change to it invalidates the model's cached prefix and, on current Claude models, the thinking blocks replayed
     in a tool loop. Live document state travels in the user message instead (see ``workspace_snapshot``). The
@@ -1498,4 +1497,3 @@ class AgentWorker(ContextWiring, QtCore.QThread):
             return self._result(True, compose_unverified(verdict.reasons, text, summary), "unverified", verdict.reasons)
         empty = self._empty_reply_message(stop) if not text.strip() else ""
         return self._result(False, compose_failed(verdict.reasons, empty), "failed", verdict.reasons)
-
