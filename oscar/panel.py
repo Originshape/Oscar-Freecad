@@ -53,6 +53,7 @@ from . import __version__
 from . import attachments as _attach
 from . import consent_gui, panel_chats, panel_markup, paths
 from . import params as _params
+from . import settings_sync as _settings_sync
 from . import settings_ui
 from .agent import AgentWorker
 from .auth import consent as _consent
@@ -193,6 +194,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         self._register_netguard_hook()
         self._register_quit_hook()
         self._init_account()
+        self._init_settings_sync()
         self._append_empty_state()
         self._init_project_links()
         self._load_sessions()
@@ -654,6 +656,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         session["profile_name"] = profile_name
         session["model"] = str(model if model is not None else keep_model or profile.model or "")
         session["profile_selection_explicit"] = True
+        _settings_sync.request("panel", prefer="local")   # the pick, on the website too (#34)
         self._persist_current()
         self._refresh_model_selector()
         self._refresh_account()
@@ -725,6 +728,33 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         self._model_catalogs.clear()
         self._rebuild_profile_menu()
         self._rebuild_model_menu()
+
+
+    def _init_settings_sync(self) -> None:
+        """The AI model settings follow the OriginShape account (``settings_sync``): a sync when the panel starts, and
+        the picker re-read when a pull changed the profiles."""
+        try:
+            settings_ui.account_hub().settings_synced.connect(self._on_settings_synced)
+            _settings_sync.request("start")
+        except Exception as e:  # noqa: BLE001 - the panel works without the sync
+            self._log_panel_error("settings_sync", e)
+
+    def _on_settings_synced(self, payload: str = "") -> None:
+        """A sync's news (GUI thread): a pull that changed the profiles shows in the picker and the model label."""
+        import json
+
+        try:
+            changed = json.loads(payload or "{}").get("event") == "changed"
+        except (AttributeError, TypeError, ValueError):
+            changed = False
+        if changed:
+            try:
+                self._reload_profiles()
+                notice = _params.pending_notice()   # the website picked a profile this computer can't use yet
+                if notice:
+                    self._flash_status(notice, 12000)
+            except Exception as e:  # noqa: BLE001
+                self._log_panel_error("settings_sync", e)
 
     def _open_settings(self, account_action: str = ""):
         """The settings dialog (modal). ``account_action`` (``"signin"`` / ``"device"``) starts that sign-in at once.
@@ -899,7 +929,8 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         self._render()
 
     def _send_blocker(self, profile) -> str:
-        """Why a send must not start a turn, from LOCAL facts only (no network): ``no_profile``, ``no_key``, ``server``
+        """Why a send must not start a turn, from LOCAL facts only (no network): ``no_profile``, ``endpoint`` (a sync
+        made the profile or changed its provider or base URL, and the user hasn't confirmed it yet), ``no_key``, ``server``
         (the configured OriginShape server is refused), ``signed_out``, ``waitlisted``, ``outdated`` (this Oscar is
         older than the server's minimum version), ``consent`` (the account has not accepted OriginShape's current
         Terms: never for another provider); ``""`` lets the turn go. The
@@ -907,6 +938,8 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         some), and a sign-in that is not known yet (the OS keychain is still being read) is left to the turn."""
         if profile is None:
             return "no_profile"
+        if _settings_sync.unusable_reason(profile):   # made or redirected on the website: its address is confirmed first
+            return "endpoint"
         if not _params.is_account_profile(profile):
             if not profile.api_key and profile.provider == "anthropic":
                 return "no_key"
@@ -936,6 +969,9 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         """Show why the send did not start a turn; the typed text and the attachments stay where they are."""
         if blocker == "no_profile":
             self._append(Block.ERROR, "No chat profile is configured — open ⚙ settings and add one.")
+            self._render()
+        elif blocker == "endpoint":
+            self._append(Block.ERROR, _settings_sync.unusable_reason(_params.active_profile()))
             self._render()
         elif blocker == "server":
             problem = self._account_state().get("error") or "The OriginShape server URL cannot be used."
@@ -1238,6 +1274,9 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
                 return
             self._steer_while_busy()
             return
+        # The latest AI model settings first, for the user's turns and the workspace's alike: a pull older than a
+        # minute is renewed, waited for up to two seconds (then the turn goes on with what is here).
+        _settings_sync.pull_before_turn()
         if workspace is not None:
             text, pending, profile = workspace.text.strip(), list(workspace.attachments), workspace.profile
         else:
@@ -1344,6 +1383,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
                 attachments=[att.path for att in attachments],
                 on_round=self._round_persister(session) if session is not None else None,
                 session_id=str(session.get("id") or "") if session is not None else "",
+                origin="workspace" if workspace is not None else "freecad",
                 profile=profile)
         except Exception as e:
             self._append(Block.ERROR, str(e))
