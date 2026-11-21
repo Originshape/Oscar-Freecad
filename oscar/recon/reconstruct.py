@@ -1179,7 +1179,7 @@ def _plan_rotational(survey, diag, mesh, plane_tol_gate=0.05):
             # span - surf_half drilled only a shallow scratch near the entry (H3c: 2 mm on a
             # 10 mm bore) — valid on lenient OCC builds, an invalid tangential boolean on
             # stricter ones (macOS CI).
-            depth = max(surf_half + span / 2.0, 0.2 * r["radius"])
+            depth = max(surf_half + span / 2.0 + 0.01, 0.2 * r["radius"])   # +0.01 overshoot: macOS OCC isValid flags the exact-tangency boolean
             params[f"xhole_dp{i}"] = {"value": round(float(depth), 3),
                                       "source": _source("cross-hole wall extent "
                                                         "(blind, no far wall seen)")}
