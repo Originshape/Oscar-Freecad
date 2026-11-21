@@ -71,6 +71,18 @@ class AnchorMixin:
 
             rating_gui.on_anchor(self, target)
             return
+        if target.startswith("oscar://ask/"):
+            # oscar://ask/<request-id>/<question-index>/<option-index> — a click on a decision card
+            self._on_ask_answer(target[len("oscar://ask/"):])
+            return
+        if target.startswith("oscar://answer/"):
+            # oscar://answer/<approval-id>/<choice-key> — a click on a QUESTION card's button
+            self._on_question_answer(target[len("oscar://answer/"):])
+            return
+        if target.startswith("oscar://clarify/"):
+            # oscar://clarify/<question-id>/<option-index> — resume with the chosen answer
+            self._on_clarification_option(target[len("oscar://clarify/"):])
+            return
         if target.startswith(("http://", "https://", "file://", "mailto:")):
             self._open_external(target)
             return

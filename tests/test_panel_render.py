@@ -1384,6 +1384,38 @@ class SummaryBlockTest(unittest.TestCase):
         self.assertEqual(markup.count("<a "), 1)
 
 
+class ClarificationFormatTest(unittest.TestCase):
+    def test_extracts_question_and_grounded_options(self):
+        got = pr.parse_clarification(
+            "The scan shows a cylindrical opening, but not its depth.\n"
+            "Should I make this a through-hole?\n- Through hole\n- Blind hole\n- Specify a depth")
+        self.assertEqual(got, {
+            "question": "Should I make this a through-hole?",
+            "context": "The scan shows a cylindrical opening, but not its depth.",
+            "options": ["Through hole", "Blind hole", "Specify a depth"],
+        })
+
+    def test_unstructured_or_unsupported_questions_remain_plain_text(self):
+        self.assertIsNone(pr.parse_clarification("Which units should I use?\n- mm"))
+        self.assertIsNone(pr.parse_clarification("I will assume millimetres.\n- mm\n- in"))
+        self.assertIsNone(pr.parse_clarification(
+            "Which edge treatment?\n- Fillet\n- Chamfer\n- Both\n- Leave sharp\n- Other"))
+
+    def test_question_card_escapes_content_and_shows_custom_answer_hint(self):
+        from types import SimpleNamespace
+
+        block = SimpleNamespace(
+            text="Which unit should I use?\nThe drawing does not state the unit.",
+            actions=[("oscar://clarify/17/0", "Millimetres"), ("oscar://clarify/17/1", "Inches")],
+            detail="clarification_pending", reason="")
+        markup = pr.question_card_html(block)
+        self.assertIn("Millimetres", markup)
+        self.assertIn("type your own answer below", markup)
+        self.assertIn("oscar://clarify/17/0", markup)
+        self.assertNotIn("<script>", pr.question_card_html(SimpleNamespace(
+            text="<script>?\nhello", actions=block.actions, detail="clarification_pending", reason="")))
+
+
 class UniqueCallIdTest(unittest.TestCase):
     def test_turn_ordinal_and_call_id_make_the_key(self):
         self.assertEqual(pr.unique_call_id({"call_id": "call_0", "ordinal": 3}, 2), "t2.3.call_0")

@@ -1,11 +1,15 @@
 """Solid-feature translation of the FeaturePlan → FreeCAD builder (private to oscar.plan).
 
-Pad / pocket / revolution / hole, each created inside the Body from a sketch
-the sketch pass built, every dimension that names a plan parameter bound by
-expression to ``<sheet>.<alias>``. FreeCAD property names are the ones of
-1.1 (verified on the installed app): a pocket's depth is ``Length`` (there is
-no ``Depth``), a counterbore / countersink lives in ``HoleCutType`` /
-``HoleCutDiameter`` / ``HoleCutDepth`` / ``HoleCutCountersinkAngle``.
+Pad / pocket / revolution / groove / hole / sweep / sweep_cut / loft /
+loft_cut, each created inside the Body from a sketch the sketch pass built,
+every dimension that names a plan parameter bound by expression to
+``<sheet>.<alias>``. FreeCAD property names are the ones of 1.1 (verified on
+the installed app): a pocket's depth is ``Length`` (there is no ``Depth``),
+a counterbore / countersink lives in ``HoleCutType`` / ``HoleCutDiameter`` /
+``HoleCutDepth`` / ``HoleCutCountersinkAngle``; the sweep / loft features
+(``PartDesign::AdditivePipe`` / ``SubtractivePipe``, ``AdditiveLoft`` /
+``SubtractiveLoft``) carry no dimensional property of their own — their
+geometry is driven entirely by the sketches they link, so nothing is bound.
 
 Each ``build_*`` takes ``(doc, body, feat, plan, built, ctx)`` and returns
 ``(object, info)``; the caller recomputes, checks the post-conditions and
@@ -101,6 +105,112 @@ def build_revolution(doc, body, feat: dict, plan: dict, built: dict, ctx: Ctx):
     return rev, {}
 
 
+def build_groove(doc, body, feat: dict, plan: dict, built: dict, ctx: Ctx):
+    """PartDesign::Groove — a SUBTRACTIVE revolution (an annular recess on a
+    turned part): the same sketch / axis / angle rules as `revolution`, the
+    swept profile removed instead of added."""
+    sketch = built[feat["sketch"]][0]
+    groove = _new(body, "PartDesign::Groove", feat, ctx)
+    groove.Profile = sketch
+    axis = feat.get("axis", {})
+    if "frame_axis" in axis:
+        _align_revolution_axis(groove, sketch, plan, feat,
+                               plan["frame"]["axes"][axis["frame_axis"]])
+    elif "direction" in axis:
+        _align_revolution_axis(groove, sketch, plan, feat, axis)
+    else:
+        groove.ReferenceAxis = (sketch, ["V_Axis"])
+    angle = feat.get("angle")
+    if angle is not None:
+        groove.Angle = _length(plan, feat, "angle", "angle")
+        _bind(groove, "Angle", angle, ctx)
+    if feat.get("midplane"):
+        groove.Midplane = True
+    if feat.get("invert"):
+        groove.Reversed = not groove.Reversed
+    doc.recompute()
+    return groove, {}
+
+
+def _linked_sketch(feat: dict, built: dict, ref, key: str):
+    """The built sketch object behind one sketch reference ``ref`` (a sweep's
+    spine, a loft section) — the profile of ``feat['sketch']`` is resolved by
+    the callers, this covers the rest."""
+    if ref not in built:
+        raise BuildError(feat["id"], f"{feat['op']}.{key}: sketch {ref!r} is "
+                                     f"not built yet; re-apply the whole plan")
+    return built[ref][0]
+
+
+_PIPE_MODES = {"standard": "Standard", "frenet": "Frenet", "fixed": "Fixed"}
+
+
+def _pipe(doc, body, feat: dict, built: dict, ctx: Ctx, type_id: str):
+    """A PartDesign Pipe: the closed profile of ``feat['sketch']`` swept along
+    the wire of ``feat['spine']`` (an open guide polyline or a closed ring —
+    put the profile plane at the spine's start, perpendicular to its first
+    direction; the kernel moves an offset profile onto the start itself).
+    ``mode`` selects the profile's rotation along the way. All dimensions live
+    in the two sketches, already expression-bound — a pipe has none."""
+    profile = built[feat["sketch"]][0]
+    spine = _linked_sketch(feat, built, feat["spine"], "spine")
+    wires = getattr(getattr(spine, "Shape", None), "Wires", None)
+    if wires is None or len(wires) != 1:
+        # measured on 1.1.4: the kernel's own error for a multi-wire spine is
+        # the unhelpful "TopoDS::Wire"
+        raise BuildError(feat["id"], f"{feat['op']}.spine: sketch "
+                                     f"{feat['spine']!r} must be exactly one "
+                                     f"wire (has {len(wires) if wires is not None else 'no'} "
+                                     f"— keep the guide to one open polyline "
+                                     f"or one closed ring)")
+    pipe = _new(body, type_id, feat, ctx)
+    pipe.Profile = profile
+    pipe.Spine = (spine, [""])
+    if feat.get("mode"):
+        pipe.Mode = _PIPE_MODES[feat["mode"]]
+    doc.recompute()
+    return pipe, {"spine": spine.Name}
+
+
+def build_sweep(doc, body, feat: dict, plan: dict, built: dict, ctx: Ctx):
+    """PartDesign::AdditivePipe — the swept profile fused onto the Body."""
+    return _pipe(doc, body, feat, built, ctx, "PartDesign::AdditivePipe")
+
+
+def build_sweep_cut(doc, body, feat: dict, plan: dict, built: dict, ctx: Ctx):
+    """PartDesign::SubtractivePipe — the swept profile cut out of the Body."""
+    return _pipe(doc, body, feat, built, ctx, "PartDesign::SubtractivePipe")
+
+
+def _loft(doc, body, feat: dict, built: dict, ctx: Ctx, type_id: str):
+    """A PartDesign Loft: the closed profile of ``feat['sketch']`` grown
+    through the ``sections`` sketches in order (a section sketch with a
+    different wire count than the profile is refused by the kernel with
+    'Sections need to have the same amount of wires or vertices as the base
+    section'). ``ruled`` stretches straight (default: smoothed). All
+    dimensions live in the section sketches, already expression-bound."""
+    profile = built[feat["sketch"]][0]
+    sections = [_linked_sketch(feat, built, ref, f"sections[{i}]")
+                for i, ref in enumerate(feat["sections"])]
+    loft = _new(body, type_id, feat, ctx)
+    loft.Profile = profile
+    loft.Sections = [(s, [""]) for s in sections]
+    if feat.get("ruled"):
+        loft.Ruled = True
+    doc.recompute()
+    return loft, {"sections": len(sections)}
+
+
+def build_loft(doc, body, feat: dict, plan: dict, built: dict, ctx: Ctx):
+    """PartDesign::AdditiveLoft — the lofted solid fused onto the Body."""
+    return _loft(doc, body, feat, built, ctx, "PartDesign::AdditiveLoft")
+
+
+def build_loft_cut(doc, body, feat: dict, plan: dict, built: dict, ctx: Ctx):
+    """PartDesign::SubtractiveLoft — the lofted solid cut out of the Body."""
+    return _loft(doc, body, feat, built, ctx, "PartDesign::SubtractiveLoft")
+
+
 def _align_revolution_axis(rev, sketch, plan: dict, feat: dict, spec: dict) -> None:
     """Set ReferenceAxis (and the sweep direction) for an axis spec relative
     to the sketch plane.
@@ -111,7 +221,7 @@ def _align_revolution_axis(rev, sketch, plan: dict, feat: dict, spec: dict) -> N
     or running parallel but offset from the sketch's own axis, are rejected
     with an actionable error rather than silently revolved about the wrong
     line."""
-    feat_by_id = {f["id"]: f for f in plan["features"]}
+    feat_by_id = {f["id"]: f for f in schema.all_features(plan)}
     # rev.Profile reads back as a (obj, subs) link: use the sketch we hold
     sketch_feat = feat_by_id.get(feat["sketch"])
     basis = schema.sketch_basis(plan, sketch_feat.get("plane", {}))
@@ -189,6 +299,8 @@ def build_hole(doc, body, feat: dict, plan: dict, built: dict, ctx: Ctx):
     hole.Profile = sketch
     hole.Diameter = dia
     _bind(hole, "Diameter", feat["diameter"], ctx)
+    hole.Refine = True   # heal the boolean result: some kernels (macOS arm64) leave an
+                          # invalid tolerance on an otherwise correct blind hole solid
     if feat.get("through"):
         hole.DepthType = "ThroughAll"
     else:
@@ -234,5 +346,8 @@ def register_solid(op: str, fn) -> None:
 
 
 for _op, _fn in (("pad", build_pad), ("pocket", build_pocket),
-                 ("revolution", build_revolution), ("hole", build_hole)):
+                 ("revolution", build_revolution), ("groove", build_groove),
+                 ("hole", build_hole),
+                 ("sweep", build_sweep), ("sweep_cut", build_sweep_cut),
+                 ("loft", build_loft), ("loft_cut", build_loft_cut)):
     register_solid(_op, _fn)
