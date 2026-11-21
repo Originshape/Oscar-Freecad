@@ -69,6 +69,8 @@ PURE_MODULES = (
     "test_updates",
     # the pen's region line and the chat search
     "test_markup", "test_chatsearch",
+    # the AI model settings synced with the account: ids, the wire format, the merge, the sync, Test in FreeCAD
+    "test_settings_sync",
 )
 
 # "recon" = the mesh-to-parametric reconstruction stages (K1-K5 + G-stages: quality/

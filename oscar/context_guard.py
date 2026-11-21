@@ -43,6 +43,11 @@ _PATTERNS = (
     r"\bgithub_pat_[A-Za-z0-9_]{22,}",
     r"\bxox[abprs]-[A-Za-z0-9\-]{10,}",                              # Slack
     r"\bgsk_[A-Za-z0-9]{32,}",                                       # Groq
+    r"\bxai-[A-Za-z0-9]{32,}",                                       # xAI
+    r"\bpplx-[A-Za-z0-9]{32,}",                                      # Perplexity
+    r"\bcsk-[A-Za-z0-9]{32,}",                                       # Cerebras
+    r"\bfw_[A-Za-z0-9]{20,}",                                        # Fireworks AI
+    r"\btgp_v1_[A-Za-z0-9_\-]{20,}",                                 # Together AI
     r"\beyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}",   # JWTs (OriginShape access tokens)
     # The body as base64 only: a bounded character class can't backtrack across the rest of the text.
     r"-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----[A-Za-z0-9+/=\s]{0,20000}-----END [A-Z ]{0,40}PRIVATE KEY-----",
@@ -92,11 +97,11 @@ def _pattern() -> re.Pattern[str]:
         return _compiled[1]
 
 
-def redact(text: str) -> str:
-    """``text`` with every credential replaced by ``REDACTED``."""
+def redact(text: str, replacement: str = REDACTED) -> str:
+    """``text`` with every credential replaced by ``replacement`` (``REDACTED``)."""
     if not text:
         return text
-    return _pattern().sub(REDACTED, text)
+    return _pattern().sub(replacement, text)
 
 
 def _redacted_message(message: Any, pattern: re.Pattern[str]) -> Any:

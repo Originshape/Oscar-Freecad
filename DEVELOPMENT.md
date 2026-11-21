@@ -7,7 +7,7 @@ FreeCAD model, with every step recorded and checked, through any LLM provider.
 **Contents:** [Get set up](#get-set-up) · [How a request becomes a part](#how-a-request-becomes-a-part) ·
 [Code map](#code-map) · [Add a tool](#add-a-tool) · [Add a provider](#add-a-provider) ·
 [The OriginShape account](#the-originshape-account) · [Connect mode](#connect-mode-the-originshape-workspace) ·
-[Projects](#projects) ·
+[AI model settings sync](#ai-model-settings-sync) · [Projects](#projects) ·
 [Settings, files and environment](#settings-files-and-environment) · [Logs](#logs) · [MCP bridge](#mcp-bridge) ·
 [Tests](#tests) · [Release](#release)
 
@@ -93,8 +93,12 @@ oscar/
 ├── project*.py       the per-chat project folder: checkpoints, docs (NOTES.md, rebuild.py), export, replay, rewind
 ├── netguard.py       network permission gate and the audit hook for model-written scripts; codeguard.py: the
 │                     approval of model-written scripts (off by default)
-├── params.py         settings file, profiles and provider presets; settings_model.py / settings_ui.py: the dialog
-│                     and the AccountHub (the account state the panel and the dialog share)
+├── params.py         settings file, profiles (each with a stable id) and provider presets; settings_model.py /
+│                     settings_ui.py: the dialog and the AccountHub (the account state the panel and the dialog share)
+├── settings_sync.py  the AI model settings synced with the account (pure): the Syncer, its thread and triggers, the
+│                     website's Test in FreeCAD; settings_wire.py (ids, the active profile, the gate, the wire format),
+│                     settings_merge.py (the three-way merge and the dialog's Save), keyguard.py (keys and pieces of
+│                     keys in text that leaves this computer)
 ├── panel_markup.py   the pen: draw on a picture of the 3D view, pick the marks in the model; markup.py: the region
 │                     line
 ├── panel_chats.py    rename and search the chats (⋯ menu); chatsearch.py: the matching rule
@@ -278,9 +282,106 @@ Oscar runs tasks started in the OriginShape workspace on the website (`/studio` 
   changed nothing, has nothing to undo; the revert stops at a turn typed in FreeCAD after them (`REVERT_LATER_TURN`)
   or one from before a restart (`REVERT_RESTARTED`). `Loop._revert` then uploads the preview and
   reports the prompts undone, why not all, and the tree (sent again without the tree if the server refuses it).
+- **Test in FreeCAD from the browser**: with `test_profile=` the loop's hello says `ai_settings`, and `/next` may answer
+  with a `profile_test` (`connect.ProfileTest`: the test's id and a profile id). `connect_gui` runs
+  `settings_sync.run_website_test` on the loop's thread: a sync first (waited for up to 5 s), then the settings
+  dialog's Test connection for that local profile, with its local key, stopped after 150 s (the server expires a
+  claimed test after 3 minutes). A profile the gate refuses (`settings_wire.unusable_reason`) is not tested.
+  `Loop._run_profile_test` posts `POST /v1/connect/profile-tests/{id}/result` `{"passed", "message", "checks":
+  {"reply", "tools", "image"}}`; the message goes through `keyguard.scrub` (plus a local base URL's secrets;
+  `Client.profile_test_result` scrubs again) and is at most 500 characters. An unknown profile is a failed test with a
+  message that says so. The capability is announced only while the settings sync is on (`OSCAR_SETTINGS_SYNC`).
 - **Tests**: `tests/test_connect.py` (pure: the client, the batch, the loop, attachment downloads and revert jobs
   against `support/fake_workspace.py`) and `tests/test_connect_panel.py` (FreeCAD: a job, with and without
   attachments, runs as a real panel turn with a scripted provider; a revert job undoes real turn cards).
+
+## AI model settings sync
+
+Settings → AI model is the same in FreeCAD and on the website (`/settings?tab=ai-model`), for an account signed in
+with OriginShape (OAuth; a personal API key gets 403 and is not tried). The contract is
+`docs/architecture/ai-settings-sync.md` in the app repository. The FreeCAD side, all pure Python: `settings_wire.py`
+(ids, the active profile, the gate, the wire format), `settings_merge.py` (the merge), `settings_sync.py` (the sync, its
+triggers, the website's test; it re-exports what other modules use) and `keyguard.py` (the one masking policy).
+
+- **The rule**: provider keys never leave FreeCAD. `settings_wire.to_wire` builds what the server sees of a stored
+  profile from exactly `WIRE_FIELDS`: `id`, `name`, `provider`, `base_url`, `base_url_local`, `model`, `reasoning`,
+  `overrides` (the five Advanced keys of `caps_override`, `None` = automatic), `has_key`; the PUT body is exactly
+  `version`, `active_profile_id`, `profiles` (the server refuses any other field). A base URL that is not a plain
+  http(s) URL (user, password, query, fragment, `..`, `xxxx`, a key's shape, no scheme) goes as `""` with
+  `base_url_local: true`; an empty one is an unfinished profile (`""`, false). Names and models go through
+  `keyguard.scrub` (`ai_settings_masked` logs the field names); a name masked into another one's gets its id's start.
+  `notes`, `model_caps`, `prefs`, other `caps_override` keys, `temperature` / `max_tokens` and the grants stay local and
+  a pull never touches them. An account profile's model goes as `origin1` or `origin1-super`. Not synced
+  (`syncable`): a provider other than `originshape` / `anthropic` / `openai_compat`, a profile `removed_remotely`; and
+  past 50 profiles (what the server has first). The sync line says what stays local.
+- **One masking policy** (`keyguard`, a superset of the server's `ai_settings/keys.py`): credentials by their shape
+  (`context_guard`); the keys held here by value: the whole key, and in its body (the key without its provider's
+  prefix, `keyguard.KEY_PREFIX`, so "My project" is no piece of an `sk-proj-` key) any 8 characters anywhere and its
+  last 4 to 8 characters as a word of their own ("ending in 4f2a", "…4f2a"), case-sensitive, for keys of 16+
+  characters (so "lm-studio" placeholders mask nothing); masked words (runs of `*`, `•`, `●`, `∙`, an ellipsis or `..`
+  before letters or digits, `xxxx`; a word of mask characters takes the next one with it); and runs that start like a
+  key (`KEY_PREFIXES`). For names, models and test messages alike.
+- **Ids**: `Profile.id` (32 hex characters for a new profile). `settings_wire.ensure_ids` runs on every read of the
+  settings file (`params._read_state`): a profile without an id (a file from before ids, or saved by an older Oscar)
+  gets back the id the last sync knew it by (its name in the snapshot), else one derived from its name, or from its
+  position and provider when its name holds a key or anything key-shaped; every read gives the same ids and reading
+  never writes; the next write keeps them. The active profile is `active_profile_id` plus its name in
+  `active_profile` (`active_index`: an older Oscar switches by name, so a name that names another profile wins).
+- **The gate** (`settings_wire.unusable_reason`, the one place): a profile is used only at the provider and base URL
+  approved at this computer (`Profile.approved`; `None` in a `Profile()` = approved as made here). A profile without
+  `approved` in the file (0.2.1, or saved by an older Oscar) is approved for the address it has when it is read:
+  `settings_wire.ensure_approvals` runs on every read (`params._read_state`) and in `plan_sync` before anything of the
+  server's is applied, and `apply_merge` pins any unpinned profile before changing it. A profile a sync created has
+  `{}`; one whose provider or base URL a sync changed keeps its old approval. Both fail the gate (the account profile never does). Asked by
+  `providers.make_provider` (raises `ProviderError`, `code="endpoint_changed"`), `provider_probe.probe` and
+  `list_models` (so the connection test and the agent's metadata probe send nothing), the panel's `_send_blocker`
+  (`endpoint`) and `run_profile_test` (failed, `NEEDS_CONFIRMATION_TEXT`). The key stays in `api_key`: nothing can send
+  it past the gate. The dialog's notice (`oscarProfilePending`) approves exactly the address shown (`oscarProfileConfirm`)
+  or removes the key (`oscarProfileRemoveKey`); editing the provider or base URL in the dialog approves it as edited;
+  typing a key approves nothing. `approved` is merged whole on Save (`settings_merge.ATOMIC_FIELDS`), so a pull that
+  moves the profile while the dialog is open makes it wait again.
+- **The active profile and the website's pick**: a pull that makes active a profile this computer can't use (it fails
+  the gate, or the server says a key is saved for it and none is here) keeps chat on the profile it used and records
+  `active_pending` (`{"id", "why"}`); `params.pending_notice()` is shown in the panel and the dialog. The local wire
+  reports the pending pick as the active one, so it isn't pushed back as a change. A profile picked in FreeCAD, or a
+  Save that changes the active one, ends it (`settings_merge.settle_pending`); otherwise it is followed once usable.
+- **Triggers** (`settings_sync.request(reason, prefer=...)`, one daemon thread, coalesced): the panel starting
+  (`OscarPanel._init_settings_sync`), a sign-in (`settings_ui._after_sign_in`, after the account profile is in place),
+  the dialog opening, its Save and a profile picked in the panel (`prefer="local"`), `pull_before_turn()` before every
+  turn (the user's and the workspace's: a pull older than `PULL_AGE_S`, 60 s, waited for up to `TURN_WAIT_S`, 2 s), and
+  `run_website_test`. Due means neither a pull nor an attempt in the last minute, so a signed-out FreeCAD doesn't start
+  a thread on every send. `OSCAR_SETTINGS_SYNC=0` makes all of them no-ops.
+- **One sync** (`Syncer.sync`): `GET /v1/me/ai-settings`; then, in one locked transaction of the settings file
+  (`params.update_state`), `plan_sync` merges and writes; then `PUT` with the version it merged against when the result
+  differs from the server's. A 409 is merged again with `details.current` (or a fresh GET) and pushed once more; a
+  second one waits for the next trigger. Failures are logged as `ai_settings_sync` events with an outcome and a code,
+  never a value, and shown on the AI model tab (`oscarSyncStatus`); a 400 shows the server's `details` field and
+  message there with the profile's name (`settings_sync.refusal`) and is logged as `ai_settings_refused` with the
+  field name.
+- **The merge** (`settings_merge.merge`): per profile and per field against the snapshot of the last sync (`ai_sync`
+  in the settings file: the server's settings then, the account they belong to as a hash of server and email, and this
+  FreeCAD's `has_key` and URL as last accepted). One side changed: taken. Both: the server's on a pull, ours after a
+  Save. A profile deleted here goes there unless it changed there and this is a pull. New profiles on both sides are
+  kept, names made unique. `has_key` is "a FreeCAD holds a key": ours while we hold one. A base URL is compared with what
+  THIS FreeCAD had, so two computers with different local URLs or keys never undo each other. No usable snapshot
+  (first sync with this account, another account, or a server whose version went back) means no deletions: profiles
+  are matched by id, then by name and the account profile (`adopt_remote_ids`), and everything else is kept.
+- **Deletions from the server**: a profile without a key that didn't change here goes; one with a key is kept,
+  `removed_remotely` (not synced), until the user removes it or keeps it (`oscarProfileRemoveHere` /
+  `oscarProfileKeep`; kept, it is synced again). A pull whose removals would be more than half of this computer's
+  profiles is not applied at all (`Plan.blocked`, status `blocked`, the file untouched).
+- **Applying a pull** (`settings_merge.apply_merge`): only the fields the server changed; never `api_key`, never a local
+  URL replaced by `""` (a real URL set on the website replaces it, as the contract says); profiles that aren't synced
+  stay where they were.
+- **The dialog**: `params.load_profiles_for_edit()` gives it the profiles and what the file held for them (`base`);
+  `params.save_profiles(profiles, active_id=..., base=...)` merges its edits with what a pull wrote meanwhile
+  (`settings_merge.merge_saved`). A pull while it is open reloads the tab, or, over unsaved changes, offers Reload.
+  The panel re-reads its picker on the same signal (`AccountHub.settings_synced`) and shows the pending notice.
+- **Tests**: `tests/test_settings_sync.py` (pure: ids, the wire format and the server's rules, the masking policy, the
+  merge, the plan, the gate, the pending pick, deletions, the `Syncer`, its triggers and the connect side against
+  `support/fake_workspace.py`, whose `/v1/me/ai-settings` applies the contract's checks and the server's
+  `looks_like_a_key`) and `tests/test_settings_sync_file.py` (FreeCAD: the settings file, backward compatibility, the
+  Save merge, the gate in the providers and the panel, the dialog's notices).
 
 ## Projects
 
@@ -307,7 +408,11 @@ If the default root is not writable, Oscar falls back to `<FreeCAD user folder>/
 ## Settings, files and environment
 
 Settings live in `oscar_settings.json` in the FreeCAD user folder (atomic writes), never in FreeCAD's own
-parameters. Chats are stored in `<FreeCAD user folder>/Oscar/chats`.
+parameters. Chats are stored in `<FreeCAD user folder>/Oscar/chats`. Its top-level keys: `profiles` (each with an `id`),
+`active_profile` (a name) and `active_profile_id`, `prefs`, `model_caps`, `net_grants` and `ai_sync` (the snapshot of
+the last settings sync). Keep new keys additive: an older Oscar keeps top-level keys it doesn't know as they are and
+drops profile fields it doesn't know when it saves (ids are then found again by name, see
+[AI model settings sync](#ai-model-settings-sync)).
 
 | Variable | Meaning | Default |
 |---|---|---|
@@ -320,6 +425,7 @@ parameters. Chats are stored in `<FreeCAD user folder>/Oscar/chats`.
 | `OSCAR_ALLOW_CODE` | `1` runs model-written scripts without the approval dialog (tests, unattended runs) | unset |
 | `OSCAR_API_URL` | the OriginShape server (wins over the account settings' Use a custom server switch and Server field, `OriginShapeCustomServer` / `OriginShapeServer`); plain `http://` only for loopback hosts. The app serves the API's paths too, so this is the app's address | `https://app.originshape.design` |
 | `OSCAR_UPDATE_CHECK` | `0` turns off the daily check for a newer Oscar (`updates.py`; also the `CheckForUpdates` setting, Settings → Tools & permissions → Updates) | on |
+| `OSCAR_SETTINGS_SYNC` | `0` keeps the AI model settings on this computer: no sync with the OriginShape account, and no Test in FreeCAD from the website (`settings_sync.py`) | on |
 | `OSCAR_CREDENTIAL_STORE` | where the OriginShape sign-in is kept: `auto` (the system keychain, else the credential file), `keychain`, `file` or `memory` (this process only) | `auto` |
 | `OSCAR_CREDENTIAL_FILE` | the credential file (0600) | `oscar_credentials.json` next to the settings file |
 | `OSCAR_NET_AUDIT` | `0` disables the audit hook that blocks network calls from model-written scripts | `1` |
@@ -334,8 +440,9 @@ parameters. Chats are stored in `<FreeCAD user folder>/Oscar/chats`.
 | `OSCAR_TEST_REAL_KEYCHAIN` | `1` lets `test_auth_keystore` write a test entry to your real macOS login keychain (and remove it) | unset |
 
 `tests/support/isolation.py` gives every test process `OSCAR_ALLOW_CODE=1`, `OSCAR_CREDENTIAL_STORE=memory`,
-`OSCAR_UPDATE_CHECK=0` and `OSCAR_API_URL=http://127.0.0.1:9` (nothing listens there), so no test can reach your
-keychain or a real server (the tests of the update check turn it on against the fake server).
+`OSCAR_UPDATE_CHECK=0`, `OSCAR_SETTINGS_SYNC=0` and `OSCAR_API_URL=http://127.0.0.1:9` (nothing listens there), so no
+test can reach your keychain or a real server (the tests of the update check and of the settings sync turn them on
+against the fake server).
 
 ## Logs
 

@@ -211,6 +211,12 @@ class MeshImportTest(_DocTestCase):
         text = tools._imported_text(open_path, res)
         self.assertIn("mesh of 11 triangles, NOT closed (it has holes)", text)
         self.assertIn("Note: open stays a mesh: the mesh is not closed", text)
+        self.assertIn("or they can attach it in the OriginShape workspace and use Repair there", text)
+        with tools.use_context(tools.ToolContext(state={"origin": "workspace"})):   # a task from the browser
+            text = tools._imported_text(open_path, res)
+        self.assertIn("open the attachment in the chat, press Repair, then “Use the repaired copy”, which sends "
+                      "“open-repaired.stl” with their next message", text)
+        self.assertNotIn("modelling program", text)
 
         with mock.patch.object(imported, "MAX_SOLID_TRIANGLES", 10):
             res = self.engine.import_file(_binary_stl(_cube(10), "big.stl"), "OpenDoc", as_solid=True)
