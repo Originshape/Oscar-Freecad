@@ -38,7 +38,9 @@ LEGACY_UNISOLATED = frozenset({"test_attachments.py", "test_oscar_regressions.py
                                "test_tools_and_params.py"})
 
 _TC_BASES = {"TestCase", "IsolatedAsyncioTestCase"}
-_SKIP_DIRS = {"__pycache__", "fixtures"}
+# squashfs-root: the Linux CI extracts the FreeCAD AppImage INTO the checkout (456 foreign .py,
+# some not UTF-8) — extraction output is never repository source, on any platform.
+_SKIP_DIRS = {"__pycache__", "fixtures", "squashfs-root"}
 
 
 def _base_name(node):
@@ -566,6 +568,62 @@ class MalformedUtf8Test(unittest.TestCase):
                 fh.write(b"x = 1  # " + bytes([0xFF]) + b" bad byte" + bytes([10]))
             hits = undefined_names(bad)
         self.assertEqual(hits, [(chr(0xFFFD), 0)])
+
+
+class SkipDirsTest(unittest.TestCase):
+    """The AppImage extraction directory is never repository source (the Linux CI leaves
+    squashfs-root/ inside the checkout); everything real stays scanned."""
+
+    @staticmethod
+    def _write(path, text):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def test_squashfs_root_py_files_are_ignored_everywhere(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            base = os.path.join(tmp, "repo")
+            self._write(os.path.join(base, "tests", "test_real.py"),
+                        "import unittest" + chr(10) + "class T(unittest.TestCase):" + chr(10) +
+                        "    def test_one(self):" + chr(10) + "        self.assertTrue(True)" + chr(10))
+            self._write(os.path.join(base, "oscar", "real_source.py"), "defined = 1" + chr(10))
+            for rel in ("squashfs-root" + os.sep + "usr" + os.sep + "Mod" + os.sep + "AddonManager" + os.sep + "InitGui.py",
+                        "squashfs-root" + os.sep + "nested" + os.sep + "deeper" + os.sep + "foreign.py",
+                        "squashfs-root" + os.sep + "root_level.py"):
+                self._write(os.path.join(base, *rel.split(os.sep)),
+                            "FreeCADGui" + chr(10) if "AddonManager" in rel else "undefined_foreign" + chr(10))
+            hits = scan_undefined(base)
+        self.assertEqual(hits, [], hits)
+
+    def test_real_directories_are_still_scanned(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            base = os.path.join(tmp, "repo")
+            self._write(os.path.join(base, "tests", "test_real.py"),
+                        "import unittest" + chr(10) + "class T(unittest.TestCase):" + chr(10) +
+                        "    def test_one(self):" + chr(10) + "        self.assertTrue(True)" + chr(10))
+            self._write(os.path.join(base, "oscar", "real_source.py"), "undefined_in_real_source" + chr(10))
+            hits = scan_undefined(base)
+        self.assertTrue(any("real_source" in path and "undefined_in_real_source" in name
+                            for path, _line, name in hits), hits)
+
+    def test_non_utf8_outside_excluded_dirs_is_still_reported(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            base = os.path.join(tmp, "repo")
+            os.makedirs(os.path.join(base, "oscar"), exist_ok=True)
+            os.makedirs(os.path.join(base, "tests"), exist_ok=True)
+            with open(os.path.join(base, "oscar", "bad.py"), "wb") as fh:
+                fh.write(b"x = 1  # " + bytes([0xFF]) + b" bad" + bytes([10]))
+            hits = scan_undefined(base)
+        self.assertTrue(any("bad.py" in path for path, _line, name in hits), hits)
+
+    def test_scan_tests_dir_on_an_empty_tree_is_clean(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            problems = scan_tests_dir(tmp)
+        self.assertEqual(problems, [])
 
 
 if __name__ == "__main__":
