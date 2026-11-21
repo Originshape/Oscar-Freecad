@@ -945,7 +945,7 @@ class WorkspaceConnector(QtCore.QObject):
         # While the turn runs, the panel names the model it runs on (the task's, e.g. Origin1 Super), not the model
         # of the profile picked in FreeCAD; afterwards the label shows that profile's model again.
         _show_model(panel, profile)
-        turn.on_end = lambda: _show_model(panel, _params.active_profile())
+        turn.on_end = lambda: _show_model(panel, panel._chat_profile())
         self._turn = turn
         return turn
 
@@ -1030,10 +1030,12 @@ def _changed_model(card: Any) -> bool:
 
 
 def _show_model(panel: Any, profile: Any) -> None:
-    """Show ``profile``'s model ("Origin1 Super") in the panel's model label."""
-    label = getattr(panel, "model_label", None)
-    if label is not None:
-        label.setText(_params.model_display_name(profile))
+    """Show the current workspace turn's provider/model in the compact selector."""
+    button = getattr(panel, "model_button", None) or getattr(panel, "model_label", None)
+    if button is not None:
+        display = _params.model_display_name(profile)
+        button.setText(f"{getattr(profile, 'name', '')} · {display} ▾" if display else "Choose model ▾")
+        button.setToolTip(f"Profile: {getattr(profile, 'name', '')}\nModel: {getattr(profile, 'model', '')}")
 
 
 @dataclasses.dataclass
