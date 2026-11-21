@@ -13,11 +13,13 @@ Scripting:
     fake.add_model(step_bytes, title="A flange")   # an ``open`` job from /next, for an Oscar that said it can
     fake.damaged_models.add(delivery_id)           # served with other bytes than its sha256 says
     fake.add_revert(["m-2", "m-1"], task_id="t1")  # a ``revert`` job from /next, for an Oscar that said it can
+    fake.add_profile_test("p-1")                   # a ``profile_test`` from /next, for an Oscar that said ``ai_settings``
 State: fake.hellos, fake.events[task] (posted events), fake.uploads (dicts), fake.finished[task] = (text, ok),
 fake.finish_bodies (every accepted finish body, in order),
 fake.attachment_ids (in the order added), fake.downloads (attachment ids, in the order asked),
 fake.model_reports[delivery_id] (the body of its done call), fake.model_downloads (delivery ids, in the order asked),
-fake.revert_reports[revert_id] (the body of its done call), fake.revert_uploads (previews sent with a revert).
+fake.revert_reports[revert_id] (the body of its done call), fake.revert_uploads (previews sent with a revert),
+fake.profile_test_results[test_id] (the body of its result call).
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ _TASK_PATH = re.compile(r"^/v1/connect/tasks/(?P<task>[^/]+)/(?P<what>events|fil
 _ATTACHMENT_PATH = re.compile(r"^/v1/connect/attachments/(?P<id>[^/]+)$")
 _DELIVERY_PATH = re.compile(r"^/v1/connect/deliveries/(?P<id>[^/]+)/(?P<what>file|done)$")
 _REVERT_PATH = re.compile(r"^/v1/connect/reverts/(?P<id>[^/]+)/done$")
+_PROFILE_TEST_PATH = re.compile(r"^/v1/connect/profile-tests/(?P<id>[^/]+)/result$")
 
 
 class FakeWorkspace(FakeOriginShape):
@@ -67,6 +70,9 @@ class FakeWorkspace(FakeOriginShape):
         self.revert_reports: dict[str, dict] = {}
         self.revert_uploads: list[dict] = []
         self.refuse_revert_trees = False           # done calls with a tree answer 400 (a tree the server refuses)
+        self.profile_tests: collections.deque[dict] = collections.deque()
+        self.sent_profile_tests: set[str] = set()
+        self.profile_test_results: dict[str, dict] = {}
         self._message_seq = 0
         super().__init__(**kwargs)
 
@@ -77,6 +83,17 @@ class FakeWorkspace(FakeOriginShape):
             self.revert_jobs.append({"id": revert_id, "task_id": task_id, "title": title,
                                      "messages": [{"id": message, "text": f"prompt {message}"} for message in messages]})
             return revert_id
+
+    def add_profile_test(self, profile_id: str) -> str:
+        """Queue a ``profile_test`` (the website's Test in FreeCAD). Returns its id."""
+        with self.lock:
+            test_id = f"00000000-0000-4000-8000-{len(self.profile_tests) + len(self.sent_profile_tests) + 1:012d}"
+            self.profile_tests.append({"id": test_id, "profile_id": profile_id})
+            return test_id
+
+    def can_test_profiles(self) -> bool:
+        """As the server decides: the latest hello said ``ai_settings``."""
+        return bool(self.hellos) and "ai_settings" in (self.hellos[-1].get("capabilities") or [])
 
     def can_revert(self) -> bool:
         """As the server decides: the latest hello said ``revert``."""
@@ -135,6 +152,8 @@ class FakeWorkspace(FakeOriginShape):
             return "route_connect_attachment"
         if method == "POST" and _REVERT_PATH.match(path):
             return "route_connect_revert_done"
+        if method == "POST" and _PROFILE_TEST_PATH.match(path):
+            return "route_connect_profile_test_result"
         delivery = _DELIVERY_PATH.match(path)
         if delivery is not None:
             return {("GET", "file"): "route_connect_model_file",
@@ -166,6 +185,10 @@ class FakeWorkspace(FakeOriginShape):
             return self._json(200, {"revert": job})
         if self.model_jobs and self.can_open_models():
             return self._json(200, {"open": self.model_jobs.popleft()})
+        if self.profile_tests and self.can_test_profiles():
+            test = self.profile_tests.popleft()
+            self.sent_profile_tests.add(test["id"])
+            return self._json(200, {"profile_test": test})
         if not self.jobs:
             return 204, {}, b"", "application/json"
         job = self.jobs.popleft()
@@ -269,4 +292,18 @@ class FakeWorkspace(FakeOriginShape):
         if self.refuse_revert_trees and "tree" in body:
             return self._json(400, envelope("invalid_request", "A tree has a list of at most 2000 objects."))
         self.revert_reports[revert_id] = body
+        return self._json(200, {"ok": True})
+
+    def route_connect_profile_test_result(self, call: RecordedCall) -> tuple:
+        if not self._bearer(call.headers):
+            return self._unauthorized()
+        test_id = _PROFILE_TEST_PATH.match(call.path)["id"]
+        if test_id not in self.sent_profile_tests or test_id in self.profile_test_results:
+            return self._json(404, envelope("not_found", "Test not found."))
+        body = dict(call.json or {})
+        if set(body) != {"passed", "message", "checks"} or not isinstance(body["passed"], bool) \
+                or not isinstance(body["message"], str) or len(body["message"]) > 500 \
+                or set(body["checks"] or {}) != {"reply", "tools", "image"}:
+            return self._json(400, envelope("invalid_request", "passed, message (at most 500) and checks."))
+        self.profile_test_results[test_id] = body
         return self._json(200, {"ok": True})
