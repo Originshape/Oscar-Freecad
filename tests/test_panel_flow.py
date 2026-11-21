@@ -13,6 +13,19 @@ import sys
 import tempfile
 import time
 import unittest
+# Phase 9 lineage note: this module was restored from the pre-squash lineage (aacaa84), whose
+# panel generation rendered streamed text into p.log and decoded thumbnails eagerly. The
+# current panel (redesign lineage) renders only final answers as chat messages and decodes
+# thumbnails on card expansion. Tests whose intent is fully covered TODAY on this lineage
+# were removed with this mapping (the superseding modules verified on the combined #32+#23 tree):
+#   - test_the_header_is_never_done_while_the_worker_runs -> test_stage2_review_panelui (header/heartbeat states on the redesigned panel)
+#   - test_the_expected_note_of_a_non_geometry_step_is_not_shown -> test_stage2_review_panelui DisplayFixes coverage of the redesigned cards
+#   - test_the_partial_reply_of_a_voided_round_is_removed -> test_panel_render + test_stage2_review_panelui (blocks/round reset on the redesigned transcript)
+#   - test_snapshot_is_decoded_once_and_resolvable_after_every_render -> test_stage2_review_panelui.ThumbnailChurnTest (decode-on-expand convergence)
+#   - test_the_document_gets_the_image_registered_after_set_html -> test_stage2_review_panelui.ThumbnailChurnTest (resource registration)
+#   - test_the_log_serves_the_image_itself_not_only_through_the_registration -> test_stage2_review_panelui.ThumbnailChurnTest (loadResource serving)
+# The heartbeat tests were aligned to the phrase-map contract (same payload API, new label).
+
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))   # oscar
@@ -466,48 +479,8 @@ class ThumbnailTest(FlowTestCase):
         p.tabs.setCurrentIndex(2)
         p.summary_view.log_btn.click()
 
-    def test_snapshot_is_decoded_once_and_resolvable_after_every_render(self):
-        p = self.p
-        self.begin_turn()
-        path = png(os.path.join(self.tmp, "007_shell.png"))
-        self.rich_step(snapshot_path=path)
-        key = self.card().steps[0].call_id
-        self.open_log()
-        self.assertTrue(p._thumbs.has(key))
-        image = p._thumbs.get(key)
-        self.assertEqual(image.width(), 320)               # scaled to the displayed width
-        log_view = p.summary_view.log_view
-        self.assertTrue(log_view.has_resource(key))
-        p._refresh_summary()
-        p._load_log_thumbnails()
-        self.assertTrue(log_view.has_resource(key))        # still there after the document was rebuilt
-        self.assertIs(p._thumbs.get(key), image)           # decoded once, never per render
-        self.assertIn("es-img://step/", log_view.toHtml())
 
-    def test_the_document_gets_the_image_registered_after_set_html(self):
-        p = self.p
-        self.begin_turn()
-        self.rich_step(snapshot_path=png(os.path.join(self.tmp, "a.png")))
-        key = self.card().steps[0].call_id
-        self.open_log()
-        log_view = p.summary_view.log_view
-        self.assertGreaterEqual(log_view.register_thumbnails(p._thumbs), 1)
-        resource = log_view.document().resource(QtGui.QTextDocument.ImageResource, QtCore.QUrl(thumb_url(key)))
-        self.assertFalse(resource.isNull())
 
-    def test_the_log_serves_the_image_itself_not_only_through_the_registration(self):
-        p = self.p
-        self.begin_turn()
-        self.rich_step(snapshot_path=png(os.path.join(self.tmp, "a.png")))
-        key = self.card().steps[0].call_id
-        self.open_log()
-        log_view = p.summary_view.log_view
-        url = QtCore.QUrl(thumb_url(key))
-        served = log_view.loadResource(QtGui.QTextDocument.ImageResource, url)
-        self.assertIsInstance(served, QtGui.QImage)
-        self.assertFalse(served.isNull())
-        unknown = log_view.loadResource(QtGui.QTextDocument.ImageResource, QtCore.QUrl("es-img://step/not-there"))
-        self.assertFalse(isinstance(unknown, QtGui.QImage) and not unknown.isNull())
 
     def test_the_image_is_really_painted_after_every_render(self):
         p = self.p
@@ -586,6 +559,8 @@ class ThumbnailTest(FlowTestCase):
         self.assertEqual(cache.keys(), [])
 
     def test_at_most_two_decodes_per_render_pass(self):
+        """The redesigned panel decodes thumbnails DEFERRED (on card expansion), at most two per
+        load pass, converging over passes."""
         p = self.p
         self.begin_turn()
         for i in range(5):
@@ -599,14 +574,12 @@ class ThumbnailTest(FlowTestCase):
             step.view, step.call_id, step.ok = view, f"k{i}", True
             card.steps.append(step)
         p._render()
-        self.assertEqual(len(p._thumbs.keys()), 2)
-        for _ in range(4):                                   # the retry timer finishes the rest
+        self.assertEqual(len(p._thumbs.keys()), 0)            # nothing decodes until a card opens
+        p._load_log_thumbnails()                              # the deferred pass: bounded per pass
+        self.assertLessEqual(len(p._thumbs.keys()), 2)
+        for _ in range(4):
             self.app.processEvents()
         self.assertEqual(len(p._thumbs.keys()), 5)
-
-
-# --------------------------------------------------------------------------------------------------
-# heartbeat, Act now, round reset
 
 
 class HeartbeatTest(FlowTestCase):
@@ -618,49 +591,60 @@ class HeartbeatTest(FlowTestCase):
         self.begin_turn()
         p._update_heartbeat()
         self.assertFalse(p.heartbeat_row.isHidden())
-        self.assertEqual(p.heartbeat_label.text(), "starting…")
+        self.assertEqual(p.heartbeat_label.text(), "Oscar is working…")   # no payload yet: the default phrase
         self.finish_turn()
         self.assertTrue(p.heartbeat_row.isHidden())
 
     def test_progress_payloads_drive_the_row_for_every_activity(self):
+        """The redesigned heartbeat maps every activity to its user-facing phrase (the technical
+        round/elapsed composite moved to the plan strip header)."""
         p = self.p
         self.begin_turn()
         cases = {
-            "thinking": "round 7/30 · BUILD · thinking",
-            "writing": "writing",
-            "tool_args": "writing execute_code arguments",
-            "retrying": "retrying 2/5",
-            "waiting_approval": "waiting for your approval",
-            "paused": "paused",
-            "validating": "validating",
+            "thinking": "Oscar is thinking…",
+            "writing": "Oscar is thinking…",
+            "tool_args": "Oscar is thinking…",
+            "retrying": "Oscar is retrying the current step…",
+            "waiting_approval": "Oscar is waiting for your approval…",
+            "paused": "Oscar is paused.",
+            "validating": "Oscar is validating the geometry…",
         }
         for activity, expected in cases.items():
             payload = progress(activity=activity, tool="execute_code" if activity == "tool_args" else "",
                                retry=[2, 5] if activity == "retrying" else None, started_at=time.time())
             p._on_progress(j(payload))
             self.assertIn(expected, p.heartbeat_label.text(), activity)
+        p._on_progress(j(progress(activity="running_tool", tool="build_enclosure",
+                                   phase="BUILD", started_at=time.time())))
+        self.assertIn("Oscar is building the model…", p.heartbeat_label.text())
 
     def test_running_tool_is_counted_by_the_panels_own_timer(self):
+        """A running tool shows its phase phrase and keeps the row alive on the panel's own timer
+        (the elapsed composite moved to the plan strip)."""
         p = self.p
         self.begin_turn()
-        p._on_progress(j(progress(activity="running_tool", tool="build_enclosure", started_at=time.time() - 30)))
-        self.assertIn("running build_enclosure 30 s", p.heartbeat_label.text())
+        p._on_progress(j(progress(activity="running_tool", tool="build_enclosure", phase="BUILD",
+                                   started_at=time.time() - 30)))
+        self.assertIn("Oscar is building the model…", p.heartbeat_label.text())
         p._turn_view._clock = lambda: time.time() + 65       # a minute later, no new payload arrived
         p._update_heartbeat()
-        self.assertIn("running build_enclosure 1 min 35 s", p.heartbeat_label.text())
+        self.assertFalse(p.heartbeat_row.isHidden())
+        self.assertIn("Oscar is building the model…", p.heartbeat_label.text())
 
     def test_a_silent_provider_is_visible_without_new_payloads(self):
+        """A quiet stream keeps the heartbeat visible with a truthful phrase (the redesigned panel
+        dropped the 'no data for N s' diagnostics from the label; visibility is the contract)."""
         p = self.p
         self.begin_turn()
         base = time.time()
         clock = {"now": base}
         p._turn_view._clock = lambda: clock["now"]
         p._on_progress(j(progress(activity="thinking", elapsed_round=5.0, idle_s=1.0, reasoning_chars=900)))
-        self.assertNotIn("no data", p.heartbeat_label.text())
+        self.assertIn("Oscar is thinking…", p.heartbeat_label.text())
         clock["now"] = base + 40                             # the stream went quiet: no tick arrived for 40 s
         p._update_heartbeat()
-        self.assertIn("no data for 41 s", p.heartbeat_label.text())
-        self.assertIn("thinking 45 s", p.heartbeat_label.text())
+        self.assertFalse(p.heartbeat_row.isHidden())
+        self.assertIn("Oscar is thinking…", p.heartbeat_label.text())
 
     def test_the_heartbeat_timer_runs_for_the_turn_only(self):
         p = self.p
@@ -717,20 +701,6 @@ class HeartbeatTest(FlowTestCase):
 
 
 class RoundResetTest(FlowTestCase):
-    def test_the_partial_reply_of_a_voided_round_is_removed(self):
-        p = self.p
-        self.begin_turn()
-        p._on_tool_started("get_objects")
-        p._on_tool_finished("get_objects()", True, "x")
-        p._on_text_delta("Here is the pl")                   # streams into the card as a live note
-        p._flush_render()
-        self.assertIn("Here is the pl", p.log.toPlainText())
-        p._on_round_reset("retry")
-        self.assertNotIn("Here is the pl", p.log.toPlainText())
-        p._on_text_delta("Fresh answer.")
-        p._flush_render()
-        self.assertIn("Fresh answer.", p.log.toPlainText())
-        self.assertNotIn("Here is the pl", p.log.toPlainText())
 
     def test_a_streaming_bubble_without_a_card_is_removed(self):
         p = self.p
@@ -946,15 +916,6 @@ class OutcomeTest(FlowTestCase):
             self.finish_turn(ok, text)
         return self.card()
 
-    def test_the_header_is_never_done_while_the_worker_runs(self):
-        p = self.p
-        self.begin_turn()
-        self.rich_step()
-        self.assertTrue(self.card().live)
-        self.assertIn("Working…", p.log.toPlainText())
-        self.assertNotIn("Done", p.log.toPlainText())
-        p._on_progress(j(progress(activity="thinking")))   # between rounds, while the model thinks
-        self.assertIn("Working…", p.log.toPlainText())
 
     def test_the_summary_is_rendered_once_as_a_card(self):
         p = self.p
@@ -1151,17 +1112,3 @@ class DisplayFixesTest(FlowTestCase):
         self.assertEqual(plain.count("ℹ"), 1)
         self.assertIn("ℹ Oscar stopped", plain)
 
-    def test_the_expected_note_of_a_non_geometry_step_is_not_shown(self):
-        p = self.p
-        self.begin_turn()
-        self.rich_step(name="create_document", title="Create document D", snapshot_path="",
-                       snapshot_note="not a geometry tool")
-        self.rich_step("c2", name="create_object", title="Make a box", ordinal=8, snapshot_path="",
-                       snapshot_note="no 3D view (headless session)")
-        plain = p.log.toPlainText()
-        self.assertNotIn("not a geometry tool", plain)
-        self.assertIn("no 3D view (headless session)", plain)
-
-
-if __name__ == "__main__":
-    unittest.main()
