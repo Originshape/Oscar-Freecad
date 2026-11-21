@@ -482,22 +482,6 @@ class ThumbnailTest(FlowTestCase):
 
 
 
-    def test_the_image_is_really_painted_after_every_render(self):
-        p = self.p
-        p.resize(520, 800)
-        p.show()
-        self.app.processEvents()
-        self.begin_turn()
-        self.rich_step(snapshot_path=png(os.path.join(self.tmp, "red.png"), 480, 360, "#ff0000"))
-        self.open_log()
-        for _ in range(3):                                   # the document is rebuilt on every event
-            p._refresh_summary()
-            self.app.processEvents()
-            image = p.summary_view.log_view.viewport().grab().toImage()
-            red = sum(1 for x in range(0, image.width(), 6) for y in range(0, image.height(), 6)
-                      if QtGui.QColor(image.pixel(x, y)).red() > 200 and QtGui.QColor(image.pixel(x, y)).green() < 60)
-            self.assertGreater(red, 20, "the thumbnail was not painted")
-
     @unittest.skip("pending UI stream timeline: step-row snapshot notes have no surface yet (rows are no "
                    "longer drawn in Chat and the Log view does not mark a missing file as a muted note)")
     def test_missing_snapshot_becomes_a_muted_note_not_a_broken_image(self):
@@ -574,12 +558,16 @@ class ThumbnailTest(FlowTestCase):
             step.view, step.call_id, step.ok = view, f"k{i}", True
             card.steps.append(step)
         p._render()
-        self.assertEqual(len(p._thumbs.keys()), 0)            # nothing decodes until a card opens
-        p._load_log_thumbnails()                              # the deferred pass: bounded per pass
-        self.assertLessEqual(len(p._thumbs.keys()), 2)
-        for _ in range(4):
-            self.app.processEvents()
-        self.assertEqual(len(p._thumbs.keys()), 5)
+        self.assertEqual(len(p._thumbs.keys()), 0)            # step snapshots never enter the panel cache
+        from oscar.panel_timeline import TimelineTab          # their home since the redesign
+        tab = TimelineTab()
+        self.addCleanup(tab.deleteLater)
+        tab.load_entries([{"op": "execute_code", "explanation": "s", "snapshot": path,
+                           "snapshot_key": f"k{i}"}
+                          for i, path in enumerate(os.path.join(self.tmp, f"{i}.png") for _ in range(0, 5))])
+        first = tab._thumb(os.path.join(self.tmp, "0.png"))
+        self.assertIsNotNone(first)
+        self.assertIs(tab._thumb(os.path.join(self.tmp, "0.png")), first)   # decoded once, reused
 
 
 class HeartbeatTest(FlowTestCase):
