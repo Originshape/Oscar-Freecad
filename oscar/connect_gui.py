@@ -22,6 +22,11 @@ A model the user sends from the browser (``connect.OpenModel``) opens as a new d
 after its task (``open_model_document``): the STEP file is imported with its parts' names and colours, and the view
 is framed on it. The connector hands the loop ``open_model``, which is what makes ``hello`` say this Oscar can.
 
+The website's **Test in FreeCAD** (Settings → AI model) arrives as a ``connect.ProfileTest``: the connector hands the
+loop ``test_profile``, which runs the settings dialog's Test connection for that local profile, with its local key, on
+the loop's thread after a sync (``settings_sync.run_website_test``); only the outcome and a message scrubbed of the key
+go back.
+
 Nothing here changes what a turn may do: scripts and network access keep their approvals. Each question is one
 step in the workspace that changes in place: "Waiting for your approval in FreeCAD", then approved, declined or no
 answer (``netguard.on_approval``). With *Approve from the workspace* on (``connect.REMOTE_PREF``, on by default once connected),
@@ -114,6 +119,13 @@ def _map_path() -> str:
 
 def outbox() -> connect.Outbox:
     return connect.Outbox(os.path.join(_chats.chats_dir(), OUTBOX_FILE))
+
+
+def _settings_sync_on() -> bool:
+    """The website may ask for a Test in FreeCAD only while the AI model settings sync (``OSCAR_SETTINGS_SYNC``)."""
+    from . import settings_sync
+
+    return settings_sync.enabled()
 
 
 def _redact(text: str) -> str:
@@ -835,7 +847,8 @@ class WorkspaceConnector(QtCore.QObject):
             self._loop = connect.Loop(self._session, start_turn=self._start_turn, is_idle=self._is_idle,
                                       on_state=self._state_reported.emit, versions=connect.versions(_freecad_version()),
                                       log=_log, files_dir=files_dir, outbox=outbox(), recover=self._recover,
-                                      redact=_redact, open_model=self._open_model, revert=self._revert)
+                                      redact=_redact, open_model=self._open_model, revert=self._revert,
+                                      test_profile=self._test_profile if _settings_sync_on() else None)
             self._loop.start()
             _log("connect_on")
         elif not on and self._loop is not None:
@@ -902,6 +915,14 @@ class WorkspaceConnector(QtCore.QObject):
         if error:
             return False, _redact(f"FreeCAD couldn’t open the model: {error}")[:500], ""
         return True, "", str(label or "")
+
+    @staticmethod
+    def _test_profile(test: connect.ProfileTest) -> tuple[bool, str, dict]:
+        """The website's Test in FreeCAD (loop thread): the latest settings, then the Test connection of the local
+        profile, with its key (a profile this computer may not use yet is not tested)."""
+        from . import settings_sync
+
+        return settings_sync.run_website_test(test.profile_id)
 
     def _revert(self, job: connect.RevertJob) -> connect.RevertOutcome:
         """Undo a revert job's turns (on the GUI thread), then read the model after them: the preview and the

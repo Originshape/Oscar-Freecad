@@ -101,6 +101,20 @@ class FakeTurn:
         return list(self._exports)
 
 
+class RepairedAttachmentTest(unittest.TestCase):
+    def test_a_repaired_copy_is_read_with_its_original(self):
+        body = {"task_id": "t1", "message": {"id": "m-1", "text": "Fillet it.\n(“Base-repaired.stl” is the repaired copy "
+                                                                       "of “Base.STL”, checked closed in the browser.)",
+                                             "attachments": [{"id": "a-1", "name": "Base-repaired.stl", "format": "stl",
+                                                              "kind": "cad", "size": 84, "sha256": "0" * 64,
+                                                              "repaired_from": "Base.STL"}]}}
+        job = connect.Job.parse(body)
+        self.assertEqual((job.attachments[0].name, job.attachments[0].repaired_from), ("Base-repaired.stl", "Base.STL"))
+        self.assertIn("is the repaired copy", job.text)
+        del body["message"]["attachments"][0]["repaired_from"]
+        self.assertEqual(connect.Job.parse(body).attachments[0].repaired_from, "")
+
+
 class ConnectCase(unittest.TestCase):
     def setUp(self):
         for reset in (discovery.clear_cache, session.reset_sessions, keystore.reset_memory, account.clear_model_cache):

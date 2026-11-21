@@ -1,14 +1,31 @@
-# Changelog
-
-All notable changes to Oscar for FreeCAD. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and versions follow [Semantic Versioning](https://semver.org/): the version is in `package.xml` and
-`oscar/__init__.py`, and each release is a `v<version>` tag with a ZIP attached.
-
 ## [Unreleased]
+### Added
+- **AI model settings synced with your OriginShape account**: signed in with OriginShape, whether you use the account
+  or your own provider, your provider profiles (name, provider, base URL, model, reasoning, Advanced overrides)
+  and the one in use are the same in FreeCAD and on the website (Settings → AI model). Oscar syncs when the panel
+  opens, after you sign in, when you open its settings, after Save (and a profile picked in the panel), and before a
+  chat when the last check is more than a minute old, always in the background. Each setting is merged on its own; when
+  both sides changed the same one, the website's wins on a fetch and yours on a Save. **API keys never leave this
+  computer** (the website only learns whether a key is saved here), nor does a base URL with a user, password, query or
+  fragment in it, nor the profiles' notes. A profile made on the website, or whose base URL or provider the website
+  changed, is not used (nor its key sent) until you confirm its address in Oscar's settings; a website pick of such a
+  profile, or of one whose key is on another computer, doesn't switch chat until then. A profile with a key that the
+  website removed stays until you remove or keep it here, and a sync that would remove more than half of your profiles
+  is not applied. Keys, and pieces of keys providers echo in errors, are masked in everything sent. A setting
+  OriginShape refuses is named in the settings, with the profile. `OSCAR_SETTINGS_SYNC=0` keeps the settings local.
+- **Test in FreeCAD**: with Connect on, the website can ask FreeCAD to test a profile; the test runs here with the key
+  saved here, on the latest settings, and only its result comes back, scrubbed of the key.
+- **A mesh with holes points at the OriginShape workspace's Repair**: when `import_file` can't make a solid of an open
+  mesh, the model is told that the user can repair it in the workspace (Repair, then "Use the repaired copy"), as the
+  way to go for a task from the workspace and as an option for a chat in FreeCAD. A workspace attachment's
+  `repaired_from` (the original's name) is read.
+### Changed
+- **Every provider profile has a stable id** in `oscar_settings.json`, and the profile in use is remembered by it, so a
+  rename never switches profiles. Older settings files get their ids when they are read (nothing is rewritten until
+  the next save), and an older Oscar can still read and save the file.
 
 The reconstruction-accuracy stack (Issues 003 + the reconstruction backlog): mesh-to-
 parametric-CAD with honest evidence at every stage.
-
 ### Added
 - Noise-adaptive recognition (K1): sigma from leave-one-out plane residuals; every gate
   derives from the measured noise; scan-quality report (G5) with completeness
@@ -36,13 +53,11 @@ parametric-CAD with honest evidence at every stage.
   corpus and runner (B-1, `scripts/benchmark_recon.py`), plan macro export (S8), and
   the 100k-facet performance tier check (S8).
 - CI runs the reconstruction suites on FreeCAD 1.1.3 and 1.1.4 (K5).
-
 ### Changed
 - The source mesh is hidden at finalize only after a VERIFIED outcome (W-2) and shown
   again when an outcome loses verification; it is never deleted.
 - `step_collision` removed from the validation catalog (V-3): its evidence is the
   reference interference rows under `fit.interference`.
-
 ### Fixed
 - Interactive decisions answered from the question bar actually reach the waiting agent
   (the "answer accepted by the UI, then denied after 120 s" bug): a QuestionsBar click for
@@ -66,7 +81,6 @@ parametric-CAD with honest evidence at every stage.
   and curved dropouts keep honest per-loop refusals.
 - The GUI smoke test writes its log as UTF-8 (Windows cp1252 crashed it) and its
   thought-step check matches its name; 69/69 checks pass on the real GUI.
-
 
 ## [0.2.1] - 2026-10-28
 
