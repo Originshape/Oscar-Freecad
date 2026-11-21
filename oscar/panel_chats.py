@@ -141,7 +141,9 @@ class ChatSearchDialog(QtWidgets.QDialog):
 
 
 def search(panel) -> None:
-    """Search the panel's chats; the chosen one becomes the current chat (not while a turn runs)."""
+    """Search the panel's chats; the chosen one becomes the current chat. Switching follows the picker's
+    rule: allowed while a turn runs (the turn keeps writing to its own chat), refused only while an
+    attached file is still being read."""
     sessions = list(panel.sessions)
     dialog = ChatSearchDialog(chat_texts(sessions), panel)
     if dialog.exec() != QtWidgets.QDialog.Accepted or dialog.chosen is None:
@@ -149,8 +151,8 @@ def search(panel) -> None:
     session = sessions[dialog.chosen]
     if session["history"] is panel.history:
         return
-    if panel._busy():
-        panel._set_status("Wait for the current turn to finish before switching chats.")
+    if getattr(panel, "_building", False):
+        panel._set_status("Wait for the attached file to finish reading.")
         return
     panel._persist_current()
     panel._activate_session(session)

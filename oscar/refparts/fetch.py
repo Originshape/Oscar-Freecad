@@ -176,7 +176,7 @@ def file_facts(path: str) -> dict:
 def local_mirror_dir() -> str:
     """``$OSCAR_REFPART_LOCAL_DIR`` (read at CALL time, ``~`` expanded) or ``""`` when unset."""
     value = os.environ.get(ENV_LOCAL_DIR, "").strip()
-    return os.path.abspath(os.path.expanduser(value)) if value else ""
+    return os.path.normpath(os.path.abspath(os.path.expanduser(value))) if value else ""
 
 
 def find_local_mirror(ref_id: str) -> str:
