@@ -48,6 +48,12 @@ so (the ``revert`` capability) and ``/next`` may answer with a ``revert`` job: t
 newest first. FreeCAD undoes them with the panel's own revert (``revert(job)``), the loop uploads the model's preview
 after it and reports which prompts' turns were undone, with the feature tree, and why not all of them if not.
 
+The website can ask this FreeCAD to test one of its AI model profiles (Settings → AI model → **Test in FreeCAD**): when
+the loop was given ``test_profile``, ``hello`` says so (the ``ai_settings`` capability) and ``/next`` may answer with a
+``profile_test`` (``ProfileTest``: the test and the profile's id). FreeCAD runs the settings dialog's Test connection
+for that profile, with the key it holds (``settings_sync.run_profile_test``), and posts only the outcome: passed or
+not, which checks passed, and a short message scrubbed of the key. The key itself never leaves this computer.
+
 A turn's answer always reaches the workspace. The loop never abandons a turn over one failed
 call; the answer is written to an ``Outbox`` on disk before it is sent and removed only once the server has it. While
 idle, the loop delivers what is left there and asks ``GET /v1/connect/unanswered`` which of its turns the website
@@ -77,6 +83,7 @@ from typing import Any, Protocol
 from urllib.parse import urlencode
 
 from . import __version__
+from . import keyguard as _keyguard
 from .auth import account as _account
 from .auth import transport
 from .auth.transport import AuthError, AuthUnavailable, SignedOut
@@ -115,6 +122,10 @@ MODEL_FORMATS = frozenset({"step"})
 OPEN_REPORT_ATTEMPTS = 3
 REVERT = "revert"                  # the capability: this Oscar reverts turns the browser asks it to (section 14)
 REVERT_REPORT_ATTEMPTS = 3
+AI_SETTINGS = "ai_settings"        # the capability: this Oscar runs the Test connection the website asks for (#86)
+PROFILE_TEST_REPORT_ATTEMPTS = 3
+PROFILE_TEST_MESSAGE_LIMIT = 500
+PROFILE_TEST_CHECKS = ("reply", "tools", "image")
 APPROVAL_TITLES = {
     "waiting": APPROVAL_WAIT_TEXT,
     "approved": "Approved in FreeCAD",
@@ -165,14 +176,17 @@ class JobFile:
     size: int
     sha256: str
     page: int = 0    # a page image of the PDF before it (1-based); 0 for the user's own files
+    repaired_from: str = ""   # the original's name, for a mesh the browser repaired (Repair, then Use the repaired copy)
 
     @classmethod
     def parse(cls, data: Any) -> JobFile:
         size, sha256 = int(data["size"]), str(data["sha256"]).lower()
         if size < 0 or not re.fullmatch(r"[0-9a-f]{64}", sha256):
             raise ValueError("size or sha256")
+        repaired = data.get("repaired_from")
         return cls(id=str(data["id"]), name=str(data.get("name") or "attachment"), format=str(data.get("format") or ""),
-                   kind=str(data.get("kind") or ""), size=size, sha256=sha256, page=int(data.get("page") or 0))
+                   kind=str(data.get("kind") or ""), size=size, sha256=sha256, page=int(data.get("page") or 0),
+                   repaired_from=_clip(repaired, 200) if isinstance(repaired, str) else "")
 
 
 @dataclass(frozen=True)
@@ -268,6 +282,27 @@ class RevertJob:
 
 
 @dataclass(frozen=True)
+class ProfileTest:
+    """The website asking this FreeCAD to test one of its AI model profiles (the ``profile_test`` job of
+    ``/v1/connect/next``): run the Test connection for the local profile ``profile_id``, then say how it went with
+    ``Client.profile_test_result``."""
+
+    id: str
+    profile_id: str
+
+    @classmethod
+    def parse(cls, data: Any) -> ProfileTest:
+        try:
+            test = cls(id=str(data["id"]), profile_id=str(data["profile_id"]))
+        except (KeyError, TypeError, AttributeError) as e:
+            raise ConnectError(f"The OriginShape workspace sent a profile test Oscar can't read ({type(e).__name__}).",
+                               code="bad_job") from None
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", test.id) or not test.profile_id:
+            raise ConnectError("The OriginShape workspace sent a profile test Oscar can't read.", code="bad_job")
+        return test
+
+
+@dataclass(frozen=True)
 class RevertOutcome:
     """What a revert did in FreeCAD: the prompts whose turns are undone (message ids), and why not all of them if
     not (``message``). ``preview`` (``(format, bytes)``) and ``tree`` are the model after it, when there is one."""
@@ -323,9 +358,9 @@ class Client:
     def hello(self, versions: dict[str, str]) -> None:
         self._call("POST", "/v1/connect/hello", json_body=versions)
 
-    def next_job(self, wait: float = NEXT_WAIT_S) -> Job | OpenModel | RevertJob | None:
-        """The next task message to answer, a revert or a model to open (only for an Oscar that said it can), or
-        None."""
+    def next_job(self, wait: float = NEXT_WAIT_S) -> Job | OpenModel | RevertJob | ProfileTest | None:
+        """The next task message to answer, a revert, a model to open or a profile to test (only for an Oscar that
+        said it can), or None."""
         seconds = max(0, min(int(wait), int(NEXT_WAIT_S)))
         reply = self._call("POST", f"/v1/connect/next?wait={seconds}", timeout=(5.0, seconds + 15.0))
         if reply.status == 204:
@@ -335,6 +370,8 @@ class Client:
             return RevertJob.parse(data["revert"])
         if isinstance(data, dict) and isinstance(data.get("open"), dict):
             return OpenModel.parse(data["open"])
+        if isinstance(data, dict) and isinstance(data.get("profile_test"), dict):
+            return ProfileTest.parse(data["profile_test"])
         if not isinstance(data, dict) or not isinstance(data.get("job"), dict):
             raise ConnectError("The OriginShape workspace answered with something Oscar can't read.", code="bad_job")
         return Job.parse(data["job"])
@@ -432,6 +469,22 @@ class Client:
         if 200 <= reply.status < 300:
             return True
         if reply.status in (404, 409):
+            return False
+        raise transport.api_error(reply, self.WHAT)
+
+    def profile_test_result(self, test_id: str, passed: bool, message: str, checks: dict[str, Any]) -> bool:
+        """Report a profile test this FreeCAD ran: ``passed``, a short ``message`` (already scrubbed of the key; at most
+        ``PROFILE_TEST_MESSAGE_LIMIT`` characters) and ``checks`` (``reply``, ``tools``, ``image``: True, False or
+        None). False when the server no longer waits for this report (it expired, or was answered)."""
+        text = _keyguard.scrub(str(message or ""))   # once more at the door: keys and pieces of keys by their shape
+        body = {"passed": bool(passed), "message": self._out(text)[:PROFILE_TEST_MESSAGE_LIMIT],
+                "checks": {name: checks.get(name) if checks.get(name) in (True, False) else None
+                           for name in PROFILE_TEST_CHECKS}}
+        reply = self.session.authorized_request("POST", f"/v1/connect/profile-tests/{test_id}/result",
+                                                timeout=(5.0, 20.0), json_body=body)
+        if 200 <= reply.status < 300:
+            return True
+        if reply.status in (404, 409, 410):
             return False
         raise transport.api_error(reply, self.WHAT)
 
@@ -900,7 +953,8 @@ class Loop:
     ``files_dir()`` is where attachments are downloaded to. ``open_model(model, path)``, when given, opens a model
     the browser sent (a downloaded STEP file) in FreeCAD and returns ``(ok, message, document)``; with it, ``hello``
     tells the server this Oscar can. So does ``revert(job)``, which undoes a revert job's turns in FreeCAD and
-    returns a ``RevertOutcome``."""
+    returns a ``RevertOutcome``, and ``test_profile(test)``, which runs the Test connection of a local AI model
+    profile and returns ``(passed, message, checks)`` (the ``ai_settings`` capability)."""
 
     def __init__(self, session_for: Callable[[], Any], *, start_turn: Callable[[Job, list[str]], Turn],
                  is_idle: Callable[[], bool], on_state: Callable[[str, str], None], versions: dict[str, str],
@@ -909,7 +963,8 @@ class Loop:
                  recover: Callable[[str, str], tuple[str, bool, str]] | None = None,
                  redact: Callable[[str], str] | None = None,
                  open_model: Callable[[OpenModel, str], tuple[bool, str, str]] | None = None,
-                 revert: Callable[[RevertJob], RevertOutcome] | None = None) -> None:
+                 revert: Callable[[RevertJob], RevertOutcome] | None = None,
+                 test_profile: Callable[[ProfileTest], tuple[bool, str, dict[str, Any]]] | None = None) -> None:
         """``outbox`` keeps answers until the server has them; ``recover(task_id, message_id)`` answers a turn the
         website closed from FreeCAD's own chat: ``("found", ok, text)``, ``("busy", ...)`` while FreeCAD still
         works on it, or ``("none", ...)``; ``redact`` cleans text that leaves this computer."""
@@ -923,8 +978,10 @@ class Loop:
         self._on_state = on_state
         self._open_model = open_model
         self._revert_turns = revert
+        self._test_profile = test_profile
         self._versions: dict[str, Any] = dict(versions)
-        capabilities = [name for name, handler in ((OPEN_MODEL, open_model), (REVERT, revert)) if handler is not None]
+        capabilities = [name for name, handler in ((OPEN_MODEL, open_model), (REVERT, revert),
+                                                   (AI_SETTINGS, test_profile)) if handler is not None]
         if capabilities:
             self._versions["capabilities"] = capabilities
         self._log = log or (lambda *args, **kwargs: None)
@@ -1005,6 +1062,8 @@ class Loop:
                 self._state_is("connected")
                 if isinstance(job, RevertJob) and not self._stop.is_set():
                     self._revert(client, job)
+                elif isinstance(job, ProfileTest) and not self._stop.is_set():
+                    self._run_profile_test(client, job)
                 elif isinstance(job, OpenModel) and not self._stop.is_set():
                     self._open(client, job)
                 elif job is not None and not self._stop.is_set():
@@ -1134,6 +1193,37 @@ class Loop:
                 finally:
                     self._state_is("connected")
         return ok, message, document
+
+    def _run_profile_test(self, client: Client, test: ProfileTest) -> None:
+        """Run the Test connection the website asked for (``test_profile``) and report how it went. ``SignedOut``
+        propagates (the server expires the test after a while and tells the browser)."""
+        self._log("connect_profile_test", test=test.id)
+        if self._test_profile is None:
+            passed, message, checks = False, "This Oscar for FreeCAD can’t test profiles from the browser.", {}
+        else:
+            self._state_is("working")
+            try:
+                with self._alive(lambda: client.hello(self._versions)):
+                    passed, message, checks = self._test_profile(test)
+            except Exception as e:  # noqa: BLE001 - the browser gets a message, the log the reason
+                self._log("connect_profile_test_error", test=test.id, error=type(e).__name__)
+                passed, message, checks = False, f"FreeCAD couldn’t run the test ({type(e).__name__}).", {}
+            finally:
+                self._state_is("connected")
+        self._log("connect_profile_tested", test=test.id, passed=bool(passed))
+        for attempt in range(PROFILE_TEST_REPORT_ATTEMPTS):
+            try:
+                client.profile_test_result(test.id, passed, str(message or "")[:PROFILE_TEST_MESSAGE_LIMIT],
+                                           checks if isinstance(checks, dict) else {})
+                return
+            except AuthUnavailable:
+                if attempt == PROFILE_TEST_REPORT_ATTEMPTS - 1 or self._stop.wait(BACKOFF_S[attempt]):
+                    return
+            except AuthError as e:
+                if isinstance(e, SignedOut):
+                    raise
+                self._log("connect_profile_test_report_error", test=test.id, status=e.status, code=e.code)
+                return
 
     def _revert(self, client: Client, job: RevertJob) -> None:
         """Undo a revert job's turns in FreeCAD, upload the model's preview after it, and say which were undone.

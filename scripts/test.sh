@@ -38,6 +38,8 @@ use() {
   export OSCAR_ALLOW_CODE=1
   # no daily "is there a newer Oscar?" request to the OriginShape server from a test run
   export OSCAR_UPDATE_CHECK=0
+  # no AI model settings sync started by the panel or the dialog (its own tests run it against the fake server)
+  export OSCAR_SETTINGS_SYNC=0
 }
 run_py() {    # run tests/run.py under freecadcmd with OSCAR_TEST_MODULES already set
   "$FREECADCMD" -c "import sys; sys.argv=['run.py']; __file__='$TESTS/run.py'; exec(open(__file__, encoding='utf-8').read())"

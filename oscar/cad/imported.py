@@ -21,6 +21,7 @@ SEW_TOLERANCE = 0.05          # mm: mesh points closer than this become one vert
 MAX_LINES = 12                # objects listed one by one; the rest are counted
 MESH_TYPE = "Mesh::Feature"
 MESH_EXTENSIONS = frozenset({"stl", "obj", "3mf", "ply", "ast"})
+NOT_CLOSED = "the mesh is not closed (it has holes or open edges)"
 
 
 def solid_from_mesh(mesh) -> tuple[Any, str]:
@@ -36,7 +37,7 @@ def solid_from_mesh(mesh) -> tuple[Any, str]:
         return None, (f"it has {count:,} triangles; Oscar makes solids of meshes up to {MAX_SOLID_TRIANGLES:,} "
                       "(more would hold FreeCAD for minutes)")
     if not mesh.isSolid():
-        return None, "the mesh is not closed (it has holes or open edges), so it does not enclose a volume"
+        return None, f"{NOT_CLOSED}, so it does not enclose a volume"
     import Part
 
     refine = count <= MAX_REFINE_TRIANGLES

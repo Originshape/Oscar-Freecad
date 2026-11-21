@@ -66,6 +66,8 @@ PURE_MODULES = (
     "test_updates",
     # the pen's region line and the chat search
     "test_markup", "test_chatsearch",
+    # the AI model settings synced with the account: ids, the wire format, the merge, the sync, Test in FreeCAD
+    "test_settings_sync",
 )
 
 EXIT_OK, EXIT_FAILED, EXIT_NO_TESTS, EXIT_REFUSED = 0, 1, 2, 3
