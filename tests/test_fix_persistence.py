@@ -373,7 +373,7 @@ class AsyncDialogTest(_DialogCase):
             dialog._test()
             self.assertLess(time.time() - began, 0.3)
             self.assertEqual(dialog.test_label.text(), "Testing…")
-            self._pump(0.15)
+            self._pump(0.5)    # a 10 ms timer needs >=3 deliveries: loaded runners missed the 0.15 s window
             self.assertGreaterEqual(len(ticks), 3)
             self.release.set()
             self._wait(dialog)
