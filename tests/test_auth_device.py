@@ -123,9 +123,11 @@ class PollTest(DeviceCase):
         self.assertEqual(form["client_id"], "oscar-freecad")
 
     def test_approved_by_the_user_while_polling(self):
+        # deterministic approval after one pending poll — the Timer-thread variant raced the
+        # fast scaled poll loop on loaded macOS runners
+        self.fake.device_auto, self.fake.device_auto_after = "approve", 1
         flow = self.flow()
         flow.start()
-        threading.Timer(0.15, self.fake.approve_device).start()
         self.assertTrue(flow.poll(threading.Event()).access_token)
         self.assertGreaterEqual(self.fake.counts["token:device_code"], 2)
 
