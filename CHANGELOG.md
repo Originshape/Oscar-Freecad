@@ -1,32 +1,32 @@
 ## [Unreleased]
-### Added
-- **AI model settings synced with your OriginShape account**: signed in with OriginShape, whether you use the account
-  or your own provider, your provider profiles (name, provider, base URL, model, reasoning, Advanced overrides)
-  and the one in use are the same in FreeCAD and on the website (Settings → AI model). Oscar syncs when the panel
-  opens, after you sign in, when you open its settings, after Save (and a profile picked in the panel), and before a
-  chat when the last check is more than a minute old, always in the background. Each setting is merged on its own; when
-  both sides changed the same one, the website's wins on a fetch and yours on a Save. **API keys never leave this
-  computer** (the website only learns whether a key is saved here), nor does a base URL with a user, password, query or
-  fragment in it, nor the profiles' notes. A profile made on the website, or whose base URL or provider the website
-  changed, is not used (nor its key sent) until you confirm its address in Oscar's settings; a website pick of such a
-  profile, or of one whose key is on another computer, doesn't switch chat until then. A profile with a key that the
-  website removed stays until you remove or keep it here, and a sync that would remove more than half of your profiles
-  is not applied. Keys, and pieces of keys providers echo in errors, are masked in everything sent. A setting
-  OriginShape refuses is named in the settings, with the profile. `OSCAR_SETTINGS_SYNC=0` keeps the settings local.
-- **Test in FreeCAD**: with Connect on, the website can ask FreeCAD to test a profile; the test runs here with the key
-  saved here, on the latest settings, and only its result comes back, scrubbed of the key.
-- **A mesh with holes points at the OriginShape workspace's Repair**: when `import_file` can't make a solid of an open
-  mesh, the model is told that the user can repair it in the workspace (Repair, then "Use the repaired copy"), as the
-  way to go for a task from the workspace and as an option for a chat in FreeCAD. A workspace attachment's
-  `repaired_from` (the original's name) is read.
-### Changed
-- **Every provider profile has a stable id** in `oscar_settings.json`, and the profile in use is remembered by it, so a
-  rename never switches profiles. Older settings files get their ids when they are read (nothing is rewritten until
-  the next save), and an older Oscar can still read and save the file.
-
+### Fixed
+- **Chats are independent** (#2): a turn writes only to the chat that started it. Its transcript, plan,
+  artifacts, project folder, attachments, undelivered images, unfinished composer text and turn record are
+  kept per chat, and switching chats (the picker, New chat, Chat search) is allowed while a turn runs — a
+  message sent in another chat then waits in that chat instead of steering the running turn.
+- A queued message whose send was blocked (signed out, new Terms, no key…) no longer disappears together
+  with what the user was typing: it keeps waiting in its chat and the composer is left alone.
+- Picking the chat that is already shown no longer wipes the message being typed.
+- A message queued in the chat on screen goes out when the panel becomes free, even when other chats
+  queued messages before it.
+- The pause, stop and Esc controls act on the running turn only while its chat is shown; in another chat
+  the send button sends (queuing there), Esc belongs to the application again, and the running turn's
+  status line, heartbeat and Act-now button do not show.
+- A turn whose first request failed for an account reason gives its message back to its own chat also when
+  another chat is on screen: the message returns to that chat's input (it used to stay in its history
+  unanswered), and the same now holds for an undelivered steered message.
+- A queued message that is still waiting when its chat is opened later asks before it is sent.
+### Fixed
+- **The source mesh no longer appears as a second model after a rebuild** (#5): when a finished turn
+  rebuilds an imported STL/OBJ into a solid body, the mesh it traced over is hidden at the end of the
+  turn (the body is the deliverable; the mesh stays in the tree as a reference and the saved model
+  carries the hidden state). Only meshes Oscar itself imported are hidden, and only in the document the
+  turn built the deliverable in — a scan imported for a fit check or measurement is never touched, a
+  capped or unverified build keeps its mesh visible, and a later turn does not hide a mesh the user
+  showed again on purpose. Reverting the turn brings the mesh back: the engine's turn snapshot now
+  records mesh visibility and the revert restores it.
 The reconstruction-accuracy stack (Issues 003 + the reconstruction backlog): mesh-to-
 parametric-CAD with honest evidence at every stage.
-### Added
 - Noise-adaptive recognition (K1): sigma from leave-one-out plane residuals; every gate
   derives from the measured noise; scan-quality report (G5) with completeness
   (outer-rim / hole-opening / dropout classification, through-pairing), integrity
@@ -53,7 +53,6 @@ parametric-CAD with honest evidence at every stage.
   corpus and runner (B-1, `scripts/benchmark_recon.py`), plan macro export (S8), and
   the 100k-facet performance tier check (S8).
 - CI runs the reconstruction suites on FreeCAD 1.1.3 and 1.1.4 (K5).
-### Changed
 - The source mesh is hidden at finalize only after a VERIFIED outcome (W-2) and shown
   again when an outcome loses verification; it is never deleted.
 - `step_collision` removed from the validation catalog (V-3): its evidence is the
@@ -81,7 +80,6 @@ parametric-CAD with honest evidence at every stage.
   and curved dropouts keep honest per-loop refusals.
 - The GUI smoke test writes its log as UTF-8 (Windows cp1252 crashed it) and its
   thought-step check matches its name; 69/69 checks pass on the real GUI.
-
 ## [0.2.1] - 2026-10-28
 
 The first public release: 0.2.0 (released internally) with these fixes.
