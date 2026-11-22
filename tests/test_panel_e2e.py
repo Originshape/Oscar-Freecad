@@ -78,6 +78,9 @@ class EndToEndTest(FlowTestCase):
                         mock.patch.object(agent._tools, "run_tool", fake_run_tool)):
             patcher.start()
             self.addCleanup(patcher.stop)
+        # The panel resolves the chat's profile through its own list first: the seeded "OriginShape"
+        # account profile (signed out in tests) would block every send. Give the chat the mocked profile.
+        self.p._profiles = [params.Profile(name="t", provider="openai_compat", model="m")]
         self.addCleanup(self.stop_worker)
 
     def start_turn(self, text, script, validator=None):
@@ -89,7 +92,8 @@ class EndToEndTest(FlowTestCase):
         check = validator if validator is not None else (lambda doc, ctx: fake_validation(True))
 
         def factory(history, **kw):
-            return agent.AgentWorker(history, provider=provider, profile=profile, validator=check, **kw)
+            # the panel passes the chat's own profile (per-chat profiles) — a factory kwarg here would clash
+            return agent.AgentWorker(history, provider=provider, validator=check, **kw)
 
         with mock.patch.object(panel, "AgentWorker", factory):
             self.p.input.setPlainText(text)
