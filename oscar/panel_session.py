@@ -1,8 +1,11 @@
 """Task chats of the Oscar panel (sessions) and their per-chat build state, as a mixin of ``OscarPanel``.
 
 A session is the dict ``chats.new_session()`` returns plus panel-only keys: ``blocks`` (the rendered cards,
-``None`` until first shown), ``pending_notes`` and ``_project`` (the bound ``oscar.project.Project``, never
-persisted). The persisted optional keys are the chat's build state:
+``None`` until first shown), ``_project`` (the bound ``oscar.project.Project``, never persisted) and the
+runtime-only per-chat state ``pending_notes``, ``pending`` (attachment paths waiting with this chat's next
+message), ``carry_images`` (images of an undelivered steer that ride this chat's next message) and ``_draft``
+(the chat's unfinished composer text, saved on switching). The persisted optional keys are the chat's build
+state:
 
 - ``project_dir``: the absolute folder of the chat's Project (set when a turn binds it);
 - ``ledger``: the plan the next turn carries over, kept from ``plan_changed`` and from the worker's
@@ -18,13 +21,15 @@ account without a sign-in, an Anthropic profile without its key), the onboarding
 (``_append_empty_state``; the panel's ``_sync_onboarding`` keeps that card in step with the sign-in).
 
 The mixin relies on the host panel for ``chat_combo``, ``del_chat_btn``, ``history`` / ``blocks`` / ``worker``,
-``_append``, ``_render``, ``_set_status``, ``_refresh_session_widgets`` (the plan / artifacts strips), ``_thumbs`` and
-``_sync_onboarding``.
+``input``, ``_building``, ``_append``, ``_render``, ``_set_status``, ``_refresh_session_widgets`` (the plan /
+artifacts strips), ``_refresh_attach_bar``, ``_sync_turn_chrome``, ``_thumbs``, ``_sync_onboarding`` and
+``_waiting_sends`` / ``_deliver_waiting_sends`` (a message queued in one chat while another chat's turn runs
+waits in its own, ``panel`` / ``panel_turn``).
 """
 
 import os
 
-from PySide import QtWidgets
+from PySide import QtCore, QtWidgets
 
 from .panel_blocks import Block
 from .panel_render import restore_thumbs, trim_turn_metas
@@ -88,7 +93,13 @@ class SessionMixin:
         self._activate_session(self.sessions[0])
 
     def _activate_session(self, session: dict, restore: bool = True) -> None:
-        """Point history/blocks at a session and refresh the picker, the plan strip and the artifacts strip."""
+        """Point history/blocks at a session and refresh the picker, the plan strip and the artifacts strip.
+        Re-activating the chat that is already shown changes nothing — above all not the composer, whose
+        text IS that chat's draft."""
+        leaving = self._current_session()
+        switched = leaving is not session
+        if switched and leaving is not None:
+            leaving["_draft"] = self.input.toPlainText()   # the composer keeps each chat's unfinished message
         self.history = session["history"]
         blocks = session.get("blocks")
         if blocks is None:
@@ -106,7 +117,8 @@ class SessionMixin:
             sync = getattr(self, "_sync_onboarding", None)
             if callable(sync):
                 sync()              # the sign-in may have changed while another chat was shown
-        self._turn_view = None
+        if self.worker is None:
+            self._turn_view = None   # a running turn keeps its view: it writes to its own chat, whoever is shown
         # Recency order: the active chat is always sessions[0], so the picker reads "most recent first" and a
         # delete / switch falls back to the chat that was used last instead of whatever was loaded first.
         try:
@@ -117,6 +129,13 @@ class SessionMixin:
         self._rebuild_chat_combo()
         self._refresh_session_widgets()
         self._render()
+        if switched:
+            self.input.setPlainText(session.get("_draft") or "")   # this chat's own unfinished message ("" when none)
+        self._refresh_attach_bar()                              # the attachment chips follow the chat
+        self._sync_turn_chrome()                                # pause / stop belong to the chat shown
+        if switched:
+            # a chat opened while idle sends what waited in it — it asks first: the message may be stale
+            QtCore.QTimer.singleShot(0, lambda: self._deliver_waiting_sends(opening=True))
 
     def _append_restore_card(self, session: dict) -> Block:
         """The card of a reopened chat: the legacy "Restored" line, the interruption notice (a crash in the
@@ -171,8 +190,44 @@ class SessionMixin:
         else:
             session["pending_notes"] = list(notes)
 
-    def _persist_current(self) -> None:
+    @property
+    def pending(self) -> list[str]:
+        """Attachment paths waiting with this chat's next message — kept PER CHAT, so a file attached in
+        one chat never rides another chat's message (not persisted: it dies with the app, as the notes do)."""
         session = self._current_session()
+        if session is None:
+            return self._orphan_pending
+        return session.setdefault("pending", [])
+
+    @pending.setter
+    def pending(self, paths: list[str]) -> None:
+        session = self._current_session()
+        if session is None:
+            self._orphan_pending = list(paths)
+        else:
+            session["pending"] = list(paths)
+
+    @property
+    def _carry_images(self) -> list[str]:
+        """Images of a steered message that could not be delivered — kept PER CHAT: they ride THAT chat's
+        next message, never whichever chat is shown when the turn ends."""
+        session = self._current_session()
+        if session is None:
+            return self._orphan_carry_images
+        return session.setdefault("carry_images", [])
+
+    @_carry_images.setter
+    def _carry_images(self, images: list[str]) -> None:
+        session = self._current_session()
+        if session is None:
+            self._orphan_carry_images = list(images)
+        else:
+            session["carry_images"] = list(images)
+
+    def _persist_current(self, session: dict | None = None) -> None:
+        """Persist ``session`` (default: the chat shown now). The running turn's chat passes itself: another
+        chat may be shown while it works."""
+        session = session if session is not None else self._current_session()
         if session is None:
             return
         if not session["history"] and not session.get("_saved"):
@@ -185,28 +240,39 @@ class SessionMixin:
         except Exception as e:  # noqa: BLE001 - a full disk must not break the chat, but it must leave a trace
             self._log_panel_error("persist", e)
 
-    def _persist_soon(self) -> None:
-        """Persist the current chat within about 1.5 s (one write for a burst of plan changes)."""
+    def _persist_soon(self, session: dict | None = None) -> None:
+        """Persist ``session`` (default: the chat shown then) within about 1.5 s (one write for a burst of
+        plan changes). The session is captured here: the timer may fire while another chat is shown."""
+        self._persist_target = session
         timer = getattr(self, "_persist_timer", None)
         if timer is not None and not timer.isActive():
             timer.start()
 
+    def _persist_scheduled(self) -> None:
+        """The debounce timer: persist the chat the burst belonged to (``None``: the chat shown now)."""
+        session, self._persist_target = getattr(self, "_persist_target", None), None
+        self._persist_current(session)
+
     def _on_chat_picked(self, index: int) -> None:
         if self._session_loading:
             return
-        if self._busy():
-            self._set_status("Wait for the current turn to finish before "
-                             "switching chats.")
+        if getattr(self, "_building", False):
+            # the send that is reading an attached PDF holds the panel's history/blocks mid-send: switching
+            # now would land its message in the other chat. A running turn is fine — it writes to its own
+            # chat (``_turn_session``), whichever is shown.
+            self._set_status("Wait for the attached file to finish reading.")
             self._rebuild_chat_combo()
             return
         if not (0 <= index < len(self.sessions)):
             return
+        if self.sessions[index] is self._current_session():
+            return   # picking the chat shown again changes nothing: its draft is the text being typed
         self._persist_current()
         self._activate_session(self.sessions[index])
 
     def _new_chat(self) -> None:
-        if self._busy():
-            self._set_status("Wait for the current turn to finish first.")
+        if getattr(self, "_building", False):
+            self._set_status("Wait for the attached file to finish reading.")
             return
         current = self._current_session()
         if current is not None and not current["history"] and current["title"] == "New chat":
@@ -237,7 +303,11 @@ class SessionMixin:
         if ret != QtWidgets.QMessageBox.Yes:
             return
         session["history"].clear()
+        self._waiting_sends = [w for w in self._waiting_sends if w.get("session") is not session]
         session.pop("pending_notes", None)
+        session.pop("pending", None)         # a cleared chat starts fresh: no attachments, images or draft
+        session.pop("carry_images", None)
+        session.pop("_draft", None)
         session["ledger"] = None          # the plan belonged to the messages that are gone
         session["blocks_meta"] = []
         session["title"] = "New chat"
@@ -265,6 +335,7 @@ class SessionMixin:
 
         _chats.delete(session["id"])   # the chat file only: the project folder holds the user's files and stays
         self.sessions.remove(session)
+        self._waiting_sends = [w for w in self._waiting_sends if w.get("session") is not session]
         # the chat used last (sessions are in recency order) that has something in it - never an empty "New chat"
         # while a real chat exists; a chat not shown yet in this run gets its restore card
         self._activate_session(next((s for s in self.sessions if s["history"]), self.sessions[0]))
