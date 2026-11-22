@@ -191,20 +191,6 @@ on_permission_wait = None
 # ``Choice.remote``). Questions nobody can be asked (console) are not reported. A failing hook is ignored.
 on_approval = None
 _APPROVAL_IDS = itertools.count(1)
-# In-chat question surface (UI redesign): the Oscar panel sets this to a callable that renders the
-# question as a card in the chat instead of the modal dialog. Signature:
-#   surface(info, choices, remaining_s, cancelled, take_remote, by_remote) -> str | "" | None
-#   info       the same dict on_approval receives ("id", "op", "title", "text", "detailed", "choices")
-#   choices    ALL Choice objects (the card may offer every one — a local click is a local answer)
-#   remaining_s seconds until the deny-default deadline (the card flips to its timeout state itself)
-#   cancelled  () -> bool  — True when the turn was stopped (settle as unanswered)
-#   take_remote() -> Choice | None — drain a browser answer, exactly like the dialog's poller
-#   by_remote   list — append True when the answer came through take_remote (provenance bookkeeping)
-# Return: a Choice.key the human clicked (``on_click`` is run by ask_user, as for the dialog),
-#   "" when the question settled unanswered (timeout/stop → NO_ANSWER), or None when the card
-#   could not be shown → the modal dialog takes over, unchanged. Every deny-default, deadline and
-#   remote-answer rule stays in ask_user; the surface only paints and waits.
-panel_surface = None
 
 # Answers from a remote view (``answer_remote``), by approval id. A question accepts one while its dialog is open
 # (or about to open); the dialog then clicks that button itself, so the answer goes exactly the way a click does
@@ -550,22 +536,6 @@ def ask_user(title: str, text: str, *, choices: Sequence[Choice], default: str, 
             if early.on_click is not None:
                 early.on_click()
             return early.key
-        # The panel's question card gets the first chance (same rules; None falls through to the dialog)
-        if panel_surface is not None:
-            try:
-                key = panel_surface(info, choices, max(0.0, remaining),
-                                    lambda: _cancel_count() != asked_at, take_remote, by_remote)
-            except Exception:   # noqa: BLE001 - a UI bug must never strand the question
-                key = None
-            if key == "":
-                return NO_ANSWER
-            if isinstance(key, str) and key:
-                for choice in choices:
-                    if choice.key == key:
-                        if choice.on_click is not None:   # exactly the dialog's clicked path
-                            choice.on_click()
-                        return choice.key
-                return NO_ANSWER   # an unknown key: settled unanswered rather than guessed
         # The dialog is created from a queued call, so macOS will not focus-raise it on its own: without explicit
         # parenting, raise and activate below it can sit BEHIND the window while the user watches a spinner and the
         # timeout answers for them.
