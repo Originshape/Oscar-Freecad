@@ -61,6 +61,18 @@ def block(x0, x1, y0, y1, z0, z1):
     return Part.makeBox(x1 - x0, y1 - y0, z1 - z0, App.Vector(x0, y0, z0))
 
 
+def bracket_like():
+    """A reference that is NOT a PCB: 40 x 25 x 12 block, r3 fillets on the four vertical edges, two d5 Z
+    through-holes at (10, 6) and (30, 6), one d4 X through-hole at (y 18, z 6)."""
+    base = Part.makeBox(40.0, 25.0, 12.0)
+    vertical = [e for e in base.Edges if abs(e.Vertexes[0].Z - e.Vertexes[1].Z) > 6.0]
+    base = base.makeFillet(3.0, vertical)
+    base = base.cut(Part.makeCylinder(2.5, 14.0, App.Vector(10.0, 6.0, -1.0)))
+    base = base.cut(Part.makeCylinder(2.5, 14.0, App.Vector(30.0, 6.0, -1.0)))
+    base = base.cut(Part.makeCylinder(2.0, 44.0, App.Vector(-2.0, 18.0, 6.0), App.Vector(1, 0, 0)))
+    return base
+
+
 def pi_shapes(pcb=None):
     shapes = [("PCB", pcb if pcb is not None else plate())]
     for c in BOARD["connectors"]:
@@ -392,9 +404,10 @@ class AnalyzeFixtureTest(unittest.TestCase):
 
     def test_to_dict_is_json_safe_and_complete(self):
         data = json.loads(json.dumps(self.m.to_dict()))
-        self.assertEqual(sorted(data), ["bbox", "bottom_z", "connectors", "frame", "holes", "identity", "kind", "mesh", "mounting", "object", "pcb",
-                                        "solid_count", "solids", "tall", "tallest_z", "units", "warnings"])
+        self.assertEqual(sorted(data), ["bbox", "bottom_z", "connectors", "frame", "holes", "identity", "kind", "mesh", "mounting", "object", "part",
+                                        "pcb", "solid_count", "solids", "tall", "tallest_z", "units", "warnings"])
         self.assertEqual(data["object"], "Ref_RPI4B")
+        self.assertIsNone(data["part"], "a PCB model carries no general-part section")
 
     def test_without_a_board_connectors_have_no_match(self):
         m = measure.analyze(records(pi_shapes()), board=None)
@@ -483,6 +496,67 @@ class AnalyzeFixtureTest(unittest.TestCase):
     def test_a_motor_like_reference_without_holes_warns(self):
         m = measure.analyze(records([("PCB", plate(holes=()))]))
         self.assertTrue(any("no mounting holes" in w for w in m.warnings))
+
+
+class GeneralPartTest(unittest.TestCase):
+    """A reference with no PCB still gets real part facts (volume, holes on any axis, convex cylinders)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = measure.analyze(records([("Bracket", bracket_like())]), object_name="Ref_X")
+
+    def test_no_pcb_but_full_part_facts(self):
+        self.assertIsNone(self.m.pcb)
+        part = self.m.part
+        self.assertTrue(part)
+        # box 12000 - 2 x (pi * 2.5^2 * 12) - (pi * 2^2 * 40) - 4 x (1 - pi/4) * 9 * 12 = ~10933.4
+        self.assertAlmostEqual(part["volume"], 10933.4, delta=1.0)
+        self.assertEqual(part["hole_count"], 3)
+        by_axis: dict = {}
+        for h in part["holes"]:
+            by_axis.setdefault(h["axis"], []).append(h)
+        self.assertEqual(sorted(by_axis), ["x", "z"])
+        self.assertEqual(len(by_axis["x"]), 1)
+        xh = by_axis["x"][0]
+        self.assertAlmostEqual(xh["d"], 4.0, places=3)
+        self.assertAlmostEqual(xh["depth"], 40.0, places=3)
+        self.assertAlmostEqual(xh["pos"][1], 18.0, places=2, msg="y of the X-axis hole")
+        self.assertAlmostEqual(xh["pos"][2], 6.0, places=2, msg="z of the X-axis hole")
+        zh = sorted(by_axis["z"], key=lambda h: h["pos"][0])
+        self.assertEqual([round(h["d"], 3) for h in zh], [5.0, 5.0])
+        self.assertEqual([round(h["depth"], 3) for h in zh], [12.0, 12.0])
+        near(self, [h["pos"][0] for h in zh], [10.0, 30.0], places=2)
+        near(self, [h["pos"][1] for h in zh], [6.0, 6.0], places=2)
+
+    def test_fillet_hint_from_convex_cylinders(self):
+        self.assertEqual(self.m.part["convex_cylinders"], 4)
+        self.assertEqual(self.m.part["fillet_radius"], 3.0)
+
+    def test_a_part_without_any_cylinder_reports_zeros(self):
+        m = measure.analyze(records([("cube", block(0, 20, 0, 20, 0, 20))]))
+        self.assertEqual((m.part["hole_count"], m.part["convex_cylinders"], m.part["fillet_radius"]), (0, 0, None))
+        self.assertAlmostEqual(m.part["volume"], 8000.0, places=2)
+
+    def test_hole_list_is_bounded_by_top_n(self):
+        base = Part.makeBox(60.0, 20.0, 8.0)
+        for x in (6, 18, 30, 42, 54):
+            base = base.cut(Part.makeCylinder(2.0, 10.0, App.Vector(float(x), 10.0, -1.0)))
+        m = measure.analyze(records([("plate", base)]), top_n=3)
+        self.assertEqual(m.part["hole_count"], 5)
+        self.assertEqual(len(m.part["holes"]), 3)
+        self.assertIn("... 2 more", measure.render_text(m, top_n=3))
+
+    def test_render_text_includes_part_facts(self):
+        text = measure.render_text(self.m)
+        self.assertIn("Part: volume", text)
+        self.assertIn("3 hole(s)", text)
+        self.assertIn("x-axis d4", text)
+        self.assertIn("depth 40", text)
+        self.assertIn("typical convex radius 3", text)
+
+    def test_a_pcb_model_renders_no_part_block(self):
+        text = measure.render_text(measure.analyze(records(pi_shapes()), board=BOARD, object_name="Ref_RPI4B"))
+        self.assertNotIn("Part: volume", text)
 
 
 class RenderTextTest(unittest.TestCase):

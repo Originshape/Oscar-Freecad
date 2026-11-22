@@ -1,3 +1,18 @@
+<<<<<<< 961e1e0aaaeb69812091346e3c90e63949078a75
+"""W-2 — hide the source mesh at finalize, ONLY after a verified outcome.
+
+Re-applied from branch fix/5-hide-source-mesh (commit 3a8f502) with the backlog's
+outcome condition: verified_parametric / partially_verified_parametric hide the
+visible source meshes once a visible solid tip exists (never deleted, decision note,
+saved state); any other outcome hides nothing — and SHOWS again the meshes an earlier
+verified outcome had hidden.
+
+The fix under test: at the end of a work turn ``Project.finalize`` hides every visible ``Mesh::Feature``
+of the active document once that document holds at least one visible solid tip (the rebuilt body is the
+deliverable; the mesh was only the trace-over source — the enclosure kit hides its reference the same
+way). The mesh object stays in the tree, the hiding is recorded as a ``decision`` note, and a failure of
+the new step can never break ``finalize``.
+=======
 # SPDX-License-Identifier: Apache-2.0
 """Issue #5 — the imported source STL stays visible next to the Body it was rebuilt into.
 
@@ -9,6 +24,7 @@ mesh object stays in the tree, each hidden name becomes a ``decision`` note, the
 ``model.FCStd``, and a capped or unverified build keeps the mesh visible (it is still the reference the
 next round needs). Reverting the turn restores the visibility: the engine's turn snapshot records it and
 ``revert_turn`` puts it back.
+>>>>>>> a8a1b5222b62b0ee2ab9fa2518f6a87fe245f424
 
 Against the real FreeCAD runtime in console mode: no GUI, no network.
 """
@@ -38,7 +54,10 @@ import Part  # noqa: E402
 
 import project_support as S  # noqa: E402
 from oscar import project_gui as gui  # noqa: E402
+<<<<<<< 961e1e0aaaeb69812091346e3c90e63949078a75
+=======
 from oscar.project import Project  # noqa: E402
+>>>>>>> a8a1b5222b62b0ee2ab9fa2518f6a87fe245f424
 
 
 def _cube(size=20.0, at=(0.0, 0.0, 0.0)):
@@ -57,6 +76,8 @@ def _add_mesh(doc, name="Base"):
     return mesh
 
 
+<<<<<<< 961e1e0aaaeb69812091346e3c90e63949078a75
+=======
 def _add_scripted_mesh(doc, name="ScanPy"):
     """A visible mesh of a DERIVED type (``Mesh::FeaturePython``): counted as geometry, so it must hide too."""
     mesh = doc.addObject("Mesh::FeaturePython", name)
@@ -64,6 +85,7 @@ def _add_scripted_mesh(doc, name="ScanPy"):
     return mesh
 
 
+>>>>>>> a8a1b5222b62b0ee2ab9fa2518f6a87fe245f424
 def _add_solid(doc, name="Body"):
     """A visible solid — the rebuilt deliverable."""
     solid = doc.addObject("Part::Feature", name)
@@ -92,6 +114,12 @@ class _DocTestCase(unittest.TestCase):
                     pass
 
 
+<<<<<<< 961e1e0aaaeb69812091346e3c90e63949078a75
+class HideSourceMeshesTest(_DocTestCase):
+    """``project_gui.hide_source_meshes``: the GUI-thread rule itself."""
+
+    def test_a_visible_mesh_is_hidden_once_a_solid_tip_exists(self):
+=======
 LEDGER = {"intent": "generic_part", "request": "rebuild Base.STL", "steps": [], "requirements": []}
 
 
@@ -110,10 +138,18 @@ class HideSourceMeshesTest(_DocTestCase):
     """``project_gui.hide_source_meshes``: the GUI-thread rule itself (provenance-filtered)."""
 
     def test_a_candidate_mesh_is_hidden_once_a_solid_tip_exists(self):
+>>>>>>> a8a1b5222b62b0ee2ab9fa2518f6a87fe245f424
         doc = _new_doc("HideDoc")
         mesh = _add_mesh(doc)
         solid = _add_solid(doc)
         doc.recompute()
+<<<<<<< 961e1e0aaaeb69812091346e3c90e63949078a75
+        hidden = gui.hide_source_meshes(doc)
+        self.assertEqual(hidden, ["Base"])
+        self.assertFalse(mesh.Visibility)
+        self.assertTrue(solid.Visibility)
+
+=======
         hidden = gui.hide_source_meshes(doc, [mesh.Name])
         self.assertEqual(hidden, [mesh.Name])
         self.assertFalse(mesh.Visibility)
@@ -127,11 +163,16 @@ class HideSourceMeshesTest(_DocTestCase):
         self.assertEqual(gui.hide_source_meshes(doc, []), [])
         self.assertTrue(scan.Visibility)
 
+>>>>>>> a8a1b5222b62b0ee2ab9fa2518f6a87fe245f424
     def test_a_mesh_without_a_solid_tip_stays_visible(self):
         doc = _new_doc("MeshOnly")
         mesh = _add_mesh(doc)
         doc.recompute()
+<<<<<<< 961e1e0aaaeb69812091346e3c90e63949078a75
+        self.assertEqual(gui.hide_source_meshes(doc), [])
+=======
         self.assertEqual(gui.hide_source_meshes(doc, [mesh.Name]), [])
+>>>>>>> a8a1b5222b62b0ee2ab9fa2518f6a87fe245f424
         self.assertTrue(mesh.Visibility)
 
     def test_no_solid_tip_when_the_only_solid_is_hidden(self):
@@ -140,7 +181,11 @@ class HideSourceMeshesTest(_DocTestCase):
         solid = _add_solid(doc)
         solid.Visibility = False
         doc.recompute()
+<<<<<<< 961e1e0aaaeb69812091346e3c90e63949078a75
+        self.assertEqual(gui.hide_source_meshes(doc), [])
+=======
         self.assertEqual(gui.hide_source_meshes(doc, ["Base"]), [])
+>>>>>>> a8a1b5222b62b0ee2ab9fa2518f6a87fe245f424
 
     def test_an_already_hidden_mesh_is_not_reported_again(self):
         doc = _new_doc("AlreadyHidden")
@@ -148,6 +193,15 @@ class HideSourceMeshesTest(_DocTestCase):
         mesh.Visibility = False
         _add_solid(doc)
         doc.recompute()
+<<<<<<< 961e1e0aaaeb69812091346e3c90e63949078a75
+        self.assertEqual(gui.hide_source_meshes(doc), [])
+
+
+class FinalizeHidesSourceMeshTest(_DocTestCase):
+    """``Project.finalize`` hides the source mesh before the autosave and records a note."""
+
+    def test_finalize_hides_the_mesh_notes_it_and_saves_the_hidden_state(self):
+=======
         self.assertEqual(gui.hide_source_meshes(doc, ["Base"]), [])
 
     def test_derived_mesh_types_are_hidden_too(self):
@@ -177,10 +231,43 @@ class FinalizeHidesSourceMeshTest(_DocTestCase):
         self.proj = S.make_project(title="Rebuild Base.STL")
 
     def test_a_finished_rebuild_hides_the_source_mesh_notes_it_and_saves_the_hidden_state(self):
+>>>>>>> a8a1b5222b62b0ee2ab9fa2518f6a87fe245f424
         doc = _new_doc("Rebuild")
         mesh = _add_mesh(doc)
         solid = _add_solid(doc)
         doc.recompute()
+<<<<<<< 961e1e0aaaeb69812091346e3c90e63949078a75
+        proj = S.make_project(title="Rebuild Base.STL")
+        proj.manifest["active_doc"] = "Rebuild"
+        summary = proj.finalize(ledger={"intent": "generic_part", "request": "rebuild Base.STL", "steps": [],
+                                        "requirements": []}, outcome="verified_parametric", validation=None, export=False)
+        self.assertTrue(summary.markdown.startswith("## Build Summary"))
+        self.assertFalse(mesh.Visibility)          # the fix: the source mesh is no longer visible
+        self.assertTrue(solid.Visibility)
+        notes = proj.read_notes()
+        self.assertEqual(notes[-1]["kind"], "decision")
+        self.assertIn("Base", notes[-1]["text"])
+        self.assertIn("hidden", notes[-1]["text"])
+        saved = App.openDocument(proj.path("model.FCStd"))   # the autosave ran AFTER the hide
+        try:
+            self.assertFalse(saved.getObject("Base").Visibility)
+            self.assertTrue(saved.getObject("Body").Visibility)
+        finally:
+            App.closeDocument(saved.Name)
+
+    def test_finalize_without_a_solid_tip_hides_nothing(self):
+        doc = _new_doc("MeasureOnly")
+        mesh = _add_mesh(doc)
+        doc.recompute()
+        proj = S.make_project(title="Measure Base.STL")
+        proj.manifest["active_doc"] = "MeasureOnly"
+        proj.finalize(ledger={"intent": "inspect", "request": "measure Base.STL", "steps": [], "requirements": []},
+                      outcome="answered", validation=None, export=False)
+        self.assertTrue(mesh.Visibility)
+        self.assertFalse([n for n in proj.read_notes() if "hidden" in n.get("text", "")])
+
+    def test_a_failure_of_the_hide_step_never_breaks_finalize(self):
+=======
         summary = _rebuild_turn(self.proj, doc, mesh, solid)
         self.assertTrue(summary.markdown.startswith("## Build Summary"))
         self.assertFalse(mesh.Visibility)          # the fix: only the rebuilt-from mesh is hidden
@@ -332,10 +419,26 @@ class FinalizeHidesSourceMeshTest(_DocTestCase):
 
     def test_a_failure_of_the_hide_step_never_skips_the_autosave(self):
         """A dying ``note()`` (disk full) must not cost the autosave, NOTES.md or the finalized record."""
+>>>>>>> a8a1b5222b62b0ee2ab9fa2518f6a87fe245f424
         doc = _new_doc("Boom")
         mesh = _add_mesh(doc)
         _add_solid(doc)
         doc.recompute()
+<<<<<<< 961e1e0aaaeb69812091346e3c90e63949078a75
+        proj = S.make_project(title="Rebuild Base.STL")
+        proj.manifest["active_doc"] = "Boom"
+        with mock.patch.object(gui, "hide_source_meshes", side_effect=RuntimeError("boom")):
+            summary = proj.finalize(ledger={"intent": "generic_part", "request": "rebuild", "steps": [],
+                                            "requirements": []}, outcome="verified_parametric", validation=None, export=False)
+        self.assertTrue(summary.markdown.startswith("## Build Summary"))
+        self.assertTrue(mesh.Visibility)           # nothing was changed by the failed step
+
+    def test_finalize_without_an_active_document_writes_no_note(self):
+        proj = S.make_project(title="No Doc")
+        proj.finalize(ledger={"intent": "other", "request": "hello", "steps": [], "requirements": []},
+                      outcome="answered", validation=None, export=False)
+        self.assertFalse([n for n in proj.read_notes() if "hidden" in n.get("text", "")])
+=======
         self.proj.begin_turn("T20261116-000007-0007", "Rebuild Base.STL", work=True)
         S.record(self.proj, "import_file", title="Import Base.STL", args={"path": "/tmp/Base.stl"},
                  doc=doc.Name, delta={"added": [mesh.Name], "removed": [], "changed": []},
@@ -500,3 +603,4 @@ class RevertRestoresVisibilityTest(_DocTestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+>>>>>>> a8a1b5222b62b0ee2ab9fa2518f6a87fe245f424

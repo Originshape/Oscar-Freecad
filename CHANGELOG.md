@@ -25,6 +25,61 @@
   capped or unverified build keeps its mesh visible, and a later turn does not hide a mesh the user
   showed again on purpose. Reverting the turn brings the mesh back: the engine's turn snapshot now
   records mesh visibility and the revert restores it.
+The reconstruction-accuracy stack (Issues 003 + the reconstruction backlog): mesh-to-
+parametric-CAD with honest evidence at every stage.
+- Noise-adaptive recognition (K1): sigma from leave-one-out plane residuals; every gate
+  derives from the measured noise; scan-quality report (G5) with completeness
+  (outer-rim / hole-opening / dropout classification, through-pairing), integrity
+  (doubled surfaces via exact raycasts, spikes with isolation guards) and plausibility
+  (mm/inch, minimum detectable hole radius) gating the reconstruction outcome.
+- Validated repair (K2/G6): copy-based repair with per-operation trial validation; the
+  loop-aware fill policy fills only tiny flat pinholes after authorization, records
+  `missing_regions`, and never closes a genuine opening.
+- Provenance ledger (K3): original/modified/synthetic/removed categories, coordinate-
+  keyed and verified; analysis evidence files; the accuracy report `ACCURACY.md` (V-4).
+- Units (K4): 3MF source-unit recovery, mm/inch grid evidence, user-confirmed
+  conversions on a copy.
+- Primitive fitting (G2/G12): sphere/cone/torus LM fitters with nested F-test gates;
+  region absorb/merge/upgrade. Fillet/chamfer recognition (G7) feeding measured dress
+  ops. Nominal dimension snapping (G8) with the 2-sigma evidence band and drill-size
+  suggestions (never forced on hole diameters).
+- Routes: prismatic (R-2 section outlines, R-3 blind/counterbore/countersink holes) and
+  rotational (R-4: revolution profiles from recognized coaxial cylinders). Datums and
+  symmetry proposals (G10) in analysis.
+- Validation: exact worst-point deviation and signed missing/excess clusters (V-1);
+  export re-import equality verdicts (V-2); the headless rebuild check now produces the
+  `rebuild` validation id (V-3).
+- The mesh workflow router (W-1), the measured-only deviation mask (G6), benchmark
+  corpus and runner (B-1, `scripts/benchmark_recon.py`), plan macro export (S8), and
+  the 100k-facet performance tier check (S8).
+- CI runs the reconstruction suites on FreeCAD 1.1.3 and 1.1.4 (K5).
+- The source mesh is hidden at finalize only after a VERIFIED outcome (W-2) and shown
+  again when an outcome loses verification; it is never deleted.
+- `step_collision` removed from the validation catalog (V-3): its evidence is the
+  reference interference rows under `fit.interference`.
+### Fixed
+- Interactive decisions answered from the question bar actually reach the waiting agent
+  (the "answer accepted by the UI, then denied after 120 s" bug): a QuestionsBar click for
+  an open netguard question (permission / mesh-repair approval) now settles that question's
+  waiting worker through the same path a card click takes, instead of silently becoming a
+  queued chat message while the deadline denied the request. Bar answers are routed by
+  tracked question ownership, are consumed exactly once, are refused for another chat's
+  question, and report "no longer open" when the deadline already closed the request —
+  they are never sent into the chat as if accepted. Typed bar answers for choice-only
+  questions are refused the same way, and a timed-out decision card shows its real
+  timeout instead of the renderer's 120 s default.
+- The mesh-intent router is wired into the turn pipeline (W-1): any scan request runs
+  the doctrine regardless of phrasing.
+- Filleted parts reconstruct reliably: the section loop fitter's smoothing no longer
+  drags corners inward (the root cause of the +7 % padded outline) — corner vertices
+  keep their raw positions.
+- Dome caps reconstruct with measured meridian arcs instead of overfilling staircase
+  approximations; cross-holes are drilled as native PartDesign features on rotational
+  parts; flat scan dropouts are bypassed without filling under an evidence-aware gate
+  (never verified, always masked and reported), while one-sided scans, unseen openings
+  and curved dropouts keep honest per-loop refusals.
+- The GUI smoke test writes its log as UTF-8 (Windows cp1252 crashed it) and its
+  thought-step check matches its name; 69/69 checks pass on the real GUI.
 ## [0.2.1] - 2026-10-28
 
 The first public release: 0.2.0 (released internally) with these fixes.

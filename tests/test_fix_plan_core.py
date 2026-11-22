@@ -1117,7 +1117,10 @@ class ReplaceOnlyWhatWeBuiltTest(_DocCase):
         changed = _example("plate_4holes")
         changed["parameters"]["thickness"]["value"] = 12.0
         _doc, report = self._build(changed, doc=doc)
-        self.assertEqual(report["spreadsheet"], "Parameters001")
+        # M1 F1: the sheet is updated in place (never deleted, never duplicated),
+        # so the user's own cells survive inside the ONE sheet
+        self.assertEqual(report["spreadsheet"], "Parameters")
+        self.assertIsNone(doc.getObject("Parameters001"))
         self.assertEqual(doc.getObject("Parameters").getContents("D1").lstrip("'"),
                          "my own note")
         self.assertEqual(_types(doc, "PartDesign::Body"), ["Body"])

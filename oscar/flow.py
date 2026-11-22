@@ -60,7 +60,7 @@ _TOOL_CATEGORY = {
     "list_documents": "read", "get_objects": "read", "get_object": "read", "get_view": "read",
     "get_parts_list": "read", "get_async_status": "read",
     "plan_set": "plan", "plan_update": "plan", "record_note": "plan", "enclosure_spec": "plan",
-    "create_document": "session", "reload_document": "session",
+    "create_document": "session", "reload_document": "session", "ask_user": "session",
     "import_file": "source", "find_reference_part": "source", "source_reference_part": "source",
     "import_reference_part": "source", "measure_reference_part": "source",
     "download_file": "net", "web_search": "net", "fetch_url": "net",
@@ -69,6 +69,8 @@ _TOOL_CATEGORY = {
     "execute_code_headless": "build", "apply_feature_plan": "build", "reapply_plan_feature": "build",
     "build_enclosure": "build", "add_cutout": "build", "add_vents": "build",
     "feature_tree_status": "verify", "validate_model": "verify", "check_fit": "verify",
+    "compare_to_reference": "verify",
+    "reconstruct_mesh": "build",
     "run_fem_analysis": "fem",
     "set_parameters": "params", "get_parameters": "params", "bind_expression": "params", "set_parameter": "params",
     "save_document": "deliver", "export_model": "deliver", "export_rebuild_script": "deliver",
@@ -149,8 +151,11 @@ def _kw(name: str, text: str) -> bool:
 
 
 def seed_template(intent: str, requirements: Sequence[dict], needs_reference: bool, *,
-                  request: str = "") -> list[LedgerStep]:
+                  request: str = "", mesh_intent: "str | None" = None) -> list[LedgerStep]:
     """The template steps of an intent: fixed ids and titles, ``owner=app`` steps completed by code.
+
+    A mesh turn (``mesh_intent`` set, W-1) seeds the M0–M14 mesh template instead of the
+    intent's own template; the intent still drives non-mesh behaviour (requirements, gates).
 
     Steps whose requirement did not fire (or whose keyword rule does not match the request) are kept with
     ``required=False``, status ``skipped`` and the note ``not requested in the brief`` so the plan strip shows
@@ -159,6 +164,9 @@ def seed_template(intent: str, requirements: Sequence[dict], needs_reference: bo
     (``Ledger.from_request``) from the requirement dicts. Intents without a template return ``[]``.
     """
     text = request or " ".join(str(r.get("text", "")) for r in requirements)
+
+    if mesh_intent:
+        return _mesh_steps(mesh_intent)
 
     def fired(sid: str) -> bool:
         return any(sid in (r.get("covers") or ()) for r in requirements)
@@ -311,6 +319,7 @@ class Ledger:
         self.phase = "INTAKE"
         self.max_phase = "INTAKE"
         self.request = request
+        self.mesh_intent: "str | None" = None    # W-1: the routed mesh operation (MESH_INTENTS)
         self.needs_reference = False
         self.reference_hint = ""
         self.reference_status = "none"
@@ -332,24 +341,32 @@ class Ledger:
     # -- construction -------------------------------------------------------------------------------
     @classmethod
     def from_request(cls, text: str, *, intent: str | None = None, attachments: Sequence[str] = (),
-                     now: Callable[[], str] | None = None) -> "Ledger":
+                     now: Callable[[], str] | None = None,
+                     mesh_intent: "str | None" = None) -> "Ledger":
         """The seeded ledger of a typed request (INTAKE): intent, requirements ``R1..Rn`` and the template steps.
 
         ``text`` must be what the user typed (5.2 input rule). A request that needs no workspace change
         (``question`` / ``inspect`` / ``other``) yields a Ledger with NO steps, so callers never need a None check.
+        W-1: ``mesh_intent`` (from ``flow_intent.mesh_operation``) seeds the M0-M14 mesh template
+        instead; a mesh turn is always a WORK turn, so a non-work classification is recorded in
+        the ledger note and the intent becomes ``generic_part`` (classification itself is unchanged).
         """
         intent = intent or classify_intent(text, attachments=attachments)
+        if mesh_intent and intent not in WORK:
+            intent = "generic_part"
         ledger = cls(intent, (text or "").strip()[:4000], now=now)
-        ledger._seed(intent, attachments)
+        ledger.mesh_intent = mesh_intent
+        ledger._seed(intent, attachments, mesh_intent=mesh_intent)
         ledger._refresh()
         return ledger
 
-    def _seed(self, intent: str, attachments: Sequence[str] = ()) -> None:
+    def _seed(self, intent: str, attachments: Sequence[str] = (), *,
+              mesh_intent: "str | None" = None) -> None:
         text = self.request
         reqs = extract_requirements(text, intent)
         needs, hint = needs_reference(text, intent, attachments=attachments)
         self.needs_reference, self.reference_hint = needs, hint
-        steps = seed_template(intent, reqs, needs, request=text)
+        steps = seed_template(intent, reqs, needs, request=text, mesh_intent=mesh_intent)
         by_id = {s.id: s for s in steps}
         fallback = next((s for s in steps if s.required and s.owner == "model"), steps[0] if steps else None)
         self.requirements = []
@@ -367,6 +384,7 @@ class Ledger:
         """Rebuild a Ledger from ``to_dict()`` output (tolerant: missing keys default, unknown keys are ignored)."""
         d = d if isinstance(d, dict) else {}
         ledger = cls(str(d.get("intent") or "other"), str(d.get("request") or ""))
+        ledger.mesh_intent = str(d.get("mesh_intent")) if d.get("mesh_intent") in MESH_INTENTS else None
         for name, default in (("needs_reference", False), ("reference_hint", ""), ("reference_status", "none"),
                               ("round", 0), ("round_cap", 30), ("revision", 0), ("updated", ledger.updated),
                               ("validated_after_step", 0), ("last_geometry_step", 0), ("health_ok", True),
@@ -400,7 +418,8 @@ class Ledger:
         self._refresh()
         return {
             "version": self.version, "intent": self.intent, "phase": self.phase, "max_phase": self.max_phase,
-            "request": self.request, "needs_reference": self.needs_reference, "reference_hint": self.reference_hint,
+            "request": self.request, "mesh_intent": self.mesh_intent,
+            "needs_reference": self.needs_reference, "reference_hint": self.reference_hint,
             "reference_status": self.reference_status,
             "requirements": [
                 {"id": r.id, "text": r.text, "status": r.status, "covered_by": list(r.covered_by),
@@ -740,6 +759,8 @@ class Ledger:
             changed |= self._on_import(outcome, args)
         elif name == "measure_reference_part":
             changed |= self._on_measure(outcome)
+        elif name == "reconstruct_mesh":
+            changed |= self._on_mesh_recon(outcome)
         if name in ("set_parameters", "enclosure_spec") or (name == "build_enclosure" and stage == "params"):
             changed |= self._on_params(extra)
         if category == "deliver":
@@ -877,6 +898,21 @@ class Ledger:
             step.status, step.claimed = "done", False
         return True
 
+    def _on_mesh_recon(self, outcome) -> bool:
+        from .flow_mesh import mesh_evidence
+
+        return mesh_evidence(self, outcome)
+
+    def absorb_explicit_change(self, text: str) -> bool:
+        from .flow_mesh import absorb_explicit_change as _absorb
+
+        return _absorb(self, text)
+
+    def retarget_mesh_intent(self, new_intent: str, *, note: str = "") -> bool:
+        from .flow_mesh import retarget_mesh_intent as _retarget
+
+        return _retarget(self, new_intent, note=note)
+
     def set_reference_status(self, status: str, note: str = "") -> None:
         """Record the reference status; any status other than ``none`` completes the source step (``S2``)."""
         if status == self.reference_status and not note:
@@ -936,7 +972,8 @@ class Ledger:
         makes no validation claim.
         """
         v = _validation_dict(validation)
-        verify = [s for s in self.steps if s.phase == "VERIFY" and s.owner == "app" and s.required]
+        # W-1 hardening: M13 "User review" is EXCLUDED (no user-ack mechanism exists yet)
+        verify = [s for s in self.steps if s.phase == "VERIFY" and s.owner == "app" and s.required and s.id != "M13"]
         if v is None:
             for s in verify:
                 if s.status not in TERMINAL:
@@ -1327,7 +1364,7 @@ class GateVerdict:
 
 
 GATE_CODES = ("NO_WORK", "DELIVERABLE_MISSING", "OPEN_ERRORS", "HEALTH_FAIL", "SCRIPT_FAIL", "FIT_FAIL",
-              "STEPS_PENDING", "CLAIM_ONLY", "REFERENCE_UNRESOLVED")
+              "STEPS_PENDING", "CLAIM_ONLY", "REFERENCE_UNRESOLVED", "RECONSTRUCTION_UNVERIFIED")
 
 
 def _step_label(s: LedgerStep) -> str:
@@ -1403,6 +1440,22 @@ def finish_gate(ledger: "Ledger", state: TurnState, cfg: "AgentConfig", *, reply
             ids = ", ".join(str(r.get("id") if isinstance(r, dict) else r) for r in fails[:6])
             add("FIT_FAIL", f"check_fit reports FAIL: {ids}",
                 f"check_fit reports FAIL: {ids}. Fix the geometry or the parameter (set_parameter) and run check_fit again")
+    if (ledger.reference_status not in ("", "none") and intent in WORK
+            and (is_reconstruction_request(ledger.request or "")
+                 or getattr(ledger, "mesh_intent", None))
+            and (validation is None or "reference.deviation" not in (validation.get("ran") or []))):
+        add("RECONSTRUCTION_UNVERIFIED",
+            "an imported reference exists but the reconstruction was never compared with it",
+            "the reference was never compared: run compare_to_reference (name object and reference by name) "
+            "as the LAST check, then report the deviation rows")
+    elif (getattr(ledger, "mesh_intent", None) in ("parametric", "modify")
+          and (validation is None
+               or not ({"recon.deviation", "reference.deviation"}
+                       & set(validation.get("ran") or ())))):
+        add("RECONSTRUCTION_UNVERIFIED",
+            "a mesh reconstruction was requested but the result was never compared with the scan",
+            "run the reconstruction with deviation rows (reconstruct_mesh parametric reports them; "
+            "compare_to_reference works when a reference part exists) and report them verbatim")
     pending = ledger.pending_required()
     if pending and not (intent == "deliver" and "DELIVERABLE_MISSING" in codes):
         listing = "; ".join(f"{_step_label(s)} {_pending_detail(s)}" for s in pending[:6])
@@ -1446,6 +1499,7 @@ def finish_gate(ledger: "Ledger", state: TurnState, cfg: "AgentConfig", *, reply
 
 # ---------------------------------------------------------------------------------------------------
 # Outcome texts, governor line, configuration: private module ``flow_run`` (kept apart to keep this file small)
+from .flow_mesh import MESH_INTENTS, _mesh_steps, resolve_mesh_intent  # noqa: E402,F401  (W-1; bottom import like flow_run)
 from .flow_run import (NO_CHANGES_TEXT, NOT_VERIFIED_FOOTER, NOT_VERIFIED_HEADER, AgentConfig,  # noqa: E402,F401
                        compose_capped, compose_failed, compose_needs_help, compose_unverified, format_governor,
                        health_label, phase_guidance)

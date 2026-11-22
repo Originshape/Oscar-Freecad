@@ -605,6 +605,36 @@ def txn_task(task, label: str = "Oscar", doc_name: str | None = None):
 # the engine
 
 
+def _stamp_source_hash(doc, names: list[str], source: str) -> None:
+    """Stamp the SOURCE file's sha256 on every imported object (Issue 003: provenance for plain imports,
+    so a later measurement records the hash of the file the geometry really came from). Never raises."""
+    import hashlib
+
+    try:
+        digest = hashlib.sha256()
+        with open(source, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+        value = digest.hexdigest()
+    except OSError:
+        return
+    for name in names:
+        obj = doc.getObject(name)
+        if obj is None or "OscarImportSha256" in obj.PropertiesList:
+            continue
+        try:
+            obj.addProperty("App::PropertyString", "OscarImportSha256", "Oscar",
+                            "sha256 of the file this object was imported from")
+            obj.OscarImportSha256 = value
+            # K4: the source PATH lets unit metadata be re-read from the original file
+            # (3MF declares a unit the importer drops); coordinates are never rescaled.
+            obj.addProperty("App::PropertyString", "OscarImportPath", "Oscar",
+                            "path of the file this object was imported from")
+            obj.OscarImportPath = source
+        except Exception:  # noqa: BLE001 - a stamp must never fail the import
+            continue
+
+
 def _meshes_to_solids(doc, names: list[str]) -> tuple[list[str], list[str], dict[str, dict[str, Any]]]:
     """Each ``Mesh::Feature`` among ``names`` replaced by a ``Part::Feature`` solid of it (same label, the mesh
     removed): ``(names now, a note per mesh that stayed a mesh, {solid name: {from_triangles, valid}})``.
@@ -1387,6 +1417,20 @@ class CadEngine:
                 return lambda doc: importSVG.insert(source, doc.Name)
             return None
 
+        if ext == "ply":
+            from ..refparts.identity import ply_facts
+
+            try:
+                with open(source, "rb") as fh:
+                    ply_header = ply_facts(fh.read(65536))
+            except OSError:
+                ply_header = None
+            if ply_header and ply_header["point_cloud"]:
+                return {"success": False,
+                        "error": (f"'{os.path.basename(source)}' is a point cloud: "
+                                  f"{ply_header['vertices']} vertices, 0 faces. Mesh reconstruction needs a "
+                                  "surface mesh — triangulate the scan first, or attach it as reference data."),
+                        "point_cloud": ply_header}
         caller = _importer()
         if caller is None:
             return {
@@ -1438,6 +1482,7 @@ class CadEngine:
                 found = imported.facts(obj) if obj is not None else None
                 if found is not None:
                     parts.append({**found, **made.get(name, {})})
+            _stamp_source_hash(doc, created, source)
             return {
                 "success": True,
                 "document_name": doc.Name,
