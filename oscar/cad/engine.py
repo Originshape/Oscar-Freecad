@@ -1491,6 +1491,17 @@ class CadEngine:
                 # what a full-history document looked like, to recognise a
                 # turn that changed it although its undo count cannot move
                 "objects": {name: [o.Name for o in doc.Objects] for name, doc in docs.items()},
+                # mesh visibility as the turn found it: FreeCAD never puts a Visibility change on the
+                # undo stack (it is view state — not even an open transaction records it), so a revert
+                # must put it back itself or a turn whose finalize hid a rebuilt-from mesh would leave
+                # an empty view behind
+                "mesh_visibility": {
+                    name: {o.Name: bool(getattr(o, "Visibility", True))
+                           for o in doc.Objects
+                           if callable(getattr(o, "isDerivedFrom", None))
+                           and o.isDerivedFrom(imported.MESH_TYPE)}
+                    for name, doc in docs.items()
+                },
                 "undo_names": {
                     name: list(doc.UndoNames) for name, doc in docs.items()
                     if cap > 0 and depth[name] >= cap
@@ -1575,6 +1586,8 @@ class CadEngine:
                 doc = live.get(name)
                 if doc is not None:
                     self._undo_document(doc, int(depth), snapshot, report)
+                    if name in touched:
+                        self._restore_mesh_visibility(doc, snapshot)
             self._close_new_documents(live, snapshot, report)
             problems = report["conflicts"] + report["warnings"]
             report["partial"] = bool(problems)
@@ -1585,6 +1598,23 @@ class CadEngine:
 
         result, _ = dispatch.dispatch(task, timeout=120.0, op="turn_revert")
         return result if isinstance(result, dict) else {"success": False, "error": str(result)}
+
+    @staticmethod
+    def _restore_mesh_visibility(doc, snapshot: dict[str, Any]) -> None:
+        """Put the meshes of ``doc`` back to the visibility the turn started with (``begin_turn_snapshot``
+        recorded it in ``mesh_visibility``): FreeCAD's undo never restores a Visibility change — it is view
+        state, an open transaction does not even record it — so a turn whose ``Project.finalize`` hid a
+        rebuilt-from mesh would otherwise leave the user looking at an empty document after the revert.
+        Meshes the turn created are gone with the undo anyway; unknown names are skipped."""
+        recorded = (snapshot.get("mesh_visibility") or {}).get(doc.Name) or {}
+        for mesh_name, visible in recorded.items():
+            obj = doc.getObject(str(mesh_name))
+            if obj is None:
+                continue
+            try:
+                obj.Visibility = bool(visible)
+            except Exception:  # noqa: BLE001 - a mesh without the property is left as it is
+                pass
 
     def close_turn_documents(self, snapshot: dict[str, Any]) -> dict[str, Any]:
         """Close the documents a turn created, under the same ownership rules as ``revert_turn``: a document saved to
