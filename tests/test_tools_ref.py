@@ -315,7 +315,8 @@ class SourceObtainedTest(Base):
         self.assertEqual(lines[0], "SOURCE RESULT: status=obtained")
         self.assertEqual(lines[1], "reference_status: none")
         self.assertEqual(lines[2], "reference: rpi4b (Raspberry Pi 4 Model B)")
-        self.assertRegex(lines[3], r"^file: .*/refs/408a9ff6c848_rpi4b\.step \(sha256 [0-9a-f]{64}, 77\.8 KB, step\)$")
+        self.assertRegex(os.path.normpath(lines[3]),
+                         r"^file: .*refs[\\/]408a9ff6c848_rpi4b\.step \(sha256 [0-9a-f]{64}, 77\.8 KB, step\)$")
         self.assertEqual(lines[4], "provenance: E1")
         self.assertTrue(lines[5].startswith("note: STEP file taken from the local mirror"))
         self.assertIn('import_reference_part(doc_name=..., id="rpi4b")', lines[5])

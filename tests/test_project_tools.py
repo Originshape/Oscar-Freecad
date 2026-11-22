@@ -203,7 +203,7 @@ class SaveDocumentToolTest(ToolCase):
         self.call("save_document", doc_name=first.Name)
         text, _, is_error = self.call("save_document", doc_name=second.Name)
         self.assertFalse(is_error, text)
-        self.assertIn(os.path.join("docs", f"{second.Name}.FCStd"), text)
+        self.assertIn(f"docs/{second.Name}.FCStd", text)   # Project.rel() spells relative paths with '/'
 
     def test_save_as_writes_a_copy_and_keeps_the_document_unchanged(self):
         doc = self.solid_doc()
@@ -471,7 +471,7 @@ class ExportRebuildScriptToolTest(ToolCase):
         self.assertFalse(is_error, text)
         self.assertIn("Rebuild check: PASS", text)
         self.assertIn("REBUILD_OK, 2 object(s) in 1 document(s)", text)
-        self.assertIn(self.proj.path("rebuild.py"), seen["code"])
+        self.assertIn(repr(self.proj.path("rebuild.py")), seen["code"])   # the runner embeds the path with {script!r}
         self.assertTrue(seen["code"].startswith("exec(open("))
         self.assertEqual(self.proj.manifest["rebuild_check"]["ok"], True)
 
