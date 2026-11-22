@@ -245,9 +245,10 @@ def main():
     # This lineage's panel pins the plan strip on the chat page (its own e2e pins it
     # visible there); the Summary-tab pin below is checked as well.
     check("plan strip pinned on the chat page", not content.plan_strip.isHidden())
-    content.tabs.setCurrentIndex(2)
-    check("plan strip pinned on the Summary tab", not content.plan_strip.isHidden()
-          and "Plan" in content.plan_strip.toPlainText(), content.plan_strip.toPlainText()[:80])
+    if hasattr(content, "tabs"):   # the redesigned shell; this lineage's panel has no tabs
+        content.tabs.setCurrentIndex(2)
+        check("plan strip pinned on the Summary tab", not content.plan_strip.isHidden()
+              and "Plan" in content.plan_strip.toPlainText(), content.plan_strip.toPlainText()[:80])
     if hasattr(content, "summary_view"):
         # the newer panel generation renders the Build Summary on the Summary tab
         check("Build Summary rendered once (Summary tab, not Chat)",
@@ -261,11 +262,12 @@ def main():
         check("Build Summary rendered once in the chat",
               content.log.toPlainText().count("Build Summary") == 1,
               f"chat={content.log.toPlainText().count('Build Summary')}")
-    content.tabs.setCurrentIndex(0)
+    if hasattr(content, "tabs"):
+        content.tabs.setCurrentIndex(0)
     check("turn 1 saved the chat's build state",
           bool((content._current_session() or {}).get("ledger")), "session ledger missing")
     snap_rows = [row for row in tool_rows if row.view is not None and row.view.snapshot_path]
-    if snap_rows and hasattr(content, "summary_view"):
+    if snap_rows and hasattr(content, "tabs") and hasattr(content, "summary_view"):
         content.tabs.setCurrentIndex(2)
         content.summary_view.log_btn.click()  # snapshot decoding is deferred until the detailed Log is opened
         deadline = time.monotonic() + 3.0
