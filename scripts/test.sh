@@ -87,8 +87,14 @@ for m in "${MODULES[@]}"; do
   LINE="$(printf '%s\n' "$OUT" | grep -oE 'OSCAR_TESTS: ran [0-9]+.*' | tail -n 1)"
   N="$(printf '%s' "$LINE" | sed -E 's/.*ran ([0-9]+).*/\1/')"; TOTAL=$((TOTAL + ${N:-0}))
   printf '%-40s %s\n' "$m" "${LINE#OSCAR_TESTS: }"
-  if [ "$CODE" -ne 0 ]; then FAILED+=("$m"); printf '%s\n' "$OUT" | grep -E '^(FAIL|ERROR):' | head -n 20
-    printf '%s\n' "$OUT" | grep -A 25 -E '^(FAIL|ERROR): ' | head -n 150; fi
+  # a failed module prints its COMPLETE captured output: the old FAIL:/ERROR: header grep hid the
+  # tracebacks (unittest prints them inside the captured stream), which made CI failures
+  # un-diagnosable from the logs alone. Successful modules stay one summary line.
+  if [ "$CODE" -ne 0 ]; then
+    FAILED+=("$m")
+    printf '===== %s FAILED (exit %s) — full captured output =====\n' "$m" "$CODE"
+    printf '%s\n' "$OUT"
+  fi
   [ "${OSCAR_TEST_KEEP:-0}" = 1 ] || rm -rf "$SCR"
 done
 echo "OSCAR_TESTS_TOTAL: $TOTAL tests in ${#MODULES[@]} modules; failed modules: ${FAILED[*]:-none}"

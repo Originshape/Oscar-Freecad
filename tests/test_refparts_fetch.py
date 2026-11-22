@@ -189,7 +189,8 @@ class MirrorTest(Base):
 
     def test_env_is_read_at_call_time_and_expands_user(self):
         os.environ[fetch.ENV_LOCAL_DIR] = "~/somewhere"
-        self.assertEqual(fetch.local_mirror_dir(), os.path.expanduser("~/somewhere"))
+        # ntpath.expanduser keeps the '/' of '~/...' (mixed separators); abspath normalizes — compare normalized
+        self.assertEqual(os.path.normpath(fetch.local_mirror_dir()), os.path.normpath(os.path.expanduser("~/somewhere")))
         os.environ[fetch.ENV_LOCAL_DIR] = "  "
         self.assertEqual(fetch.local_mirror_dir(), "")
 

@@ -37,7 +37,7 @@ FIT_INTENTS = ("enclosure", "fixture")
 _HEALTH_TIMEOUT_S = 90.0
 _FIT_TIMEOUT_S = 120.0
 _FIT_BUDGET_S = 100.0
-_EDIT_TIMEOUT_S = 120.0
+_EDIT_TIMEOUT_S = 300.0     # wraps the adaptive editability pass (tools_verify_edit.MAX_BUDGET_S is 240 s)
 _ROWS_FULL_LIMIT = 60
 _PRE_PREFIX = "pre-existing (not caused by this task, not counted): "
 
