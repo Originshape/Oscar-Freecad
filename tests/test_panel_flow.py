@@ -528,7 +528,8 @@ class ThumbnailTest(FlowTestCase):
         png(os.path.join(root, "snapshots", "001_a.png"))
         project = mock.Mock(root=root)
         p._current_session()["_project"] = project
-        self.assertEqual(p._abs_snapshot("snapshots/001_a.png"), os.path.join(root, "snapshots", "001_a.png"))
+        self.assertEqual(os.path.normpath(p._abs_snapshot("snapshots/001_a.png")),
+                         os.path.normpath(os.path.join(root, "snapshots", "001_a.png")))
         self.assertEqual(p._abs_snapshot("/abs/x.png"), "/abs/x.png")
         self.begin_turn()
         self.rich_step(snapshot_path="snapshots/001_a.png")
@@ -716,6 +717,7 @@ class RoundResetTest(FlowTestCase):
         p = self.p
         self.begin_turn()
         p._on_reasoning_delta("thinking hard")
+        time.sleep(0.02)   # the thought lived for a moment: on a fast box the delta→reset gap is one clock tick (dur 0.0)
         p._on_round_reset("watchdog")
         thought = self.card().steps[0]
         self.assertTrue(thought.is_thought)
@@ -765,16 +767,21 @@ class ArtifactsStripTest(FlowTestCase):
         p = self.p
         root, files = self.project_files()
         p._on_artifacts_changed(j({"project_dir": root, "files": files}))
-        self.assertEqual(self.opened("oscar://artifact/open-notes"), [os.path.join(root, "NOTES.md")])
-        self.assertEqual(self.opened("oscar://artifact/open-provenance"), [os.path.join(root, "provenance.json")])
-        self.assertEqual(self.opened("oscar://artifact/open-exports"), [os.path.join(root, "exports")])
-        self.assertEqual(self.opened("oscar://artifact/open-dir"), [root])
+        # QUrl.fromLocalFile(...).toLocalFile() spells Windows paths with '/': compare normalized
+        self.assertEqual([os.path.normpath(u) for u in self.opened("oscar://artifact/open-notes")],
+                         [os.path.normpath(os.path.join(root, "NOTES.md"))])
+        self.assertEqual([os.path.normpath(u) for u in self.opened("oscar://artifact/open-provenance")],
+                         [os.path.normpath(os.path.join(root, "provenance.json"))])
+        self.assertEqual([os.path.normpath(u) for u in self.opened("oscar://artifact/open-exports")],
+                         [os.path.normpath(os.path.join(root, "exports"))])
+        self.assertEqual([os.path.normpath(u) for u in self.opened("oscar://artifact/open-dir")], [os.path.normpath(root)])
 
     def test_a_script_is_revealed_never_launched(self):
         p = self.p
         root, files = self.project_files()
         p._on_artifacts_changed(j({"project_dir": root, "files": files}))
-        self.assertEqual(self.opened("oscar://artifact/open-rebuild"), [root])   # its FOLDER, not rebuild.py
+        self.assertEqual([os.path.normpath(u) for u in self.opened("oscar://artifact/open-rebuild")],
+                         [os.path.normpath(root)])   # its FOLDER, not rebuild.py
 
     def test_documents_open_in_the_application_not_the_desktop(self):
         p = self.p
@@ -789,8 +796,9 @@ class ArtifactsStripTest(FlowTestCase):
             p._on_anchor_text("oscar://artifact/open-doc")
             p._on_anchor_text("oscar://artifact/open-doc/docs%2FOther.FCStd")
         opener.assert_not_called()
-        self.assertEqual([c.args for c in engine.import_file.call_args_list],
-                         [(os.path.join(root, "model.FCStd"), ""), (os.path.join(root, "docs", "Other.FCStd"), "")])
+        self.assertEqual([(os.path.normpath(a), b) for a, b in (c.args for c in engine.import_file.call_args_list)],
+                         [(os.path.normpath(os.path.join(root, "model.FCStd")), ""),
+                          (os.path.normpath(os.path.join(root, "docs", "Other.FCStd")), "")])
         self.assertIn("opened model", p.log.toPlainText())
 
     def test_an_already_open_document_is_only_activated(self):
@@ -828,7 +836,8 @@ class ArtifactsStripTest(FlowTestCase):
         p._on_artifacts_changed(j({"project_dir": root, "files": files}))
         for target in ("oscar://artifact/open-doc/..%2F..%2Fetc%2Fpasswd", "oscar://artifact/open-doc//etc/passwd",
                        "oscar://artifact/open-doc/nope.FCStd", "oscar://artifact/open-notes/..%2Fsecret.md"):
-            self.assertEqual(self.opened(target), [] if "notes" not in target else [os.path.join(root, "NOTES.md")])
+            self.assertEqual([os.path.normpath(u) for u in self.opened(target)],
+                             [] if "notes" not in target else [os.path.normpath(os.path.join(root, "NOTES.md"))])
         self.assertIn("File not found", p.log.toPlainText())
 
     def test_an_entry_outside_the_project_folder_is_refused(self):
