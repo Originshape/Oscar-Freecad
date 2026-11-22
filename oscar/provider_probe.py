@@ -264,6 +264,10 @@ _PROBES = {"openrouter": _probe_openrouter, "ollama": _probe_ollama, "lmstudio":
 def probe(profile, *, timeout: float = 8.0) -> dict:
     """The probe result for ``profile`` (see the module docstring); ``{}`` for a host without a probe or on failure."""
     try:
+        from .settings_wire import unusable_reason
+
+        if unusable_reason(profile):   # the one gate: an address the user hasn't approved here gets no request
+            return {}
         probe_fn = _PROBES.get(_models.host_class(profile))
         if probe_fn is None or not getattr(profile, "model", ""):
             return {}
@@ -295,6 +299,11 @@ def list_models(profile) -> tuple[list[str], str]:
     """
     if getattr(profile, "provider", "") == "originshape":
         return _originshape_models(), ""
+    from .settings_wire import unusable_reason
+
+    reason = unusable_reason(profile)   # the one gate: an address the user hasn't approved here gets no request
+    if reason:
+        return [], reason
     try:
         if profile.provider == "anthropic":
             url = f"{anthropic_base(profile)}/v1/models"

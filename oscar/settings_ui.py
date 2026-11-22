@@ -71,6 +71,20 @@ its answer is applied to the profile that asked for it, never to whichever one i
 A key belongs to the provider it was entered for (choosing another provider clears it). A Save that cannot write the
 settings file says so and keeps the dialog open; a dialog whose profiles did not come from the settings file (it could
 not be read when the dialog opened) refuses to save, so it can never replace the user's profiles.
+
+Signed in with OriginShape, the AI model settings (never the API keys) sync with the account (``settings_sync``): the
+dialog asks for a sync when it opens and after Save, and the AI model tab says how the last one went
+(``oscarSyncStatus``). A pull that changes the settings while the dialog is open reloads the tab, or, when the user has
+unsaved changes there, says so and offers *Reload* (``oscarSyncReload``); Save keeps the user's changes and what the
+pull changed elsewhere (``params.save_profiles(base=...)``).
+
+A profile a sync made, or whose provider or base URL a sync changed, is not used until the user confirms its address
+here (``settings_wire.unusable_reason``): the notice under the API key field (``oscarProfilePending``) offers *Use
+<host>* or *Use my key with <host>* (``oscarProfileConfirm``, which approves exactly the address shown) and, with a
+key, *Remove the key* (``oscarProfileRemoveKey``). A profile the website removed while it has a key is kept until the
+user decides: *Remove here* (``oscarProfileRemoveHere``) or *Keep* (``oscarProfileKeep``). Editing a profile's
+provider or base URL here approves it as edited; typing a key approves nothing. The sync line also says when the
+website picked a profile this computer doesn't follow yet (``params.pending_notice``).
 """
 
 import copy
@@ -78,6 +92,7 @@ import json
 import os
 import threading
 import time
+from dataclasses import asdict
 
 from PySide import QtCore, QtGui, QtWidgets
 
@@ -86,6 +101,7 @@ from . import codeguard as _codeguard
 from . import connect as _connect
 from . import params as _params
 from . import settings_model as _model
+from . import settings_sync as _settings_sync
 from . import updates as _updates
 from .auth import account as _auth_account
 from .auth import config as _auth_config
@@ -170,6 +186,10 @@ class AccountHub(QtCore.QObject):
 
     changed = QtCore.Signal(str)
     _incoming = QtCore.Signal(str)
+    # GUI thread: news from ``settings_sync`` (JSON ``{"event": "status" | "changed", ...}``): how a sync went, and that
+    # a pull changed the AI model settings (the panel's picker and an open settings dialog reload them).
+    settings_synced = QtCore.Signal(str)
+    _sync_incoming = QtCore.Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -181,6 +201,8 @@ class AccountHub(QtCore.QObject):
         self._update_thread: threading.Thread | None = None
         self._incoming.connect(self._on_incoming)
         _auth_session.on_change = self._incoming.emit
+        self._sync_incoming.connect(self._on_sync_incoming)
+        _settings_sync.on_change = self._sync_incoming.emit
 
     # -- reading ------------------------------------------------------------------------------------------------------
 
@@ -320,6 +342,10 @@ class AccountHub(QtCore.QObject):
         elif event == "signed_in" and url == self.state["api_url"]:
             self.refresh()                            # the account of the new sign-in, for the badge
 
+    def _on_sync_incoming(self, payload: str) -> None:
+        """GUI thread: ``settings_sync``'s news, passed on to the panel and an open settings dialog."""
+        self.settings_synced.emit(payload)
+
     def note_release(self, url: str = "") -> None:
         """GUI thread: the update check of ``url`` (default: the configured server) answered; only the update fields
         change (the sign-in isn't read, so no keychain is asked)."""
@@ -409,6 +435,7 @@ def _after_sign_in(session) -> dict:
             _keystore.acknowledge_file_notice()
     except Exception:  # noqa: BLE001 - the notice is a nicety
         pass
+    _settings_sync.request("signed_in")   # the account's AI model settings (after the profile above is in place)
     return result
 
 
@@ -508,10 +535,11 @@ class SettingsDialog(QtWidgets.QDialog):
         self.setMinimumSize(640, 500)
         self.resize(800, 700)
         # ``_from_file`` is False when the settings file could not be read just now: the list is then an in-memory
-        # starter profile, and saving it would replace the user's profiles (``_save`` refuses).
-        self.profiles, self._from_file = _params.load_profiles_checked()
+        # starter profile, and saving it would replace the user's profiles (``_save`` refuses). ``_base`` is what the
+        # file held for them: Save merges with what a sync wrote meanwhile (``params.save_profiles(base=...)``).
+        self.profiles, self._from_file, self._base = _params.load_profiles_for_edit()
         # The ACTIVE profile object: a rename in the dialog must not change which profile is active
-        self._active = next((p for p in self.profiles if p.name == _params.active_profile_name()), None)
+        self._active = next((p for p in self.profiles if p.id == self._base["active_profile_id"]), None)
         # The own profile "Your own provider" goes back to, and a blank one that choice added (dropped again when the
         # account is chosen before it got a key).
         self._own_choice = self._active if self._active is not None and not _params.is_account_profile(self._active) \
@@ -541,12 +569,18 @@ class SettingsDialog(QtWidgets.QDialog):
         # it (an added account profile, a removal) never redirect a stash.
         self._editor_profile: Profile | None = None
         self._rows: list[Profile] = []           # the own-provider list: row -> profile
+        self._sync_note = ""                     # what a pull did while the dialog was open
 
         self._build_ui()
         self._reload_list(select_profile=self._own_choice)
+        self._stash_editor()
+        self._base_view = self._view()           # the dialog's own view of what it loaded: "unsaved changes?"
         self._hub.changed.connect(self._on_account_state)
+        self._hub.settings_synced.connect(self._on_settings_synced)
         self._hub.refresh(force=True)          # plan, credits and status, on a daemon thread when signed in
         self._render_account()
+        _settings_sync.request("dialog")       # the account's AI model settings, on a daemon thread when signed in
+        self._show_sync_state()
         # Own-provider users usually come to change a key or a model; everybody else starts at the account.
         self.tabs.setCurrentIndex(_TAB_MODEL if self._own_choice is not None and self._active is self._own_choice
                                   else _TAB_ACCOUNT)
@@ -671,6 +705,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.tabs.addTab(page, "Account")
 
         page, column = self._page("oscarSettingsModelTab")
+        column.addWidget(self._build_sync_row())
         column.addWidget(self._build_choice())
         column.addWidget(self._build_profiles())
         column.addStretch(1)
@@ -1091,6 +1126,103 @@ class SettingsDialog(QtWidgets.QDialog):
 
     # -- AI model -----------------------------------------------------------------------------------------------------
 
+    def _build_sync_row(self) -> QtWidgets.QWidget:
+        """One line on the AI model settings and the OriginShape account (``settings_sync``), and *Reload* when a
+        pull changed them while the user had unsaved changes here."""
+        row = QtWidgets.QWidget()
+        row.setObjectName("oscarSyncRow")
+        layout = QtWidgets.QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.sync_label = self._hint("", "oscarSyncStatus", plain=True)
+        self.sync_reload_btn = QtWidgets.QPushButton("Reload")
+        self.sync_reload_btn.setObjectName("oscarSyncReload")
+        self.sync_reload_btn.setAutoDefault(False)
+        self.sync_reload_btn.setToolTip("Show the settings as they are now; your unsaved changes on this tab are "
+                                        "dropped")
+        self.sync_reload_btn.setVisible(False)
+        self.sync_reload_btn.clicked.connect(lambda *_: self._reload_from_settings())
+        layout.addWidget(self.sync_label, 1)
+        layout.addWidget(self.sync_reload_btn)
+        return row
+
+    def _sync_text(self) -> str:
+        if (os.environ.get(_settings_sync.ENV) or "").strip() == "0":
+            return f"Not synced with your OriginShape account ({_settings_sync.ENV}=0 is set)."
+        state = self._hub.state
+        if not state.get("known"):
+            return ""
+        if not state.get("signed_in"):
+            return ("Not synced: signed out. Signed in with OriginShape, these settings (never your API keys) are on "
+                    "the OriginShape website too.")
+        status = _settings_sync.status()
+        try:
+            pending = _params.pending_notice()
+        except Exception:  # noqa: BLE001 - the settings file is busy: the line goes without it
+            pending = ""
+        if status["state"] == "synced":
+            text = "Synced with your OriginShape account. Your API keys stay on this computer."
+            text = f"{text} {status['message']}".strip() if status.get("message") else text
+        elif status["state"] == "syncing":
+            text = "Syncing with your OriginShape account…"
+        elif status["state"] in ("unavailable", "error"):
+            text = f"{status['message']} Oscar tries again later."
+        else:
+            text = status.get("message") or ""
+        return f"{text} {pending}".strip() if pending else text
+
+    def _show_sync_state(self, *_args) -> None:
+        if not hasattr(self, "sync_label"):
+            return
+        text = self._sync_text()
+        self.sync_label.setText(f"{self._sync_note} {text}".strip() if self._sync_note else text)
+        self.sync_label.setVisible(bool(self.sync_label.text()))
+
+    def _on_settings_synced(self, payload: str = "") -> None:
+        """GUI thread: a sync's news. When a pull changed the settings: reload them, unless the user has unsaved
+        changes on the AI model tab (then say so and offer Reload; Save keeps both)."""
+        try:
+            data = json.loads(payload) if payload else {}
+        except (TypeError, ValueError):
+            data = {}
+        if isinstance(data, dict) and data.get("event") == "changed":
+            if self._unsaved():
+                self._sync_note = ("These settings were changed on your OriginShape account. Reload shows them (your "
+                                   "unsaved changes here are dropped); Save keeps your changes and theirs.")
+                self.sync_reload_btn.setVisible(True)
+            else:
+                self._reload_from_settings("Updated from your OriginShape account.")
+                return
+        self._show_sync_state()
+
+    def _view(self) -> str:
+        """The profiles and the active one as the dialog shows them, without the values it recomputes."""
+        rows = [{k: v for k, v in asdict(p).items() if k not in _settings_sync.DERIVED_FIELDS} for p in self.profiles]
+        active = self._shown_active()
+        return json.dumps([rows, active.id if active is not None else None], sort_keys=True, default=str)
+
+    def _unsaved(self) -> bool:
+        self._stash_editor()
+        return self._view() != self._base_view
+
+    def _reload_from_settings(self, note: str = "") -> None:
+        """Show the AI model settings as the file holds them now (after a pull); the profile in the editor stays
+        selected when it still exists."""
+        self._cancel_row_jobs()
+        shown = self._editor_profile.id if self._editor_profile is not None else None
+        self.profiles, self._from_file, self._base = _params.load_profiles_for_edit()
+        self._active = next((p for p in self.profiles if p.id == self._base["active_profile_id"]), None)
+        self._own_choice = self._active if self._active is not None and not _params.is_account_profile(self._active) \
+            else None
+        self._starter = None
+        self._editor_profile = None              # nothing of the old editor may be stashed into the new list
+        select = next((p for p in self._own_profiles() if p.id == shown), None) or self._own_choice
+        self._reload_list(select_profile=select)
+        self._stash_editor()
+        self._base_view = self._view()
+        self._sync_note = note
+        self.sync_reload_btn.setVisible(False)
+        self._show_sync_state()
+
     def _build_choice(self) -> QtWidgets.QGroupBox:
         """Which AI Oscar uses: the OriginShape account or one of the user's own provider profiles."""
         box = QtWidgets.QGroupBox("Which AI should Oscar use?")
@@ -1245,6 +1377,26 @@ class SettingsDialog(QtWidgets.QDialog):
         self.key_edit.setEchoMode(QtWidgets.QLineEdit.Password)
         self.key_edit.setPlaceholderText("Paste your provider's API key")
         form.addRow("API key", self.key_edit)
+        # What a sync left for the user to decide about this profile: an address to confirm (made or redirected on the
+        # website), or a removal on the website to follow or not.
+        self.pending_row = QtWidgets.QWidget()
+        pending = QtWidgets.QVBoxLayout(self.pending_row)
+        pending.setContentsMargins(0, 0, 0, 0)
+        pending.setSpacing(4)
+        self.pending_label = _StatusLabel("oscarProfilePending")
+        self._tone(self.pending_label, "error")
+        pending_buttons = QtWidgets.QHBoxLayout()
+        self.confirm_btn = self._small_button("Use this address", "oscarProfileConfirm", self._confirm_address)
+        self.remove_key_btn = self._small_button("Remove the key", "oscarProfileRemoveKey", self._remove_key)
+        self.remove_here_btn = self._small_button("Remove here", "oscarProfileRemoveHere", self._remove)
+        self.keep_btn = self._small_button("Keep", "oscarProfileKeep", self._keep_removed)
+        for button in (self.confirm_btn, self.remove_key_btn, self.remove_here_btn, self.keep_btn):
+            pending_buttons.addWidget(button)
+        pending_buttons.addStretch(1)
+        pending.addWidget(self.pending_label)
+        pending.addLayout(pending_buttons)
+        self.pending_row.setVisible(False)
+        form.addRow("", self.pending_row)
 
         # Model: dropdown populated from the provider's /models endpoint;
         # still editable for endpoints without a listing.
@@ -1297,10 +1449,19 @@ class SettingsDialog(QtWidgets.QDialog):
         columns.addLayout(right, 1)
 
         note = self._hint("Your provider's API key is saved in Oscar's settings file on this computer, readable only "
-                          "by your user account; use a key you can revoke. Your OriginShape sign-in is kept "
-                          "separately, in the system keychain.", "oscarKeyStorageNote")
+                          "by your user account; use a key you can revoke. It never leaves this computer: signed in, "
+                          "the profile's other settings (not its key or notes) sync with your OriginShape account. Your "
+                          "OriginShape sign-in is kept separately, in the system keychain.", "oscarKeyStorageNote")
         outer.addWidget(note)
         return self.byok_box
+
+    @staticmethod
+    def _small_button(text: str, name: str, action) -> QtWidgets.QPushButton:
+        button = QtWidgets.QPushButton(text)
+        button.setObjectName(name)
+        button.setAutoDefault(False)
+        button.clicked.connect(lambda *_: action())
+        return button
 
     def _account_profile(self) -> Profile | None:
         """The account profile the AI model tab edits: the active one when that is an account profile, else the
@@ -1497,6 +1658,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self._render_account()
         if hasattr(self, "account_model_combo"):
             self._show_account_model()
+        self._show_sync_state()
 
     def _show_account_page(self, index: int) -> None:
         """Switch the account card's page; only the page shown takes room (a QStackedWidget is otherwise as tall as
@@ -2252,6 +2414,7 @@ class SettingsDialog(QtWidgets.QDialog):
             return
         profile = self.profiles[row]
         self._apply_predefined()  # normalize before storing
+        before = _settings_sync.endpoint_of(profile)
         profile.name = self._unique_name(self.name_edit.text().strip() or profile.name, exclude=profile)
         preset = self._preset()
         if preset:
@@ -2261,9 +2424,11 @@ class SettingsDialog(QtWidgets.QDialog):
         profile.temperature = float(self.temp_spin.value())
         profile.max_tokens = int(self.max_tokens_spin.value())
         _model.apply_advanced(profile, self._advanced_values())
-        profile.api_key = self.key_edit.text().strip()
+        profile.api_key = self.key_edit.text().strip()   # a key approves nothing: only an edited address does
         if preset.get("account"):     # never: the account's preset is not offered here; kept as a guard
             profile.base_url, profile.api_key = "", ""
+        if _settings_sync.endpoint_of(profile) != before:   # the user edited the provider or base URL: approved
+            profile.approved = _settings_sync.approval_for(profile)
 
     def _load_editor(self, profile: Profile | None, row: int = -1):
         self._editor_row = row
@@ -2277,6 +2442,7 @@ class SettingsDialog(QtWidgets.QDialog):
             self.model_combo.setEditText("")
             self._load_advanced(None)
             self._apply_predefined()
+            self._show_pending(None)
             return
         self._loading = True
         self.name_edit.setText(profile.name)
@@ -2291,6 +2457,53 @@ class SettingsDialog(QtWidgets.QDialog):
         self._loading = False
         self._load_advanced(profile)
         self._apply_predefined()
+        self._show_pending(profile)
+
+    def _show_pending(self, profile: Profile | None) -> None:
+        """The notice of a profile a sync left for the user to decide about (see the module docstring)."""
+        removed = bool(profile is not None and profile.removed_remotely)
+        reason = _settings_sync.unusable_reason(profile) if profile is not None else ""
+        if removed:
+            self.pending_label.setText("This profile was removed on your OriginShape account. It is kept here, with "
+                                       "its key, until you decide: remove it here too, or keep it (it is then synced "
+                                       "again).")
+        elif reason:
+            where = _settings_sync.display_host(profile.base_url) or profile.provider or "this address"
+            approved = profile.approved or {}
+            was = _settings_sync.display_host(approved.get("base_url")) or approved.get("provider") or ""
+            before = f" (it was {was})" if was and approved.get("provider") else ""
+            self.pending_label.setText(
+                f"{reason.split('. ')[0]}{before}. Oscar doesn't use this profile until you confirm {where} here. "
+                "Only confirm an address you chose yourself.")
+            self.confirm_btn.setText(f"Use my key with {where}" if profile.api_key else f"Use {where}")
+        self.confirm_btn.setVisible(bool(reason) and not removed)
+        self.remove_key_btn.setVisible(bool(reason) and not removed and bool(profile.api_key))
+        self.remove_here_btn.setVisible(removed)
+        self.keep_btn.setVisible(removed)
+        self.pending_row.setVisible(removed or bool(reason))
+
+    def _confirm_address(self) -> None:
+        """Approved: exactly the provider and base URL shown (a later change on the website asks again)."""
+        self._stash_editor()
+        profile = self._selected()
+        if profile is not None:
+            profile.approved = _settings_sync.approval_for(profile)
+            self._show_pending(profile)
+
+    def _remove_key(self) -> None:
+        """The key is dropped from this profile (Save keeps that); its address still waits for confirmation."""
+        profile = self._selected()
+        if profile is not None:
+            self.key_edit.clear()
+            self._stash_editor()
+            self._show_pending(profile)
+
+    def _keep_removed(self) -> None:
+        """Kept although the website removed it: it is a profile like the others again (and synced again)."""
+        profile = self._selected()
+        if profile is not None:
+            profile.removed_remotely = False
+            self._show_pending(profile)
 
     def _unique_name(self, wanted: str, exclude=None) -> str:
         """``wanted``, or ``wanted 2`` / ``wanted 3`` ... when another profile (not ``exclude``) already uses it: two
@@ -2346,6 +2559,7 @@ class SettingsDialog(QtWidgets.QDialog):
             return
         clone = copy.deepcopy(source)
         clone.name = self._unique_name(f"{source.name} copy")
+        clone.id = _settings_sync.new_profile_id()   # a profile of its own (for the active profile and the sync)
         self.profiles.append(clone)
         self._reload_list(select_profile=clone)
 
@@ -2506,21 +2720,20 @@ class SettingsDialog(QtWidgets.QDialog):
             if profile.name.casefold() in seen:
                 profile.name = self._unique_name(profile.name, exclude=profile)
             seen.add(profile.name.casefold())
-        # The active profile follows its object: a rename must not switch Oscar to another model. Only when it
-        # was removed does the first profile become active.
+        # The active profile follows its object (by id): a rename must not switch Oscar to another model. Only when it
+        # was removed does the first profile become active. What a sync changed while the dialog was open is kept
+        # where the dialog changed nothing (``base``).
+        active = self._active if self._active is not None and any(p is self._active for p in self.profiles) else None
         try:
-            _params.save_profiles(self.profiles)
+            _params.save_profiles(self.profiles, active_id=active.id if active is not None else None, base=self._base)
             _params.set_string("search_backend_url", self.search_url_edit.text().strip())
             _params.set_string("web_allowlist_extra", self.allow_extra_edit.text().strip())
             _params.set_bool(_codeguard.PREF, self.allow_code_check.isChecked())
             _params.set_bool(_updates.PREF, self.update_check.isChecked())
-            if self._active is not None and any(p is self._active for p in self.profiles):
-                _params.set_active_profile(self._active.name)
-            elif _params.active_profile_name() not in {p.name for p in self.profiles}:
-                _params.set_active_profile(self.profiles[0].name)
         except OSError as e:
             # The settings file is locked or unreadable right now (a scanner or sync client, permissions): say so
             # and keep what was typed; the dialog stays open.
             self._save_failed(f"✗ Could not save the settings: {e}")
             return
+        _settings_sync.request("save", prefer="local")   # a Save is the newer write: the account takes it
         self.accept()

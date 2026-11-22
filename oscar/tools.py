@@ -724,6 +724,22 @@ def _import_file(path: str, doc_name: str | None = None, include_screenshot: boo
     return _shot(_imported_text(path, res), include_screenshot, view_name, res["document_name"])
 
 
+def _repair_hint(path: str) -> str:
+    """What to tell the user about a mesh with holes: the OriginShape workspace repairs it in the browser. Said as THE
+    way for a turn from the workspace (the user is there), as an option for one typed in FreeCAD."""
+    stem = os.path.splitext(os.path.basename(path))[0] or "model"
+    try:
+        origin = current_context().state.get("origin")
+    except Exception:  # noqa: BLE001 - no turn context (a direct call): FreeCAD's own wording
+        origin = ""
+    if origin == "workspace":
+        return (f"The user can repair this mesh in the OriginShape workspace, in the browser: open the attachment in "
+                f"the chat, press Repair, then “Use the repaired copy”, which sends “{stem}-repaired.stl” with their "
+                "next message. Suggest that, not another program.")
+    return ("Ask the user for a closed (watertight) copy of the mesh: their modelling program can repair it, or they "
+            "can attach it in the OriginShape workspace and use Repair there.")
+
+
 def _imported_text(path: str, res: dict) -> str:
     """What the model reads of an import: the new objects, each one's kind, size and position, and what a mesh
     cannot do."""
@@ -736,6 +752,8 @@ def _imported_text(path: str, res: dict) -> str:
         *_imported.lines(parts),
     ]
     lines += [f"Note: {note}." for note in res.get("solid_notes") or []]
+    if any(_imported.NOT_CLOSED in note for note in res.get("solid_notes") or []):
+        lines.append(_repair_hint(path))
     if any(part["kind"] == "mesh" for part in parts) and not res.get("solid_notes"):
         lines.append("A mesh can be looked at and measured, but not cut, filleted or fused. To change it or build on "
                      "it, delete it and import the file again with as_solid=true.")
