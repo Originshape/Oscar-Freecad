@@ -137,6 +137,11 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         self._turn_snapshot: dict = {}  # doc undo depths before the turn
         self._turn_used_cad = False  # any successful CAD tool ran this turn
         self._paused = False
+        self._open_questions: dict[str, dict] = {}
+        self._open_asks: dict = {}
+        self._turn_asks: list = []
+        self._bar_ask_id = None
+        self._bar_question_qid = None
         self._building = False  # the user message is being assembled (a PDF is read on a helper thread)
         self._active_step: Step | None = None
         self._tool_t0 = 0.0
@@ -168,6 +173,8 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         self._orphan_carry_images: list[str] = []
 
         self._build_ui()
+        self._register_question_surface()
+        self._register_ask_surface()
         self._register_netguard_hook()
         self._register_quit_hook()
         self._init_account()
@@ -225,6 +232,24 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
     def _shutdown(self) -> None:
         """The application is quitting (``aboutToQuit``): stop connect mode, ask the running turn to stop and give its
         thread a few seconds to end (it polls its stop flag between provider chunks and tool calls). Never raises."""
+        try:   # stop being the question surface so nothing waits on a dying panel
+            from . import netguard as _netguard
+
+            surface = getattr(_netguard, "panel_surface", None)
+            if surface is not None and getattr(surface, "__self__", None) is self:
+                _netguard.panel_surface = None
+        except Exception:  # noqa: BLE001
+            pass
+        try:   # release every ask_user waiter and stop being its surface
+            from . import askuser as _askuser
+            from . import tools_ask as _tools_ask
+
+            surface = getattr(_tools_ask, "surface", None)
+            if surface is not None and getattr(surface, "__self__", None) is self:
+                _tools_ask.surface = None
+            _askuser.REGISTRY.shutdown()
+        except Exception:  # noqa: BLE001
+            pass
         workspace = getattr(self, "_workspace", None)
         if workspace is not None:
             try:
@@ -387,6 +412,10 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         attach_layout.setSpacing(4)
         self.attach_bar.hide()
         root.addWidget(self.attach_bar)
+
+        # The chat question bar (seam: panel_questions.QuestionsBar, below the transcript,
+        # above the composer; a hidden placeholder while that module is absent)
+        root.addWidget(self._mount_questions_bar())
 
         # Input area: one rounded container (z.ai-style) holding the text
         # edit and the controls row — attach, model picker, key hint.
@@ -1377,6 +1406,546 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
             self.send_btn.setText("…")
             self.send_btn.setToolTip("Pausing after the current step")
 
+    # -- the in-chat question surface (netguard.panel_surface) -----------------
+
+    def _register_question_surface(self) -> None:
+        """Offer in-chat question cards; the modal dialog stays the fallback (netguard decides)."""
+        self._open_questions = getattr(self, "_open_questions", {})
+        try:
+            from . import netguard as _netguard
+
+            _netguard.panel_surface = self._question_surface
+        except Exception:   # noqa: BLE001
+            pass
+
+    def _question_append(self, text: str) -> Block:
+        """A QUESTION card goes to the RUNNING TURN's chat (its own context), or the shown
+        chat when nothing runs — the same isolation rule every turn write follows."""
+        blocks = self.blocks
+        turn_blocks = getattr(self, "_turn_blocks", None)
+        if getattr(self, "worker", None) is not None and turn_blocks is not None:
+            blocks = turn_blocks
+        block = Block(Block.QUESTION, text)
+        blocks.append(block)
+        return block
+
+    def _question_surface(self, info, choices, remaining_s, cancelled, take_remote, by_remote):
+        """``netguard.panel_surface``: render the question as a card and wait. Returns the clicked
+        ``Choice.key``, ``""`` (settled unanswered) or ``None`` (cannot show → modal dialog)."""
+        if self._current_session() is None:
+            return None
+        from PySide import QtCore as _qc
+
+        qid = str(info.get("id"))
+        title = str(info.get("title") or "Oscar needs your decision")
+        body = str(info.get("text") or "")
+        block = self._question_append(f"{title}\n{body}")
+        block.actions = [(f"oscar://answer/{qid}/{choice.key}", choice.label) for choice in choices]
+        block.key = qid
+        block.detail = "pending"
+        self._dirty = True
+        self._render()
+        # The bar under the transcript is the quick answer surface; the card above is the record.
+        self._show_question_bar(f"{title}\n{body}" if body else title,
+                                [choice.label for choice in (choices or [])], approve=True)
+        self._bar_question_qid = qid      # the bar now speaks for THIS question (answer routing)
+
+        loop = _qc.QEventLoop(self)
+        settled: list[str] = []
+
+        def settle(key: str) -> None:
+            if settled:
+                return
+            settled.append(key)
+            loop.quit()
+
+        self._open_questions[qid] = {"settle": settle, "block": block,
+                                     "choices": list(choices or [])}
+
+        def _expire() -> None:
+            settle("")
+
+        timer = _qc.QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(_expire)
+        timer.start(max(1, int(float(remaining_s) * 1000)))
+
+        def _poll() -> None:
+            if cancelled():
+                settle("")
+                return
+            remote_choice = take_remote()
+            if remote_choice is not None:
+                by_remote.append(True)
+                settle(remote_choice.key)
+
+        poller = _qc.QTimer(self)
+        poller.timeout.connect(_poll)
+        poller.start(200)
+        try:
+            loop.exec_()
+        finally:
+            timer.stop()
+            poller.stop()
+            self._open_questions.pop(qid, None)
+
+        key = settled[0] if settled else ""
+        self._settle_question(block, key, choices or [], cancelled(), int(float(remaining_s)))
+        return key or ""
+
+    def _deliver_question_answer(self, qid: str, key: str) -> None:
+        """Settle the open question ``qid`` with ``key`` — the ONE tail every answer path (card
+        anchor, QuestionsBar) funnels into, so an answer reaches the waiting worker exactly once."""
+        open_q = self._open_questions.pop(qid, None)   # close the double-click window first
+        if open_q is None:
+            self._flash_status("That question is no longer open.")
+            return
+        open_q["settle"](key)
+        self._dirty = True
+        self._render()
+
+    def _on_question_answer(self, spec: str) -> None:
+        """`oscar://answer/<id>/<key>` — a click on a QUESTION card's button."""
+        qid, _, key = spec.partition("/")
+        open_q = self._open_questions.get(qid)
+        if open_q is None:
+            self._flash_status("That question is no longer open.")
+            return
+        block = open_q["block"]
+        if block not in self.blocks:
+            # the card belongs to another chat: chat isolation — answer where it was asked
+            self._flash_status("Open this chat to answer that question.")
+            return
+        choice = next((c for c in open_q["choices"] if c.key == key), None)
+        if choice is not None and getattr(choice, "role", "") in ("RejectRole", "NoRole"):
+            text, ok = QtWidgets.QInputDialog.getText(
+                self, "Reason (optional)", "Tell Oscar why (optional):")
+            if ok and text.strip():
+                block.reason = text.strip()
+        self._deliver_question_answer(qid, key)
+
+    def _question_bar_answer(self, label: str) -> bool:
+        """A QuestionsBar option click answers the netguard question the bar was armed with (the
+        same waiting worker a card click settles). True = consumed — the label never falls through
+        to the chat as a message while a question waits for it."""
+        qid = getattr(self, "_bar_question_qid", None)
+        if qid is None:
+            return False                       # the bar is not showing a netguard question
+        open_q = self._open_questions.get(qid)
+        if open_q is None:
+            self._flash_status("That question is no longer open.")
+            return True                        # answered after it settled: report it, never re-send it
+        if open_q["block"] not in self.blocks:
+            # the question belongs to another chat: chat isolation — answer where it was asked
+            self._flash_status("Open this chat to answer that question.")
+            return True
+        choice = next((c for c in open_q["choices"] if c.label == label), None)
+        if choice is None:
+            self._flash_status("Pick one of the listed choices.")
+            return True                  # not an option: tell the user, do not send it as a message
+        self._deliver_question_answer(qid, choice.key)
+        return True
+
+    def _question_bar_custom(self, text: str) -> bool:
+        """A typed bar answer cannot settle a netguard question (its choices are keyed, not free
+        text): say so and consume it — never send it into the chat as if it had been accepted."""
+        if getattr(self, "_bar_question_qid", None) is None:
+            return False
+        self._flash_status("That question needs one of the listed choices.")
+        return True
+
+    def _settle_question(self, block, key: str, choices, was_cancelled: bool, timeout_s: int) -> None:
+        """Flip the card to its final state (approved / rejected / timeout / cancelled)."""
+        if key:
+            role = next((getattr(c, "role", "") for c in choices if getattr(c, "key", "") == key), "")
+            block.detail = "approved" if role in ("YesRole", "AcceptRole") else "rejected"
+        elif was_cancelled:
+            block.detail = "cancelled"
+        else:
+            block.detail = "timeout"
+            block.reason = str(timeout_s or 120)
+        self._dirty = True
+        self._render()
+        self._clear_question_bar()   # the question is no longer open
+
+    # -- ask_user decision cards (tools_ask renders through here; the WORKER waits on askuser's registry) ----
+
+    def _register_ask_surface(self) -> None:
+        """Become ``tools_ask.surface``: the ask_user tool renders its decision/wizard cards here. The
+        card call is render-and-return — the agent worker waits on ``askuser.REGISTRY``, not on it."""
+        self._open_asks = getattr(self, "_open_asks", {})
+        self._turn_asks = getattr(self, "_turn_asks", [])
+        try:
+            from . import tools_ask as _tools_ask
+
+            _tools_ask.surface = self._ask_surface
+        except Exception:   # noqa: BLE001
+            pass
+
+    def _ask_questions(self, request) -> list:
+        return request.payload.get("wizard") or [request.payload]
+
+    def _ask_active_index(self, state) -> int:
+        return next(i for i in range(len(self._ask_questions(state["request"]))) if i not in state["answers"])
+
+    def _ask_card_text(self, request, active: int) -> str:
+        """The card body: the question headline (and wizard progress / answered summary)."""
+        questions = self._ask_questions(request)
+        lines = []
+        if request.wizard:
+            lines.append(f"Decision wizard — question {active + 1} of {len(questions)}")
+        question = questions[active]
+        lines.append(question["title"])
+        if question.get("subtitle"):
+            lines.append(question["subtitle"])
+        for i in range(active):
+            lines.append("answered: " + questions[i]["title"])
+        return "\n".join(lines)
+
+    def _ask_actions(self, request, active: int):
+        return [(f"oscar://ask/{request.id}/{active}/{i}", option["label"])
+                for i, option in enumerate(self._ask_questions(request)[active]["options"])]
+
+    def _ask_bar(self, request, active: int) -> None:
+        question = self._ask_questions(request)[active]
+        title = question["title"] + (f"\n{question['subtitle']}" if question.get("subtitle") else "")
+        self._show_question_bar(title, [o["label"] for o in question["options"]])
+        self._bar_ask_id = request.id     # the bar now speaks for THIS decision card (answer routing)
+
+    def _ask_surface(self, request) -> None:
+        """``tools_ask.surface`` (GUI thread): append the decision card for ``request``, arm the bar and
+        the settle poller. Raises when no chat is open or the card belongs to another chat — the tool
+        then fails honestly instead of leaving an unanswerable question hanging."""
+        session = self._current_session()
+        if session is None:
+            raise RuntimeError("no chat is open to show the decision card in")
+        if str(session.get("id") or "") != request.conversation_id:
+            raise RuntimeError("the decision belongs to another chat")
+        block = self._question_append(self._ask_card_text(request, 0))
+        block.key = request.id
+        block.detail = "pending"
+        block.actions = self._ask_actions(request, 0)
+        state = {"request": request, "block": block, "answers": {}, "done": False}
+        self._open_asks[request.id] = state
+        self._dirty = True
+        self._render()
+        self._ask_bar(request, 0)
+
+        from PySide import QtCore as _qc
+
+        def _poll() -> None:
+            if request.event.is_set():      # settled elsewhere: timeout, Stop, shutdown
+                self._settle_ask(state)
+
+        poller = _qc.QTimer(self)
+        poller.timeout.connect(_poll)
+        poller.start(200)
+        state["poller"] = poller
+
+    def _on_ask_answer(self, spec: str) -> None:
+        """`oscar://ask/<id>/<question-index>/<option-index>` — an option click on a decision card."""
+        rid, _, rest = spec.partition("/")
+        qi_text, _, index_text = rest.partition("/")
+        state = self._open_asks.get(rid)
+        if state is None or state["done"]:
+            self._flash_status("That decision is no longer open.")
+            return
+        try:
+            qi, index = int(qi_text), int(index_text)
+        except ValueError:
+            return
+        questions = self._ask_questions(state["request"])
+        if not 0 <= qi < len(questions) or qi in state["answers"]:
+            return
+        options = questions[qi]["options"]
+        if not 0 <= index < len(options):
+            return
+        state["answers"][qi] = {"answer": options[index]["label"], "index": index}
+        self._ask_advance(state, qi)
+
+    def _ask_advance(self, state, answered_qi: int) -> None:
+        """Record the per-question answer, move the card to the next unanswered question, or resolve
+        the request in the registry when the last one is in (the worker wakes on its Event)."""
+        from . import askuser
+
+        request = state["request"]
+        questions = self._ask_questions(request)
+        nxt = next((i for i in range(len(questions)) if i not in state["answers"]), None)
+        if nxt is None:
+            state["done"] = True
+            session = self._current_session()
+            conversation = str(session.get("id") or "") if session else request.conversation_id
+            payload = ({"answers": [state["answers"][i] for i in range(len(questions))]}
+                       if request.wizard else dict(state["answers"][0]))
+            ok, err = askuser.REGISTRY.submit_answer(request.id, payload, conversation_id=conversation,
+                                                     run_id=request.run_id)
+            if not ok:
+                state["done"] = False
+                state["answers"].pop(answered_qi, None)   # the refused answer must not block the retry
+                self._flash_status(f"Answer could not be submitted ({err}). Please try again.")
+                return
+            self._settle_ask(state)
+            return
+        block = state["block"]
+        block.text = self._ask_card_text(request, nxt)
+        block.actions = self._ask_actions(request, nxt)
+        self._dirty = True
+        self._render()
+        self._ask_bar(request, nxt)
+
+    def _open_ask_of_current_chat(self):
+        session = self._current_session()
+        chat = str(session.get("id") or "") if session else ""
+        if not chat:
+            return None
+        for state in reversed(list(self._open_asks.values())):
+            if not state["done"] and state["request"].conversation_id == chat:
+                return state
+        return None
+
+    def _tracked_ask_state(self):
+        """The decision-card state the bar was armed with: ``(state, err)`` — ``err`` flashes and
+        consumes when the tracked card settled meanwhile or belongs to another chat."""
+        rid = getattr(self, "_bar_ask_id", None)
+        if rid is None:
+            if getattr(self, "_bar_question_qid", None) is not None:
+                return None, ""    # the bar speaks for a netguard question, never a decision card
+            return self._open_ask_of_current_chat(), ""      # untracked: the per-chat fallback
+        state = self._open_asks.get(rid)
+        if state is None:
+            return None, "That decision is no longer open."
+        session = self._current_session()
+        chat = str(session.get("id") or "") if session else ""
+        if chat and state["request"].conversation_id != chat:
+            return None, "Open this chat to answer that decision."
+        return state, ""
+
+    def _ask_bar_answer(self, label: str) -> bool:
+        """A QuestionsBar option click answers the open decision card of THIS chat. True = consumed —
+        the label never falls through to the chat as a message while the decision waits."""
+        state, err = self._tracked_ask_state()
+        if err:
+            self._flash_status(err)
+            return True
+        if state is None:
+            return False
+        qi = self._ask_active_index(state)
+        for i, option in enumerate(self._ask_questions(state["request"])[qi]["options"]):
+            if option["label"] == label:
+                state["answers"][qi] = {"answer": option["label"], "index": i}
+                self._ask_advance(state, qi)
+                return True
+        if getattr(self, "_bar_ask_id", None) is not None:
+            self._flash_status("Pick one of the listed choices.")
+            return True                  # the bar speaks for this decision: no fall-through to send
+        return False
+
+    def _ask_bar_custom(self, text: str) -> bool:
+        """A typed bar answer becomes the custom value of the open decision card (when it accepts
+        one). True = consumed — never sent into the chat while the decision waits."""
+        state, err = self._tracked_ask_state()
+        if err:
+            self._flash_status(err)
+            return True
+        if state is None:
+            return False
+        qi = self._ask_active_index(state)
+        question = self._ask_questions(state["request"])[qi]
+        if not (question.get("allow_free_text") or question.get("custom_value")):
+            if getattr(self, "_bar_ask_id", None) is not None:
+                self._flash_status("That decision takes one of the listed choices, not text.")
+                return True              # the bar speaks for this decision: no fall-through to send
+            return False
+        state["answers"][qi] = {"answer": text, "index": -1, "value": text}
+        self._ask_advance(state, qi)
+        return True
+
+    def _settle_ask(self, state) -> None:
+        """Flip the decision card to its final state (answered summary / cancelled / timeout)."""
+        from . import askuser
+
+        request = state["request"]
+        poller = state.pop("poller", None)
+        if poller is not None:
+            poller.stop()
+            poller.deleteLater()
+        self._open_asks.pop(request.id, None)
+        self._turn_asks = getattr(self, "_turn_asks", None) or []
+        self._turn_asks.append(request.record())      # persisted with the turn (blocks_meta["asks"])
+        block = state["block"]
+        if request.state == askuser.ANSWERED:
+            answers = request.answer.get("answers") if request.wizard else [request.answer]
+            block.detail = "answered"
+            block.reason = " | ".join(str(a.get("answer")) for a in answers if a)
+        else:
+            block.detail = str(request.state)
+            if request.state == askuser.TIMEOUT:
+                # the honest duration the waiter allowed (the render otherwise assumes 120 s)
+                block.reason = str(int(round(request.timeout_s)))
+        self._dirty = True
+        self._render()
+        self._clear_question_bar()
+
+    def _settle_typed_clarification(self, text: str, attachments) -> None:
+        """Record a custom answer or a new request on this chat's latest open clarification."""
+        if not text.strip() and not attachments:
+            return
+        block = next((b for b in reversed(self.blocks)
+                      if b.kind == Block.QUESTION and b.detail == "clarification_pending"), None)
+        if block is None:
+            return
+        try:
+            from .flow_intent import answers_open_question
+
+            answered = answers_open_question(
+                text, self._session_ledger(), [str(path or "") for path in attachments])
+        except Exception:  # noqa: BLE001 - presentation state must not prevent the user's send
+            answered = bool(text.strip() or attachments)
+        block.detail = "answered" if answered else "superseded"
+        block.reason = text.strip() or ("Attached file" if len(attachments) == 1 else "Attached files")
+        self._dirty = True
+        self._render()
+        self._clear_question_bar()   # a typed answer settled the open question
+
+    def _on_clarification_option(self, spec: str) -> None:
+        """Send a selected option as the next user turn in the chat that asked it."""
+        qid, _, index_text = spec.partition("/")
+        block = next((b for b in self.blocks if b.kind == Block.QUESTION and b.key == qid), None)
+        if block is None or block.detail != "clarification_pending":
+            self._flash_status("That clarification is no longer open.")
+            return
+        try:
+            index = int(index_text)
+            target, answer = block.actions[index]
+        except (ValueError, IndexError):
+            self._flash_status("That answer option is no longer available.")
+            return
+        if not target.startswith(f"oscar://clarify/{qid}/") or self._busy():
+            self._flash_status("This clarification cannot be answered right now.")
+            return
+        block.detail = "answered"
+        block.reason = answer
+        self._render()
+        self._clear_question_bar()
+        self._send_text(answer)
+
+    # -- the chat question bar (seam: panel_questions.QuestionsBar) -----------
+
+    def _mount_questions_bar(self) -> QtWidgets.QWidget:
+        """The strip below the transcript, above the composer: ``panel_questions.QuestionsBar``
+        when that module exists, a hidden placeholder while it does not (a missing module never
+        crashes the shell). ``answered`` / ``custom_answered`` route into the existing steer
+        path: an option click answers the open clarification and sends; a custom answer settles
+        the question and sends. The in-transcript question cards are unchanged."""
+        try:
+            from .panel_questions import QuestionsBar
+            bar = QuestionsBar()
+        except ImportError:
+            bar = QtWidgets.QWidget()
+            bar.setObjectName("oscarQuestionsBar")
+            bar.hide()
+            return bar
+        bar.setObjectName("oscarQuestionsBar")
+        loading = getattr(bar, "load", None)
+        if callable(loading):
+            self._questions_show = loading       # present a question in the bar
+        clearing = getattr(bar, "reset", None)
+        if callable(clearing):
+            self._questions_clear = clearing
+        answered = getattr(bar, "answered", None)
+        if answered is not None and hasattr(answered, "connect"):
+            answered.connect(lambda text: self._on_bar_answer(str(text)))
+        custom = getattr(bar, "custom_answered", None)
+        if custom is not None and hasattr(custom, "connect"):
+            custom.connect(lambda text: self._on_bar_custom(str(text)))
+        return bar
+
+    def _show_question_bar(self, text: str, options, *, approve: bool = False) -> None:
+        """Put an OPEN question in the bar under the transcript (a no-op when the seam is absent).
+
+        ``options`` are the (label) choices; ``text`` may carry a title and body on two lines.
+        The transcript card remains the durable record — the bar is the quick way to answer it.
+        A new question re-arms the bar: previous answer routing (netguard question / decision
+        card) is dropped — the caller re-declares what the bar now speaks for."""
+        self._bar_question_qid = None
+        self._bar_ask_id = None
+        show = getattr(self, "_questions_show", None)
+        if not callable(show):
+            return
+        labels = [str(option) for option in (options or [])][:6]
+        try:
+            show({"text": str(text or ""), "options": labels, "approve": bool(approve),
+                  "allow_custom": True})
+        except Exception as e:   # noqa: BLE001 - the transcript cards still work
+            self._log_panel_error("question_bar", e)
+
+    def _clear_question_bar(self) -> None:
+        self._bar_question_qid = None
+        self._bar_ask_id = None
+        clear = getattr(self, "_questions_clear", None)
+        if callable(clear):
+            try:
+                clear()
+            except Exception as e:   # noqa: BLE001
+                self._log_panel_error("question_bar_clear", e)
+
+    def _on_bar_answer(self, text: str) -> None:
+        """``QuestionsBar.answered``: the chosen option settles whatever the bar speaks for — the
+        open decision card, the open netguard question, or the open clarification (which becomes
+        the next user message). An answer for a waiting question is NEVER sent as a message."""
+        answer = str(text or "").strip()
+        if not answer:
+            return
+        if self._ask_bar_answer(answer):
+            return
+        if self._question_bar_answer(answer):
+            return
+        block = next((b for b in reversed(self.blocks)
+                      if b.kind == Block.QUESTION and b.detail == "clarification_pending"), None)
+        if block is not None:
+            block.detail = "answered"
+            block.reason = answer
+            self._dirty = True
+            self._render()
+        self._send_or_steer(answer)
+
+    def _on_bar_custom(self, text: str) -> None:
+        """``QuestionsBar.custom_answered``: a typed answer settles the open clarification the
+        same way the composer's would, then sends; a waiting question that cannot take free text
+        reports that instead of silently sending the text into the chat."""
+        answer = str(text or "").strip()
+        if not answer:
+            return
+        if self._ask_bar_custom(answer):
+            return
+        if self._question_bar_custom(answer):
+            return
+        self._settle_typed_clarification(answer, [])
+        self._send_or_steer(answer)
+
+    def _send_or_steer(self, text: str) -> None:
+        """Deliver ``text`` from the question bar: a new turn when idle, the steer path
+        (queued bubble) while a turn runs."""
+        if self._busy():
+            self.input.setPlainText(text)
+            self._steer_while_busy()
+            return
+        self._send_text(text)
+
+    def _on_pause_button(self):
+        """The heartbeat row's pause/resume toggle: pause after the current step, resume a
+        paused turn (the same flow ``Esc``'s stop releases before stopping)."""
+        if self.worker is None:
+            return
+        if self._paused:
+            self._paused = False
+            self.worker.resume()
+            self._set_status("Thinking")
+            self._sync_turn_chrome()
+        else:
+            self.worker.pause()
+            self._set_status("Pausing after the current step…")
+
     def _on_flow_paused(self, paused: bool):
         self._paused = paused
         self._sync_turn_chrome()
@@ -1419,6 +1988,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         if (text or self._turn_card is not None) and self.worker is not None:
             if not self._status_timer.isActive():
                 self._status_timer.start()
+        self._update_heartbeat()   # the heartbeat row narrates the turn's state changes with the status
         self._render()
 
     def _flash_status(self, text: str, ms: int = 2500) -> None:
