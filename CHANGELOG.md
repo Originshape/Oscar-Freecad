@@ -1,4 +1,8 @@
 ## [Unreleased]
+
+### Notes
+
+- This PR was previously merged and reverted due to a process error. This commit re-establishes it for clean review. The feature implementation, tests, and develop compatibility are unchanged from the validated state.
 ### Added
 - **AI model settings synced with your OriginShape account**: signed in with OriginShape, whether you use the account
   or your own provider, your provider profiles (name, provider, base URL, model, reasoning, Advanced overrides)
