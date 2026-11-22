@@ -1,5 +1,13 @@
+# Changelog
+
+All notable changes to Oscar for FreeCAD. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and versions follow [Semantic Versioning](https://semver.org/): the version is in `package.xml` and
+`oscar/__init__.py`, and each release is a `v<version>` tag with a ZIP attached.
+
 ## [Unreleased]
+
 ### Added
+
 - **AI model settings synced with your OriginShape account**: signed in with OriginShape, whether you use the account
   or your own provider, your provider profiles (name, provider, base URL, model, reasoning, Advanced overrides)
   and the one in use are the same in FreeCAD and on the website (Settings → AI model). Oscar syncs when the panel
@@ -19,28 +27,12 @@
   mesh, the model is told that the user can repair it in the workspace (Repair, then "Use the repaired copy"), as the
   way to go for a task from the workspace and as an option for a chat in FreeCAD. A workspace attachment's
   `repaired_from` (the original's name) is read.
+
 ### Changed
+
 - **Every provider profile has a stable id** in `oscar_settings.json`, and the profile in use is remembered by it, so a
   rename never switches profiles. Older settings files get their ids when they are read (nothing is rewritten until
   the next save), and an older Oscar can still read and save the file.
-
-### Fixed
-- **Chats are independent** (#2): a turn writes only to the chat that started it. Its transcript, plan,
-  artifacts, project folder, attachments, undelivered images, unfinished composer text and turn record are
-  kept per chat, and switching chats (the picker, New chat, Chat search) is allowed while a turn runs — a
-  message sent in another chat then waits in that chat instead of steering the running turn.
-- A queued message whose send was blocked (signed out, new Terms, no key…) no longer disappears together
-  with what the user was typing: it keeps waiting in its chat and the composer is left alone.
-- Picking the chat that is already shown no longer wipes the message being typed.
-- A message queued in the chat on screen goes out when the panel becomes free, even when other chats
-  queued messages before it.
-- The pause, stop and Esc controls act on the running turn only while its chat is shown; in another chat
-  the send button sends (queuing there), Esc belongs to the application again, and the running turn's
-  status line, heartbeat and Act-now button do not show.
-- A turn whose first request failed for an account reason gives its message back to its own chat also when
-  another chat is on screen: the message returns to that chat's input (it used to stay in its history
-  unanswered), and the same now holds for an undelivered steered message.
-- A queued message that is still waiting when its chat is opened later asks before it is sent.
 
 ## [0.2.1] - 2026-10-28
 

@@ -9,7 +9,6 @@ env:
   FREECAD_TAG: "1.1.3"
 jobs:
   pure:
-    name: Pure
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,7 +20,6 @@ jobs:
         env: { OSCAR_TEST_ALLOW_REAL_HOME: "1" }
 
   linux:
-    name: Linux
     runs-on: ubuntu-24.04
     needs: pure
     env:
@@ -36,15 +34,7 @@ jobs:
           echo "$(cut -d' ' -f1 sha.txt)  $APPIMAGE" | sha256sum -c -
           chmod +x "$APPIMAGE" && ./"$APPIMAGE" --appimage-extract > /dev/null
       - name: X11 libraries for the GUI smoke test
-        run: |
-          sudo apt-get update
-          # the Ubuntu mirrors are occasionally unreachable from a runner; retry before giving up,
-          # then verify the packages really installed so a silent skip is impossible
-          for i in 1 2 3; do
-            sudo apt-get install -y xvfb libxcb-cursor0 libgl1 libegl1 && break
-            echo "apt install attempt $i failed - retrying in 20s"; sleep 20
-          done
-          dpkg -s xvfb libxcb-cursor0 libgl1 libegl1 > /dev/null
+        run: sudo apt-get update && sudo apt-get install -y xvfb libxcb-cursor0 libgl1 libegl1
       - name: Console tests (full)
         run: |
           FC="$PWD/squashfs-root"
@@ -59,7 +49,6 @@ jobs:
           xvfb-run -a -s "-screen 0 1600x1000x24" env FREECAD_GUI="$FC/usr/bin/freecad" scripts/test.sh gui
 
   macos:
-    name: macOS
     runs-on: macos-latest
     needs: pure
     env:
@@ -78,113 +67,37 @@ jobs:
       - run: scripts/test.sh gui
 
   windows:
-    # ONE Windows check covering BOTH supported FreeCAD versions: two separately reported steps,
-    # so a version-specific failure is diagnosable while the required check stays a single "Windows".
-    name: Windows
     runs-on: windows-latest
     needs: pure
+    env:
+      ARCHIVE: FreeCAD_1.1.3-Windows-x86_64-py311.7z
     steps:
       - uses: actions/checkout@v4
-      - name: Console tests (FreeCAD 1.1.3)
+      - name: Fetch, verify and unpack FreeCAD
         shell: pwsh
-        timeout-minutes: 45   # a hung module must surface as a failed step, not wedge the job for hours
-        env:
-          FREECAD_VER: "1.1.3"
-          ARCHIVE: FreeCAD_1.1.3-Windows-x86_64-py311.7z
         run: |
-          $base = "https://github.com/FreeCAD/FreeCAD/releases/download/$env:FREECAD_VER"
+          $base = "https://github.com/FreeCAD/FreeCAD/releases/download/$env:FREECAD_TAG"
           curl.exe -fL --retry 3 -o $env:ARCHIVE "$base/$env:ARCHIVE"
           curl.exe -fL --retry 3 -o sha.txt "$base/$env:ARCHIVE-SHA256.txt"
           $expected = ((Get-Content sha.txt -TotalCount 1) -split '\s+')[0]
           if ((Get-FileHash $env:ARCHIVE -Algorithm SHA256).Hash.ToLower() -ne $expected) { throw "checksum mismatch" }
-          7z x -y "-o$env:RUNNER_TEMP\fc113" $env:ARCHIVE | Out-Null
-          $fc = (Get-ChildItem "$env:RUNNER_TEMP\fc113" -Directory | Select-Object -First 1).FullName
+          7z x -y "-o$env:RUNNER_TEMP\fc" $env:ARCHIVE | Out-Null
+      - name: Console tests (full, one process per module as scripts/test.sh does)
+        shell: pwsh
+        run: |
+          $fc = (Get-ChildItem "$env:RUNNER_TEMP\fc" -Directory | Select-Object -First 1).FullName
           $env:PYTHONUTF8 = "1"; $env:PYTHONDONTWRITEBYTECODE = "1"
           $env:OSCAR_ALLOW_CODE = "1"   # scripts are off by default and asked about per call; the suite runs them unasked
           $run = "$PWD\tests\run.py" -replace '\\', '/'
-          function Invoke-Module([string]$module, [string]$sandbox) {
-            New-Item -ItemType Directory -Force "$sandbox\fchome\Mod" | Out-Null
-            cmd /c mklink /J "$sandbox\fchome\Mod\Oscar" "$PWD" | Out-Null
-            $env:FREECAD_USER_HOME = "$sandbox\fchome"; $env:OSCAR_TEST_MODULES = $module
-            $env:OSCAR_AI_SETTINGS = "$sandbox\settings.json"; $env:OSCAR_PROJECTS_DIR = "$sandbox\projects"
-            $env:OSCAR_LOG_DIR = "$sandbox\logs"; $env:OSCAR_CACHE_DIR = "$sandbox\cache"; $env:OSCAR_DOWNLOAD_DIR = "$sandbox\downloads"
-            # freecadcmd sometimes aborts in its own Qt/CRT teardown (0xC0000409) AFTER the tests
-            # finished, and any output redirection around the native call hangs it. So the runner
-            # writes its own verdict: a tiny os._exit shim records run.py's exit code in verdict.txt.
-            # The TESTS stay the verdict: 0 = green even when the process exit is poisoned, 1 = real
-            # failures, a MISSING verdict = crashed mid-run and is retried once by the caller.
-            $verdict = "$sandbox\verdict.txt"
-            Remove-Item $verdict -ErrorAction SilentlyContinue
-            $pyv = $verdict -replace '\\', '/'
-            & "$fc\bin\freecadcmd.exe" -c "import os, sys; _r = os._exit; os._exit = lambda c: (open('$pyv', 'w').write(str(c)), _r(c))[-1]; sys.argv=['run.py']; __file__='$run'; exec(open(__file__, encoding='utf-8').read())"
-            $code = $LASTEXITCODE
-            if ($code -eq 0) { return $true }
-            if (Test-Path $verdict) {
-              $v = (Get-Content $verdict)[0]
-              if ($v -eq "0") {
-                Write-Host "::warning::$module finished green (verdict 0) but exited $code - freecadcmd teardown abort, counted as pass"
-                return $true
-              }
-              return $false   # the tests themselves reported failures: a real red
-            }
-            return $false       # no verdict: the process died before finishing - retried by the caller
-          }
           $failed = @()
           foreach ($m in (Get-ChildItem "tests\test_*.py" | ForEach-Object { $_.BaseName })) {
-            $ok = Invoke-Module $m "$env:RUNNER_TEMP\oscar-test\113-$m"
-            if (-not $ok) {
-              Write-Host "::warning::$m exited non-zero without a green verdict - retrying once in a fresh sandbox"
-              $ok = Invoke-Module $m "$env:RUNNER_TEMP\oscar-test\113-$m-retry"
-              if (-not $ok) { $failed += $m }
-            }
+            $scr = "$env:RUNNER_TEMP\oscar-test\$m"
+            New-Item -ItemType Directory -Force "$scr\fchome\Mod" | Out-Null
+            cmd /c mklink /J "$scr\fchome\Mod\Oscar" "$PWD" | Out-Null
+            $env:FREECAD_USER_HOME = "$scr\fchome"; $env:OSCAR_TEST_MODULES = $m
+            $env:OSCAR_AI_SETTINGS = "$scr\settings.json"; $env:OSCAR_PROJECTS_DIR = "$scr\projects"
+            $env:OSCAR_LOG_DIR = "$scr\logs"; $env:OSCAR_CACHE_DIR = "$scr\cache"; $env:OSCAR_DOWNLOAD_DIR = "$scr\downloads"
+            & "$fc\bin\freecadcmd.exe" -c "import sys; sys.argv=['run.py']; __file__='$run'; exec(open(__file__, encoding='utf-8').read())"
+            if ($LASTEXITCODE -ne 0) { $failed += $m }
           }
-          if ($failed.Count -gt 0) { throw "FreeCAD $env:FREECAD_VER failed modules: $($failed -join ', ')" }
-      - name: Console tests (FreeCAD 1.1.4)
-        shell: pwsh
-        timeout-minutes: 45   # a hung module must surface as a failed step, not wedge the job for hours
-        env:
-          FREECAD_VER: "1.1.4"
-          ARCHIVE: FreeCAD_1.1.4-Windows-x86_64-py311.7z
-        run: |
-          $base = "https://github.com/FreeCAD/FreeCAD/releases/download/$env:FREECAD_VER"
-          curl.exe -fL --retry 3 -o $env:ARCHIVE "$base/$env:ARCHIVE"
-          curl.exe -fL --retry 3 -o sha.txt "$base/$env:ARCHIVE-SHA256.txt"
-          $expected = ((Get-Content sha.txt -TotalCount 1) -split '\s+')[0]
-          if ((Get-FileHash $env:ARCHIVE -Algorithm SHA256).Hash.ToLower() -ne $expected) { throw "checksum mismatch" }
-          7z x -y "-o$env:RUNNER_TEMP\fc114" $env:ARCHIVE | Out-Null
-          $fc = (Get-ChildItem "$env:RUNNER_TEMP\fc114" -Directory | Select-Object -First 1).FullName
-          $env:PYTHONUTF8 = "1"; $env:PYTHONDONTWRITEBYTECODE = "1"
-          $env:OSCAR_ALLOW_CODE = "1"
-          $run = "$PWD\tests\run.py" -replace '\\', '/'
-          function Invoke-Module([string]$module, [string]$sandbox) {
-            New-Item -ItemType Directory -Force "$sandbox\fchome\Mod" | Out-Null
-            cmd /c mklink /J "$sandbox\fchome\Mod\Oscar" "$PWD" | Out-Null
-            $env:FREECAD_USER_HOME = "$sandbox\fchome"; $env:OSCAR_TEST_MODULES = $module
-            $env:OSCAR_AI_SETTINGS = "$sandbox\settings.json"; $env:OSCAR_PROJECTS_DIR = "$sandbox\projects"
-            $env:OSCAR_LOG_DIR = "$sandbox\logs"; $env:OSCAR_CACHE_DIR = "$sandbox\cache"; $env:OSCAR_DOWNLOAD_DIR = "$sandbox\downloads"
-            $verdict = "$sandbox\verdict.txt"
-            Remove-Item $verdict -ErrorAction SilentlyContinue
-            $pyv = $verdict -replace '\\', '/'
-            & "$fc\bin\freecadcmd.exe" -c "import os, sys; _r = os._exit; os._exit = lambda c: (open('$pyv', 'w').write(str(c)), _r(c))[-1]; sys.argv=['run.py']; __file__='$run'; exec(open(__file__, encoding='utf-8').read())"
-            $code = $LASTEXITCODE
-            if ($code -eq 0) { return $true }
-            if (Test-Path $verdict) {
-              $v = (Get-Content $verdict)[0]
-              if ($v -eq "0") {
-                Write-Host "::warning::$module finished green (verdict 0) but exited $code - freecadcmd teardown abort, counted as pass"
-                return $true
-              }
-              return $false   # the tests themselves reported failures: a real red
-            }
-            return $false       # no verdict: the process died before finishing - retried by the caller
-          }
-          $failed = @()
-          foreach ($m in (Get-ChildItem "tests\test_*.py" | ForEach-Object { $_.BaseName })) {
-            $ok = Invoke-Module $m "$env:RUNNER_TEMP\oscar-test\114-$m"
-            if (-not $ok) {
-              Write-Host "::warning::$m exited non-zero without a green verdict - retrying once in a fresh sandbox"
-              $ok = Invoke-Module $m "$env:RUNNER_TEMP\oscar-test\114-$m-retry"
-              if (-not $ok) { $failed += $m }
-            }
-          }
-          if ($failed.Count -gt 0) { throw "FreeCAD $env:FREECAD_VER failed modules: $($failed -join ', ')" }
+          if ($failed.Count -gt 0) { throw "failed modules: $($failed -join ', ')" }

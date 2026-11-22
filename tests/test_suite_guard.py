@@ -38,9 +38,7 @@ LEGACY_UNISOLATED = frozenset({"test_attachments.py", "test_oscar_regressions.py
                                "test_tools_and_params.py"})
 
 _TC_BASES = {"TestCase", "IsolatedAsyncioTestCase"}
-# squashfs-root: the Linux CI extracts the FreeCAD AppImage INTO the checkout (456 foreign .py,
-# some not UTF-8) — extraction output is never repository source, on any platform.
-_SKIP_DIRS = {"__pycache__", "fixtures", "squashfs-root"}
+_SKIP_DIRS = {"__pycache__", "fixtures"}
 
 
 def _base_name(node):
@@ -51,24 +49,11 @@ def _base_name(node):
     return ""
 
 
-def _read_source(path):
-    """Decode ``path`` as UTF-8. Undecodable bytes become U+FFFD and the caller is told:
-    a corrupt or foreign-encoding ``.py`` in the tree is a hygiene problem to REPORT
-    (NON_UTF8, with the file named), never a stage crash — the strict-UTF-8 platforms
-    (Linux CI) used to die with a bare UnicodeDecodeError that named no file."""
-    with open(path, "rb") as f:
-        raw = f.read()
-    try:
-        return raw.decode("utf-8"), False
-    except UnicodeDecodeError:
-        return raw.decode("utf-8", errors="replace"), True
-
-
 def analyse(path):
     """``{"classes": {name: {"tc": bool, "tests": [names], "bases": [names]}}, "module_tests": [...], "dups": [...]}``
     for one source file (a syntax error raises ``SyntaxError`` with the file name)."""
-    src, _bad = _read_source(path)
-    tree = ast.parse(src, filename=path)
+    with open(path, encoding="utf-8") as f:
+        tree = ast.parse(f.read(), filename=path)
     classes = {}
     dups = []
     for node in tree.body:
@@ -126,11 +111,6 @@ def scan_tests_dir(tests_dir, *, legacy=LEGACY_UNISOLATED):
             path = os.path.join(root, name)
             rel = os.path.normpath(os.path.join(rel_root, name)) if rel_root != "." else name
             try:
-                _src_probe, _bad = _read_source(path)
-                if _bad:
-                    problems.append(("NON_UTF8", rel, "the file is not valid UTF-8 "
-                                     "(decoded with replacement so the scan continues)"))
-                    continue
                 info = analyse(path)
             except SyntaxError as e:
                 problems.append(("SYNTAX_ERROR", rel, str(e)))
@@ -174,9 +154,8 @@ _INJECTED = {"InitGui.py": {"Workbench"}}
 def undefined_names(path, injected=()):
     """``[(name, line)]`` of names ``path`` uses that no scope defines (module-level assignments, imports, defs and
     classes, ``global`` assignments inside functions, builtins). Skips files with ``from x import *``."""
-    src, bad_utf8 = _read_source(path)
-    if bad_utf8:
-        return [("�", 0)]          # the caller turns this into a NON_UTF8 row
+    with open(path, encoding="utf-8") as f:
+        src = f.read()
     tree = ast.parse(src, path)
     if any(isinstance(n, ast.ImportFrom) and any(a.name == "*" for a in n.names) for n in ast.walk(tree)):
         return []
@@ -223,10 +202,6 @@ def scan_undefined(root):
                     hits = undefined_names(path, _INJECTED.get(name, ()))
                 except SyntaxError as e:
                     out.append((os.path.relpath(path, root), getattr(e, "lineno", 0) or 0, "SyntaxError"))
-                    continue
-                if hits and hits[0] == ("�", 0):
-                    out.append((os.path.relpath(path, root), 0,
-                                "NON_UTF8: the file is not valid UTF-8 (decoded with replacement)"))
                     continue
                 out += [(os.path.relpath(path, root), line, n) for n, line in hits]
     return out
@@ -543,87 +518,6 @@ class WorkflowAndScriptTest(unittest.TestCase):
                       "OSCAR_PROJECTS_DIR", "OSCAR_AI_SETTINGS", "OSCAR_DOWNLOAD_DIR", "OSCAR_TEST_MODULES"):
             self.assertIn(token, text)
         self.assertNotRegex(text, r"(^|\s)HOME=", "scripts/test.sh must never override HOME (the geometry tests need it)")
-
-
-class MalformedUtf8Test(unittest.TestCase):
-    """A corrupt or foreign-encoding .py in the tree is REPORTED (NON_UTF8, file named),
-    never a stage crash - the 2026-11-20 Linux CI UnicodeDecodeError named no file."""
-
-    def test_scan_tests_dir_reports_non_utf8_without_crashing(self):
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
-            bad = os.path.join(tmp, "test_bad_bytes.py")
-            with open(bad, "wb") as fh:
-                fh.write(b"# " + bytes([0xFF, 0xFE]) + b" not utf-8" + bytes([10])
-                         + b"import unittest" + bytes([10]))
-            problems = scan_tests_dir(tmp)
-        self.assertTrue(any(code == "NON_UTF8" and "test_bad_bytes.py" in rel
-                            for code, rel, _ in problems), problems)
-
-    def test_undefined_names_flags_non_utf8_instead_of_raising(self):
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
-            bad = os.path.join(tmp, "weird.py")
-            with open(bad, "wb") as fh:
-                fh.write(b"x = 1  # " + bytes([0xFF]) + b" bad byte" + bytes([10]))
-            hits = undefined_names(bad)
-        self.assertEqual(hits, [(chr(0xFFFD), 0)])
-
-
-class SkipDirsTest(unittest.TestCase):
-    """The AppImage extraction directory is never repository source (the Linux CI leaves
-    squashfs-root/ inside the checkout); everything real stays scanned."""
-
-    @staticmethod
-    def _write(path, text):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(text)
-
-    def test_squashfs_root_py_files_are_ignored_everywhere(self):
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
-            base = os.path.join(tmp, "repo")
-            self._write(os.path.join(base, "tests", "test_real.py"),
-                        "import unittest" + chr(10) + "class T(unittest.TestCase):" + chr(10) +
-                        "    def test_one(self):" + chr(10) + "        self.assertTrue(True)" + chr(10))
-            self._write(os.path.join(base, "oscar", "real_source.py"), "defined = 1" + chr(10))
-            for rel in ("squashfs-root" + os.sep + "usr" + os.sep + "Mod" + os.sep + "AddonManager" + os.sep + "InitGui.py",
-                        "squashfs-root" + os.sep + "nested" + os.sep + "deeper" + os.sep + "foreign.py",
-                        "squashfs-root" + os.sep + "root_level.py"):
-                self._write(os.path.join(base, *rel.split(os.sep)),
-                            "FreeCADGui" + chr(10) if "AddonManager" in rel else "undefined_foreign" + chr(10))
-            hits = scan_undefined(base)
-        self.assertEqual(hits, [], hits)
-
-    def test_real_directories_are_still_scanned(self):
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
-            base = os.path.join(tmp, "repo")
-            self._write(os.path.join(base, "tests", "test_real.py"),
-                        "import unittest" + chr(10) + "class T(unittest.TestCase):" + chr(10) +
-                        "    def test_one(self):" + chr(10) + "        self.assertTrue(True)" + chr(10))
-            self._write(os.path.join(base, "oscar", "real_source.py"), "undefined_in_real_source" + chr(10))
-            hits = scan_undefined(base)
-        self.assertTrue(any("real_source" in path and "undefined_in_real_source" in name
-                            for path, _line, name in hits), hits)
-
-    def test_non_utf8_outside_excluded_dirs_is_still_reported(self):
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
-            base = os.path.join(tmp, "repo")
-            os.makedirs(os.path.join(base, "oscar"), exist_ok=True)
-            os.makedirs(os.path.join(base, "tests"), exist_ok=True)
-            with open(os.path.join(base, "oscar", "bad.py"), "wb") as fh:
-                fh.write(b"x = 1  # " + bytes([0xFF]) + b" bad" + bytes([10]))
-            hits = scan_undefined(base)
-        self.assertTrue(any("bad.py" in path for path, _line, name in hits), hits)
-
-    def test_scan_tests_dir_on_an_empty_tree_is_clean(self):
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
-            problems = scan_tests_dir(tmp)
-        self.assertEqual(problems, [])
 
 
 if __name__ == "__main__":

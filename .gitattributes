@@ -2,8 +2,3 @@
 tests/ export-ignore
 scripts/ export-ignore
 .github/ export-ignore
-# Byte-sensitive fixtures: their exact bytes are asserted (hashes, pin checks, byte compares),
-# so no line-ending conversion on checkout — Windows autocrlf checkouts otherwise CRLF-convert
-# them and the recorded sha256 values no longer match (CI red on every Windows run).
-*.step -text
-*.sha256 -text

@@ -14,7 +14,6 @@ No FreeCAD and no Qt: ``netguard`` imports without them.
 import _thread
 import concurrent.futures
 import os
-import posixpath
 import subprocess
 import sys
 import threading
@@ -244,21 +243,6 @@ def _fork_exec_is_audited() -> bool:
     return out.stdout.strip() == "True"
 
 
-class SystemBinaryTest(unittest.TestCase):
-    def test_cargo_coreutils_target_is_a_trusted_system_binary(self):
-        cargo_coreutils_echo = "/usr/lib/cargo/bin/coreutils/echo"
-        with mock.patch.object(netguard.os, "name", "posix"), \
-             mock.patch.object(netguard.os.path, "isabs", side_effect=posixpath.isabs), \
-             mock.patch.object(netguard.os.path, "normcase", side_effect=lambda path: path), \
-             mock.patch.object(netguard.os.path, "normpath", side_effect=lambda path: path), \
-             mock.patch.object(netguard.os.path, "dirname", side_effect=posixpath.dirname), \
-             mock.patch.object(netguard.os.path, "realpath", return_value=cargo_coreutils_echo), \
-             mock.patch.object(netguard.os, "stat", return_value=mock.Mock(st_mode=0o755)) as directory_stat, \
-             mock.patch.object(netguard.os, "access", return_value=False) as writable:
-            self.assertTrue(netguard._is_system_binary("/bin/echo"))
-            directory_stat.return_value = mock.Mock(st_mode=0o777)
-            writable.return_value = True
-            self.assertFalse(netguard._is_system_binary("/bin/echo"))
 @unittest.skipIf(os.name == "nt", "POSIX program paths")
 class ForkExecTest(_GuardCase):
     """``_posixsubprocess.fork_exec`` (newer Pythons raise it after ``subprocess.Popen``, and alone for a multiprocessing
