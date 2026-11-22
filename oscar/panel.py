@@ -110,6 +110,29 @@ def _mutating_tool_names() -> set[str]:
     return names
 
 
+class _ModelCatalogSignals(QtCore.QObject):
+    loaded = QtCore.Signal(int, str, object, str)
+
+
+class _ModelCatalogJob(QtCore.QRunnable):
+    """Fetch one provider's model catalog away from FreeCAD's GUI thread."""
+
+    def __init__(self, generation: int, profile, signals):
+        super().__init__()
+        self.generation = generation
+        self.profile = profile
+        self.signals = signals
+
+    def run(self):
+        try:
+            from .providers import list_models
+
+            models, error = list_models(self.profile)
+            self.signals.loaded.emit(self.generation, self.profile.name, models or [], str(error or ""))
+        except Exception as exc:  # noqa: BLE001 - provider metadata is untrusted UI input
+            self.signals.loaded.emit(self.generation, self.profile.name, [], f"{type(exc).__name__}: {exc}")
+
+
 class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin, FollowMixin, QtWidgets.QWidget):
     """Chat content of the dock; the dock wrapper lives below."""
 
@@ -127,6 +150,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         self.blocks: list[Block] = []
         self.history: list[Message] = []
         self.worker: AgentWorker | None = None
+        self.pending: list[str] = []  # attachment paths waiting to be sent
         self._stream_buffer = ""
         self._current: Block | None = None
         self._dirty = False
@@ -153,19 +177,18 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         self._scroll_set = 0        # the value this code last set; a different value means the user moved
         self._scroll_blocks = None  # the chat (blocks list) the scroll state belongs to
         # Task chats: multiple conversations, switchable, persisted. The
-        # live session's history IS self.history; the worker holds that
-        # list object for the whole turn, and _turn_session keeps the
-        # running turn's writes in its own chat while another is shown.
+        # live session's history IS self.history (the worker holds that
+        # list object for the whole turn — switching is blocked while busy).
         self.sessions: list[dict] = []
         self._session_loading = False
         # Facts the model must learn with the next message (e.g. the user
         # reverted a turn — otherwise it would keep building on objects
         # that no longer exist). Kept PER SESSION (see ``_pending_notes``).
         self._orphan_notes: list[str] = []
-        # The per-chat ``pending`` attachments and ``_carry_images`` (both panel_session properties) need a
-        # home before the first chat is activated / after the last one is gone:
-        self._orphan_pending: list[str] = []
-        self._orphan_carry_images: list[str] = []
+        self._profiles: list = []
+        self._model_catalogs: dict[str, dict] = {}
+        self._catalog_generation = 0
+        self._catalog_jobs = {}
 
         self._build_ui()
         self._register_netguard_hook()
@@ -439,15 +462,26 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         self.templates_btn.clicked.connect(self._show_templates)
         controls.addWidget(self.templates_btn)
 
-        self.profile_combo = QtWidgets.QComboBox()
-        self.profile_combo.setMinimumWidth(110)
-        self.profile_combo.currentIndexChanged.connect(self._on_profile_picked)
-        controls.addWidget(self.profile_combo)
-        controls.addStretch(1)
-        # The model of the active profile sits where a hint used to be.
-        self.model_label = QtWidgets.QLabel("")
-        self.model_label.setStyleSheet(f"color:{_muted()};font-size:small;")
-        controls.addWidget(self.model_label)
+        self.profile_button = QtWidgets.QToolButton()
+        self.profile_button.setObjectName("oscarProfileSelector")
+        self.profile_button.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.profile_button.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        self.profile_menu = QtWidgets.QMenu(self.profile_button)
+        self.profile_menu.aboutToShow.connect(self._rebuild_profile_menu)
+        self.profile_button.setMenu(self.profile_menu)
+        self.profile_button.setMaximumWidth(126)
+        controls.addWidget(self.profile_button)
+
+        self.model_button = QtWidgets.QToolButton()
+        self.model_button.setObjectName("oscarModelSelector")
+        self.model_button.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.model_button.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        self.model_menu = QtWidgets.QMenu(self.model_button)
+        self.model_menu.aboutToShow.connect(self._rebuild_model_menu)
+        self.model_button.setMenu(self.model_menu)
+        self.model_button.setMaximumWidth(140)
+        self.model_label = self.model_button   # compatibility for the workspace's temporary model display
+        controls.addWidget(self.model_button)
 
         # Stop: visible only while a turn runs; same
         # effect as Esc.
@@ -503,32 +537,198 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
     # -- profile / settings --------------------------------------------------
 
     def _reload_profiles(self):
-        self.profile_combo.blockSignals(True)
-        self.profile_combo.clear()
-        names = [p.name for p in _params.load_profiles()]
-        self.profile_combo.addItems(names)
-        active = _params.active_profile_name()
-        if active in names:
-            self.profile_combo.setCurrentIndex(names.index(active))
-        self.profile_combo.blockSignals(False)
-        profile = _params.active_profile()
-        self.model_label.setText(_params.model_display_name(profile))
+        old = {p.name: p for p in self._profiles}
+        old_default = getattr(self, "_profile_default_name", _params.active_profile_name())
+        self._profiles = list(_params.load_profiles())
+        fresh = {p.name: p for p in self._profiles}
+        new_default = _params.active_profile_name()
+        for session in getattr(self, "sessions", []):
+            if not session.get("profile_selection_explicit") and session.get("profile_name") in ("", old_default):
+                default_profile = fresh.get(new_default)
+                if default_profile is not None:
+                    session["profile_name"] = new_default
+                    session["model"] = default_profile.model
+                    previous = configured = default_profile
+                else:
+                    previous = configured = None
+            else:
+                previous = old.get(str(session.get("profile_name") or ""))
+                configured = fresh.get(str(session.get("profile_name") or ""))
+            if (not session.get("profile_selection_explicit") and previous is not None and configured is not None
+                    and session.get("model") == previous.model):
+                session["model"] = configured.model
+                if session.get("history"):
+                    try:
+                        from . import chats as _chats
+
+                        _chats.save(session)
+                    except Exception as exc:  # noqa: BLE001 - settings refresh must still update the visible selector
+                        self._log_panel_error("profile_persist", exc)
+        self._profile_default_name = new_default
+        self._catalog_generation += 1
+        self._model_catalogs = {}
+        self._refresh_model_selector()
         self._refresh_account()
 
-    def _on_profile_picked(self, index: int):
-        name = self.profile_combo.itemText(index)
-        if name:
-            try:
-                _params.set_active_profile(name)
-            except OSError as e:   # the settings file is locked right now: nothing was written, show what is active
-                self._log_panel_error("profile", e)
-                self._reload_profiles()
-                self._flash_status(f"Could not switch the profile: {e}", 6000)
-                return
-            _settings_sync.request("panel", prefer="local")   # the profile in use, on the website too
-        profile = _params.active_profile()
-        self.model_label.setText(_params.model_display_name(profile))
+    def _model_catalog_loaded(self, generation: int, name: str, models, error: str) -> None:
+        self._catalog_jobs.pop((generation, name), None)
+        if generation != self._catalog_generation or not any(p.name == name for p in self._profiles):
+            return
+        from .panel_models import catalog_models
+
+        self._model_catalogs[name] = {"models": catalog_models(models), "error": error, "loading": False}
+        self._refresh_model_selector()
+        if self.profile_menu.isVisible():
+            self._rebuild_profile_menu()
+        if self.model_menu.isVisible():
+            self._rebuild_model_menu()
+
+    def _fetch_profile_catalog(self, profile) -> None:
+        key = (self._catalog_generation, profile.name)
+        if key in self._catalog_jobs:
+            return
+        self._model_catalogs[profile.name] = {"models": [], "error": "Loading model catalog…", "loading": True}
+        signals = _ModelCatalogSignals(self)
+        signals.loaded.connect(self._model_catalog_loaded)
+        job = _ModelCatalogJob(self._catalog_generation, copy.deepcopy(profile), signals)
+        self._catalog_jobs[key] = job
+        QtCore.QThreadPool.globalInstance().start(job)
+
+    def _chat_profile(self, session=None):
+        """The selected profile/model for one chat, isolated from other chat sessions."""
+        profiles = self._profiles or list(_params.load_profiles())
+        session = session if session is not None else self._current_session()
+        name = str((session or {}).get("profile_name") or _params.active_profile_name())
+        from .panel_models import selected_profile
+
+        profile = selected_profile(profiles, name) or _params.active_profile()
+        if profile is None:
+            return None
+        profile = copy.deepcopy(profile)
+        if session is not None:
+            before = (session.get("profile_name"), session.get("model"))
+            if not session.get("profile_name") or session.get("profile_name") != profile.name:
+                session["profile_name"] = profile.name
+                session["model"] = profile.model
+            profile.model = str(session.get("model") or profile.model)
+            if before != (session.get("profile_name"), session.get("model")) and session.get("history"):
+                self._persist_current()
+        return profile
+
+    def _refresh_model_selector(self) -> None:
+        profile_button = getattr(self, "profile_button", None)
+        model_button = getattr(self, "model_button", None)
+        if profile_button is None or model_button is None:
+            return
+        profile = self._chat_profile()
+        idle = getattr(self, "worker", None) is None
+        if profile is None:
+            profile_button.setText("Choose profile")
+            profile_button.setToolTip("No configured profiles. Open Settings to add one.")
+            profile_button.setEnabled(idle)
+            model_button.setText("Choose model")
+            model_button.setToolTip("Choose a configured profile first.")
+            model_button.setEnabled(False)
+            return
+        catalog = self._model_catalogs.get(profile.name, {})
+        models = catalog.get("models") or []
+        error = str(catalog.get("error") or "")
+        availability = "Listed by provider" if profile.model in models else (
+            "Loading model catalog…" if catalog.get("loading") else
+            ("Unavailable: " + error if error else "Not verified by provider"))
+        profile_button.setEnabled(idle)
+        profile_button.setText(profile.name)
+        profile_button.setToolTip(f"Profile: {profile.name}\nProvider: {profile.provider}")
+        model_button.setEnabled(idle)
+        model_button.setText(_params.model_display_name(profile) or "Choose model")
+        model_button.setToolTip(f"Profile: {profile.name}\nModel: {profile.model or 'not configured'}\n"
+                                f"Provider: {getattr(profile, 'provider', '') or 'unknown'}\n"
+                                f"Status: {availability}")
+
+    def _select_chat_model(self, profile_name: str, model: str | None = None) -> None:
+        from .panel_models import selected_profile
+
+        profile = selected_profile(self._profiles, profile_name)
+        session = self._current_session()
+        if profile is None or session is None:
+            return
+        keep_model = session.get("model") if session.get("profile_name") == profile_name else ""
+        session["profile_name"] = profile_name
+        session["model"] = str(model if model is not None else keep_model or profile.model or "")
+        session["profile_selection_explicit"] = True
+        _settings_sync.request("panel", prefer="local")   # the pick, on the website too (#34)
+        self._persist_current()
+        self._refresh_model_selector()
         self._refresh_account()
+
+    def _rebuild_model_menu(self) -> None:
+        menu = self.model_menu
+        menu.clear()
+        selected = self._chat_profile()
+        if selected is None:
+            empty = menu.addAction("Choose a profile first")
+            empty.setEnabled(False)
+            return
+        if selected.name not in self._model_catalogs:
+            self._fetch_profile_catalog(selected)
+        catalog = self._model_catalogs.get(selected.name, {})
+        models = list(catalog.get("models") or [])
+        error = str(catalog.get("error") or "")
+        loading = bool(catalog.get("loading"))
+        if selected.model and selected.model not in models:
+            models.insert(0, selected.model)
+        if not models:
+            status = "Loading model catalog…" if loading else (error or "No models listed by provider")
+            item = menu.addAction(status)
+            item.setEnabled(False)
+        for model in models:
+            from .panel_models import model_availability
+
+            availability = model_availability(model, catalog.get("models") or [], error)
+            action = menu.addAction(f"{model} · {selected.provider} · {availability}")
+            action.setCheckable(True)
+            action.setChecked(selected.model == model)
+            action.setToolTip(f"Model: {model}\nProvider: {selected.provider}\nStatus: {availability}")
+            action.triggered.connect(lambda _checked=False, n=selected.name, m=model:
+                                     self._select_chat_model(n, m))
+        menu.addSeparator()
+        refresh = menu.addAction("Refresh model catalogs")
+        refresh.triggered.connect(self._refresh_model_catalogs)
+
+    def _rebuild_profile_menu(self) -> None:
+        menu = self.profile_menu
+        menu.clear()
+        selected = self._chat_profile()
+        for profile in self._profiles:
+            if profile.name not in self._model_catalogs:
+                self._fetch_profile_catalog(profile)
+            catalog = self._model_catalogs.get(profile.name, {})
+            models = catalog.get("models") or []
+            if catalog.get("loading"):
+                count = "loading…"
+            elif catalog.get("error") and not models:
+                count = "unavailable"
+            else:
+                count = f"{len(models)} model{'s' if len(models) != 1 else ''}"
+            action = menu.addAction(f"{profile.name} — {count}")
+            action.setCheckable(True)
+            action.setChecked(bool(selected and selected.name == profile.name))
+            action.setToolTip(f"Profile: {profile.name}\nProvider: {profile.provider}\n"
+                              f"Configured model: {profile.model or 'none'}")
+            action.triggered.connect(lambda _checked=False, n=profile.name: self._select_chat_model(n))
+        if not self._profiles:
+            empty = menu.addAction("No profiles configured — open Settings")
+            empty.setEnabled(False)
+        menu.addSeparator()
+        refresh = menu.addAction("Refresh model catalogs")
+        refresh.triggered.connect(self._refresh_model_catalogs)
+
+    def _refresh_model_catalogs(self) -> None:
+        self._catalog_generation += 1
+        self._model_catalogs.clear()
+        self._rebuild_profile_menu()
+        self._rebuild_model_menu()
+
 
     def _init_settings_sync(self) -> None:
         """The AI model settings follow the OriginShape account (``settings_sync``): a sync when the panel starts, and
@@ -604,7 +804,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
     def _apply_account_state(self, render: bool = True) -> None:
         state = self._account_state()
         try:
-            profile = _params.active_profile()
+            profile = self._chat_profile()
         except Exception:  # noqa: BLE001 - an unreadable settings file reads as "no profile" here
             profile = None
         show = _params.is_account_profile(profile) or bool(state.get("signed_in"))
@@ -687,7 +887,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         state = self._account_state() if state is None else state
         if profile is None:
             try:
-                profile = _params.active_profile()
+                profile = self._chat_profile()
             except Exception:  # noqa: BLE001 - an unreadable settings file reads as "no profile" here
                 profile = None
         reason = self._onboarding_reason(profile, state)
@@ -723,10 +923,9 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
     def _show_account_card(self, kind: str, *, reason: str = "", returned: bool = False) -> None:
         """Append an account card, unless the chat already ends with the same card (pressing Send again must not
         stack them)."""
-        blocks = self._turn_target_blocks()
-        last = blocks[-1] if blocks else None
+        last = self.blocks[-1] if self.blocks else None
         if last is None or last.kind != Block.ACCOUNT or last.detail != kind or getattr(last, "reason", "") != reason:
-            blocks.append(self._account_block(kind, reason=reason, returned=returned))
+            self.blocks.append(self._account_block(kind, reason=reason, returned=returned))
         self._render()
 
     def _send_blocker(self, profile) -> str:
@@ -798,20 +997,6 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
     def _append(self, kind: str, text: str = "") -> Block:
         block = Block(kind, text)
         self.blocks.append(block)
-        return block
-
-    def _turn_target_blocks(self) -> list[Block]:
-        """The blocks list the RUNNING TURN writes to: its own chat's transcript, not the one shown."""
-        session = getattr(self, "_turn_session", None)
-        blocks = session.get("blocks") if session is not None else None
-        return blocks if isinstance(blocks, list) else self.blocks
-
-    def _turn_append(self, kind: str, text: str = "") -> Block:
-        """``_append`` for the running turn's chat — the same chat while it is shown, its own transcript
-        when another chat is displayed meanwhile."""
-        blocks = self._turn_target_blocks()
-        block = Block(kind, text)
-        blocks.append(block)
         return block
 
     # -- attachments -----------------------------------------------------------
@@ -1035,87 +1220,6 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
             self._set_status("Attachments are sent with your next message once Oscar is done.")
         self._render()
 
-    def _queue_busy_send(self) -> None:
-        """Send pressed while ANOTHER chat's turn runs: steering would hand the text to that chat's
-        conversation, so the message waits in its own chat instead (a "queued" bubble; it goes out by
-        itself once the panel is free and its chat is the one shown — a chat opened only later asks
-        first). Attached images ride with it; other attachments stay pending, exactly as with a steer."""
-        text = self.input.toPlainText().strip()
-        if not text:
-            return
-        attachments, images = self._late_image_attachments()
-        sent = {a.path for a in attachments}
-        if sent:
-            self.pending = [p for p in self.pending if p not in sent]
-            self._refresh_attach_bar()
-        block = self._append(Block.USER, text)
-        block.queued = True
-        self._waiting_sends.append({"session": self._current_session(), "text": text, "images": images,
-                                    "block": block})
-        self.input.clear()
-        if self.pending:
-            self._set_status("Attachments are sent with your next message once Oscar is done.")
-        else:
-            self._set_status("Queued — sent when the turn in the other chat finishes.")
-        self._render()
-
-    def _deliver_waiting_sends(self, opening: bool = False) -> None:
-        """Start the turns of the messages that queued while another chat's turn ran: only into their own
-        chat, only while the panel is free. The queue is searched for the chat shown, so a message behind
-        another chat's never blocks it; a chat that is not shown keeps waiting — its message goes out when
-        the user opens it, and a waiting send is never sent into a different chat.
-
-        ``opening``: the delivery runs because the user opened the chat, not because a turn just ended
-        there — the message may be long stale, so it asks before it spends a request."""
-        while not self._busy() and self._waiting_sends:
-            self._waiting_sends = [w for w in self._waiting_sends if w.get("session") in self.sessions]
-            current = self._current_session()
-            index = next((i for i, w in enumerate(self._waiting_sends) if w.get("session") is current), None)
-            if index is None:
-                break                           # nothing waits for the chat shown: it delivers when the user opens it
-            item = self._waiting_sends[index]
-            if opening and not self._confirm_waiting_send(item):
-                self._hold_waiting_send(item)   # not now: the text waits in the chat's composer instead
-                continue
-            self._send_text(str(item.get("text") or ""), images=list(item.get("images") or ()))
-            if self.worker is None:
-                break      # the send was blocked (signed out, Terms…): the message keeps waiting in its chat
-            del self._waiting_sends[index]      # the turn started: only now does its bubble give way to the real one
-            block = item.get("block")
-            if block is not None and block in self.blocks:
-                self.blocks.remove(block)       # the real send shows the message again
-            self._render()
-
-    def _confirm_waiting_send(self, item: dict) -> bool:
-        """Ask about a waiting message the user only now returns to (it may be long outdated)."""
-        session = item.get("session")
-        title = str((session or {}).get("title") or "this chat")
-        ret = QtWidgets.QMessageBox.question(
-            self, "Oscar",
-            f"Send the message that waited in “{title}”?",
-            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-            QtWidgets.QMessageBox.No)
-        return ret == QtWidgets.QMessageBox.Yes
-
-    def _hold_waiting_send(self, item: dict) -> None:
-        """The user chose not to send a waiting message now: its text goes to the chat's composer (its
-        images ride the next send from there) and the "queued" bubble gives way to it."""
-        for i, w in enumerate(self._waiting_sends):
-            if w is item:
-                del self._waiting_sends[i]
-                break
-        block = item.get("block")
-        if block is not None and block in self.blocks:
-            self.blocks.remove(block)
-        text = str(item.get("text") or "").strip()
-        if text:
-            draft = self.input.toPlainText().strip()
-            self.input.setPlainText(f"{text}\n\n{draft}" if draft else text)
-        images = list(item.get("images") or ())
-        if images:
-            self._carry_images = images + [i for i in self._carry_images if i not in images]
-        self._render()
-
     def _build_content(self, text: str, attachments: list) -> str:
         """The stored user message (``attachments.build_user_message``). Reading a PDF can take seconds (poppler up to
         20 s, the built-in reader much longer on a large file), so it runs on a helper thread while a local event
@@ -1168,9 +1272,6 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
             if workspace is not None:
                 workspace.turn.refuse("Oscar is busy with another turn in FreeCAD.")
                 return
-            if not self._turn_chat_shown():
-                self._queue_busy_send()   # another chat's turn runs: the message waits in ITS chat, never steers it
-                return
             self._steer_while_busy()
             return
         # The latest AI model settings first, for the user's turns and the workspace's alike: a pull older than a
@@ -1179,7 +1280,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         if workspace is not None:
             text, pending, profile = workspace.text.strip(), list(workspace.attachments), workspace.profile
         else:
-            text, pending, profile = self.input.toPlainText().strip(), list(self.pending), _params.active_profile()
+            text, pending, profile = self.input.toPlainText().strip(), list(self.pending), self._chat_profile()
         if not text and not pending:
             return
         blocker = self._send_blocker(profile)
@@ -1283,8 +1384,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
                 on_round=self._round_persister(session) if session is not None else None,
                 session_id=str(session.get("id") or "") if session is not None else "",
                 origin="workspace" if workspace is not None else "freecad",
-                **({"profile": profile} if workspace is not None else {}))
-            self._turn_session = session    # the chat this turn writes to, whichever is shown meanwhile
+                profile=profile)
         except Exception as e:
             self._append(Block.ERROR, str(e))
             self._set_busy(False)
@@ -1350,7 +1450,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
 
     def _start_assistant_block(self):
         self._stream_buffer = ""
-        self._current = self._turn_append(Block.ASSISTANT, "")
+        self._current = self._append(Block.ASSISTANT, "")
         self._dirty = True
 
     def _stop(self):
@@ -1361,51 +1461,43 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
             self._set_status("stopping…")
 
     def _on_flow_button(self):
-        """The trailing button mirrors the flow of the chat shown: send / pause / resume. Pause and resume
-        act on the running turn only while its chat is the one shown; in another chat the button sends —
-        and the message waits in that chat."""
-        if self.worker is None or not self._turn_chat_shown():
+        """The trailing button mirrors the flow: send / pause / resume."""
+        if self.worker is None:
             self._send()
             return
         if self._paused:
             self._paused = False
             self.worker.resume()
+            self.send_btn.setText("⏸")
+            self.send_btn.setToolTip("Pause after the current step (Esc cancels)")
             self._set_status("Thinking")
-            self._sync_turn_chrome()
         else:
             self.worker.pause()
             self.send_btn.setText("…")
             self.send_btn.setToolTip("Pausing after the current step")
 
     def _on_flow_paused(self, paused: bool):
-        self._paused = paused
-        self._sync_turn_chrome()
-        self._set_status("⏸ Paused" if paused else "Thinking")
+        if paused:
+            self._paused = True
+            self.send_btn.setText("▶")
+            self.send_btn.setToolTip("Resume")
+            self._set_status("⏸ Paused")
+        else:
+            self._paused = False
+            self.send_btn.setText("⏸")
+            self.send_btn.setToolTip("Pause after the current step (Esc cancels)")
+            self._set_status("Thinking")
 
     def _set_busy(self, busy: bool):
-        self.profile_combo.setEnabled(not busy)
-        if not busy:
-            self._paused = False
-        self._sync_turn_chrome(busy)
-
-    def _sync_turn_chrome(self, busy: bool | None = None) -> None:
-        """The turn controls — stop button, Esc, the send button's pause state — belong to the chat whose
-        turn is running. Another chat shown keeps its idle composer: its button sends (the message queues
-        in it), Esc is the application's again, and pause / stop live in the turn's own chat (``busy``:
-        the caller's word for it; default: a worker is running)."""
-        if busy is None:
-            busy = self.worker is not None
-        shown = self._turn_chat_shown()
-        self.stop_btn.setVisible(busy and shown)
-        self._esc_shortcut.setEnabled(busy and shown)
-        if busy and shown:
-            if self._paused:
-                self.send_btn.setText("▶")
-                self.send_btn.setToolTip("Resume")
-            else:
-                self.send_btn.setText("⏸")
-                self.send_btn.setToolTip("Pause after the current step (Esc cancels)")
+        self.profile_button.setEnabled(not busy)
+        self.model_button.setEnabled(not busy)
+        self.stop_btn.setVisible(bool(busy))
+        self._esc_shortcut.setEnabled(bool(busy))
+        if busy:
+            self.send_btn.setText("⏸")
+            self.send_btn.setToolTip("Pause after the current step (Esc cancels)")
         else:
+            self._paused = False
             self.send_btn.setText("➤")
             self.send_btn.setToolTip("Send (Enter)")
 
@@ -1445,7 +1537,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
             # echo of a steer: the "queued" tag on the user bubble already says it)
             App.Console.PrintLog(f"Oscar: {text}\n")
             return
-        self._turn_append(Block.TOOL, text)   # a notice of the running turn belongs to its own chat; Block.html draws the ℹ
+        self._append(Block.TOOL, text)   # Block.html draws the ℹ
         self._render()
 
     # -- rendering -----------------------------------------------------------
@@ -1509,9 +1601,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
             self._frag_style = style
         parts = [self._fragment(b) for b in self.blocks]
         self._frag_cache = {b.bid: self._frag_cache[b.bid] for b in self.blocks if b.bid in self._frag_cache}
-        if self._status and (self.worker is None or self._turn_chat_shown()):
-            # the status line narrates the RUNNING turn: it draws under the chat on screen only while
-            # that chat is the turn's own (an idle panel still shows its transient flashes)
+        if self._status:
             dots = "." * self._status_dots
             parts.append(
                 f"<div style='color:{_muted()};font-size:small;margin-top:6px;'>"
@@ -1540,7 +1630,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
                 if not event.modifiers() & QtCore.Qt.ShiftModifier:
                     self._send()
                     return True
-            if event.key() == QtCore.Qt.Key_Escape and self._busy() and self._turn_chat_shown():
+            if event.key() == QtCore.Qt.Key_Escape and self._busy():
                 self._stop()
                 return True
         return super().eventFilter(obj, event)
