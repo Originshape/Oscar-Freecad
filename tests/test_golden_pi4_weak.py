@@ -107,10 +107,11 @@ class WeakModelsTest(RealFlowCase):
         for heading in SUMMARY_HEADINGS:
             self.assertIn(heading, text)
         validated, not_validated = section(text, "Validated"), section(text, "NOT validated")
-        for claim in ("Port openings", "Snap-fit retention", "STEP-based collision check", "rebuild.py reproduces",
+        # V-3: the step_collision catalog entry is gone; interference evidence lives under fit.interference
+        # ("Part-to-part interference") and appears only when the built geometry supports the check
+        for claim in ("Port openings", "Snap-fit retention", "rebuild.py reproduces",
                       "Parameter editability", "Printability rules"):
             self.assertNotIn(claim, validated)
-        self.assertIn("STEP-based collision check", not_validated)
         self.assertIn("reference status: none", text)
         self.assertNotIn("Checks passed", validated)
         # the script itself was recorded and is in the project like any other step
@@ -169,7 +170,7 @@ class RecoveringWeakModelTest(unittest.TestCase):
         result = self.golden.result
         self.assertEqual((result.outcome, result.ok), ("validated", True), result.text[-1200:])
         self.assertIn("reference status: step-measured", result.text)
-        self.assertIn("STEP-based collision check", section(result.text, "Validated"))
+        self.assertIn("Part-to-part interference", section(result.text, "Validated"))   # V-3: fit.interference carries the evidence
         self.assertEqual(self.golden.worker.ledger.pending_required(), [])
 
     def test_the_wasted_rounds_are_visible_and_marked_synthetic(self):
