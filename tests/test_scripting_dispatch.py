@@ -353,7 +353,9 @@ class HeadlessHelpersTest(unittest.TestCase):
         self.assertFalse(headless._is_crash(3))
         self.assertTrue(headless._is_crash(0xC0000005))
         self.assertEqual(headless._signal_text(-11), "signal 11 (SIGSEGV)")
-        self.assertEqual(headless._signal_text(-6), "signal 6 (SIGABRT)")
+        # Windows defines no signal 6 (its SIGABRT is 22), so the helper falls back to the bare number there
+        self.assertEqual(headless._signal_text(-6),
+                         "signal 6" if sys.platform == "win32" else "signal 6 (SIGABRT)")
         self.assertEqual(headless._signal_text(-250), "signal 250")
         self.assertEqual(headless._signal_text(0xC0000005), "status 0xC0000005")
 
@@ -481,8 +483,11 @@ class HeadlessRunTest(unittest.TestCase):
         r = headless.run("import os, signal\nprint('partial output')\nos.kill(os.getpid(), signal.SIGSEGV)")
         self.assertFalse(r["success"])
         self.assertTrue(r["crashed"])
-        self.assertEqual(r["returncode"], -signal.SIGSEGV)
-        self.assertEqual(r["output"], "partial output")                 # line-buffered: nothing lost
+        # the raw -11, or the AppImage engine's own handler: it prints 'Program received signal
+        # SIGSEGV' + a backtrace and exits 1 — the fault converted, the crash still surfaced
+        self.assertTrue(r["returncode"] == -signal.SIGSEGV
+                        or (r["returncode"] == 1 and r["crashed"]), r)
+        self.assertIn("partial output", r["output"])                     # line-buffered: nothing lost
         self.assertIn("CRASHED (killed by signal 11 (SIGSEGV))", r["error"])
 
     def test_timeout_kills_the_helper_and_keeps_partial_output(self):

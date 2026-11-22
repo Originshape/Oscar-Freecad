@@ -11,6 +11,7 @@ geometry tool, so no health, snapshot or checkpoint runs for them, but each call
 """
 
 import os
+import sys
 import tempfile
 import time
 import zipfile
@@ -67,6 +68,21 @@ def _real(path: str) -> str:
     return os.path.realpath(os.path.expanduser(path))
 
 
+def _windows_system_roots() -> tuple[str, ...]:
+    """Protected Windows roots from the environment (``SystemRoot``/``windir``, ``ProgramFiles`` [+ ``(x86)``],
+    ``ProgramData``, ``AllUsersProfile``), realpath-resolved and normcased for the case-insensitive compare.
+    Empty anywhere but win32, so POSIX behaviour is unchanged. Read at CALL time, like every other
+    environment decision in this guard — never a hardcoded drive letter."""
+    if sys.platform != "win32":
+        return ()
+    roots = []
+    for name in ("SystemRoot", "windir", "ProgramFiles", "ProgramFiles(x86)", "ProgramData", "AllUsersProfile"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            roots.append(os.path.normcase(_real(value)))
+    return tuple(dict.fromkeys(roots))     # SystemRoot and windir name the same folder
+
+
 def _write_location_problem(path: str, project: "Project | None", *, directory: bool, existing_fcstd_only: bool = False) -> str:
     """Why Oscar may not write to ``path`` ('' when it may). Symlinks are resolved first.
 
@@ -85,6 +101,9 @@ def _write_location_problem(path: str, project: "Project | None", *, directory: 
     home = _real("~")
     if not in_temp:
         if any(_under(real, _real(prefix)) for prefix in _SYSTEM_PREFIXES):
+            return "a system directory"
+        low = os.path.normcase(real)
+        if any(low == root or low.startswith(root + os.sep) for root in _windows_system_roots()):
             return "a system directory"
         if _under(real, home):
             first = os.path.relpath(real, home).split(os.sep)[0]
