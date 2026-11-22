@@ -337,7 +337,7 @@ class StructuredPartPlaybookTest(unittest.TestCase):
 
     def test_it_says_the_things_the_model_needs(self):
         for needle in ("parameters first", "one feature per entry", "schema_version 2", "never by index",
-                       "never fused", "not parametric"):
+                       "never fused", "stays available"):
             self.assertIn(needle, self.TEXT)
         for op in ("fillet", "chamfer", "thickness", "linear_pattern", "polar_pattern", "mirror", "boss"):
             self.assertIn(op, self.TEXT)
