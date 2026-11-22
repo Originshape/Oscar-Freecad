@@ -320,10 +320,6 @@ def _run_process(argv: list[str], timeout: float, env: dict | None = None, code:
                 pass
         raise
     rc = proc.returncode
-    # A launcher shell reports signal termination as 128 + signal instead of preserving
-    # subprocess' usual negative return code. Keep the public result consistent.
-    if os.name != "nt" and 128 < rc < 256:
-        rc -= 128
     stderr, info = _split_error(stderr)
     out: dict[str, Any] = {
         "success": rc == 0,
@@ -346,8 +342,8 @@ def _remove(path: str) -> None:
 
 def _is_crash(returncode: int) -> bool:
     """A native crash: a negative return code (killed by a signal, POSIX) or an NTSTATUS error code (Windows,
-    ``0xC0000005`` = access violation), including POSIX shell status ``128 + signal``."""
-    return returncode < 0 or (os.name != "nt" and 128 < returncode < 256) or returncode >= 0xC0000000
+    ``0xC0000005`` = access violation)."""
+    return returncode < 0 or returncode >= 0xC0000000 or (os.name != "nt" and 128 < returncode < 256)
 
 
 def _signal_text(returncode: int) -> str:
