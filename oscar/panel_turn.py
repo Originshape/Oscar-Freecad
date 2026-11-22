@@ -72,10 +72,26 @@ class TurnMixin:
         self._turn_outcome = ("", "")
         self._turn_request = ""
         self._act_now_armed = True
-        self._carry_images: list[str] = []              # images of a steered message that could not be delivered
+        # ``_carry_images`` is a PER-SESSION property (panel_session): images of an undelivered steer ride
+        # the chat that steered them, never the one shown when the turn ends.
         self._turn_account: dict | None = None           # this turn's account_problem payload, decoded
         self._turn_sent: dict | None = None              # what _send put in (for _give_back_turn and the record)
         self._turn_ref: dict | None = None               # {"chat_id", "turn"} of the turn that ended last (ratings)
+        self._turn_session: dict | None = None           # the chat that started the running turn (its history/plan/folder)
+        self._waiting_sends: list[dict] = []             # sends queued in OTHER chats while a turn runs (see panel)
+        self._persist_target: dict | None = None         # the chat a scheduled persist belongs to (panel_session)
+
+    def _turn_chat(self) -> dict | None:
+        """The chat the running turn belongs to (its history, plan and project folder): the chat that
+        started it, not whichever is shown meanwhile."""
+        session = getattr(self, "_turn_session", None)
+        return session if session is not None else self._current_session()
+
+    def _turn_chat_shown(self) -> bool:
+        """Whether the RUNNING turn's chat is the one on screen: its live controls (pause, stop, Esc,
+        heartbeat) and its status line show only there."""
+        session = getattr(self, "_turn_session", None)
+        return session is None or session is self._current_session()
 
     def _build_flow_widgets(self) -> None:
         """The plan strip, the artifacts strip, the heartbeat row (the host places them in its layout)."""
@@ -149,7 +165,7 @@ class TurnMixin:
         self._persist_timer = QtCore.QTimer(self)
         self._persist_timer.setSingleShot(True)
         self._persist_timer.setInterval(1500)
-        self._persist_timer.timeout.connect(self._persist_current)
+        self._persist_timer.timeout.connect(self._persist_scheduled)
 
     # ------------------------------------------------------------------
     # plan strip / artifacts strip / heartbeat
@@ -157,8 +173,8 @@ class TurnMixin:
 
     def _plan_source(self) -> dict | None:
         view = self._turn_view
-        if self.worker is not None and view is not None and view.plan is not None:
-            return view.plan_view()
+        if self.worker is not None and view is not None and view.plan is not None and self._turn_chat_shown():
+            return view.plan_view()   # the live plan of the running turn — only while its chat is the one shown
         return self._session_ledger()
 
     def _refresh_plan_strip(self) -> None:
@@ -229,8 +245,10 @@ class TurnMixin:
         self._update_heartbeat()
 
     def _update_heartbeat(self) -> None:
-        """Show a short, user-facing description derived from the worker's current progress state."""
-        busy = self.worker is not None
+        """Heartbeat row: shown while a turn runs — in its own chat only (another chat's screen is idle).
+        The text comes from the latest ``progress`` payload and is re-asked every second (the elapsed
+        counters keep moving between payloads)."""
+        busy = self.worker is not None and self._turn_chat_shown()
         self.heartbeat_row.setVisible(busy)
         self.activity_dot.setVisible(busy)
         if not busy:
@@ -297,7 +315,7 @@ class TurnMixin:
         """``path`` made absolute: a stored relative path is resolved against the chat's project folder."""
         if not path or os.path.isabs(path):
             return path
-        project = self._project_of(self._current_session())
+        project = self._project_of(self._turn_chat())
         root = getattr(project, "root", "") if project is not None else ""
         return os.path.join(root, path) if root else path
 
@@ -349,7 +367,7 @@ class TurnMixin:
     def _ensure_card(self) -> Block:
         """This turn's single process card: thoughts AND tool steps."""
         if self._turn_card is None:
-            card = self._append(Block.TOOL, "")
+            card = self._turn_append(Block.TOOL, "")
             card.expanded = True
             card.t0 = time.monotonic()
             card.snapshot = self._turn_snapshot
@@ -385,10 +403,11 @@ class TurnMixin:
         only final answers render as messages)."""
         block = self._current
         self._current = None
-        if block is not None and block in self.blocks:
+        blocks = self._turn_target_blocks()
+        if block is not None and block in blocks:
             # the remark moves INTO the card; left in place it would also
             # render as a chat message above the card (shown twice)
-            self.blocks.remove(block)
+            blocks.remove(block)
         if block is None or not block.text.strip():
             return
         card = self._ensure_card()
@@ -534,14 +553,14 @@ class TurnMixin:
         view = self._ensure_turn_view()
         if not view.on_plan(payload):
             return
-        session = self._current_session()
+        session = self._turn_chat()
         if session is not None:
             session["ledger"] = dict(view.plan)   # the plan the next turn carries over
-        if self._artifacts is None:               # the first plan of a work turn: the project folder exists now
-            self._artifacts = self._artifacts_of(session)
-            self._refresh_artifacts_strip()
+        if self._artifacts is None and self._turn_chat_shown():
+            self._artifacts = self._artifacts_of(session)   # the first plan of a work turn: the folder exists now
+            self._refresh_artifacts_strip()                 # the strip shows the chat on screen
         self._refresh_plan_strip()
-        self._persist_soon()
+        self._persist_soon(session)
 
     def _on_step_started(self, payload) -> None:
         data = self._unique_payload(payload)
@@ -607,8 +626,9 @@ class TurnMixin:
         if card is not None and card.steps and card.steps[-1].plain and card.steps[-1].live:
             card.steps.pop()
         if self._current is not None:
-            if self._current in self.blocks:
-                self.blocks.remove(self._current)
+            blocks = self._turn_target_blocks()
+            if self._current in blocks:
+                blocks.remove(self._current)
             self._current = None
         self._stream_buffer = ""
         self._dirty = True
@@ -618,11 +638,12 @@ class TurnMixin:
         view = self._ensure_turn_view()
         if not view.on_artifacts(payload):
             return
-        self._artifacts = view.artifacts
-        session = self._current_session()
+        session = self._turn_chat()
         root = str((view.artifacts or {}).get("project_dir") or "")
         if session is not None and root:
             session["project_dir"] = root
+        if self._turn_chat_shown():
+            self._artifacts = view.artifacts   # the strip shows the chat on screen
         self._refresh_artifacts_strip()
 
     def _on_turn_outcome(self, outcome: str, summary: str) -> None:
@@ -641,30 +662,46 @@ class TurnMixin:
 
     def _give_back_turn(self, sent: dict | None) -> bool:
         """The turn's very first request failed for an account reason: nothing was generated, so the message leaves
-        the chat and goes back into the input (with its attachments, images and the notes it carried) and the plan is
-        what it was before. ``sent`` is what ``_send`` recorded. Not when the turn already carried a steered message
-        (those bubbles stay), and not for a workspace turn: its message came from the browser, which shows the
-        problem, and FreeCAD's input box was never involved. True when done."""
+        the chat and goes back (with its attachments, images and the notes it carried) and the plan is what it was
+        before — into the input when its chat is shown, otherwise into that chat's OWN draft, never into the chat on
+        screen. ``sent`` is what ``_send`` recorded. Not when the turn already carried a steered message (those
+        bubbles stay), and not for a workspace turn: its message came from the browser, which shows the problem, and
+        FreeCAD's input box was never involved. True when done."""
         message = sent.get("message") if sent else None
         if sent and sent.get("workspace"):
             return False
-        if message is None or not self.history or self.history[-1] is not message or self._queued_blocks:
+        session = self._turn_chat()
+        history = session["history"] if session is not None else self.history
+        if message is None or not history or history[-1] is not message or self._queued_blocks:
             return False
-        self.history.pop()
+        shown = session is None or session is self._current_session()
+        blocks = self._turn_target_blocks()
+        history.pop()
         bubble = sent.get("bubble")
-        if bubble in self.blocks:
-            self.blocks.remove(bubble)
-        typed = self.input.toPlainText().strip()
+        if bubble in blocks:
+            blocks.remove(bubble)
         request = str(sent.get("typed") or "")
-        if request:
-            self.input.setPlainText(f"{request}\n\n{typed}" if typed else request)
-        self.pending = list(dict.fromkeys(list(sent.get("pending") or []) + list(self.pending)))
-        self._refresh_attach_bar()
-        self._carry_images = list(sent.get("carried") or []) + list(self._carry_images)
-        notes = list(sent.get("notes") or [])
-        if notes:
-            self._pending_notes = notes + [n for n in self._pending_notes if n not in notes]
-        session = self._current_session()
+        if shown:
+            typed = self.input.toPlainText().strip()
+            if request:
+                self.input.setPlainText(f"{request}\n\n{typed}" if typed else request)
+            self.pending = list(dict.fromkeys(list(sent.get("pending") or []) + list(self.pending)))
+            self._refresh_attach_bar()
+            self._carry_images = list(sent.get("carried") or []) + list(self._carry_images)
+            notes = list(sent.get("notes") or [])
+            if notes:
+                self._pending_notes = notes + [n for n in self._pending_notes if n not in notes]
+        elif session is not None:
+            # another chat is on screen: the message, its attachments and its images go back to THEIR
+            # chat's draft and per-chat state — the input box belongs to the chat shown
+            draft = str(session.get("_draft") or "").strip()
+            if request:
+                session["_draft"] = f"{request}\n\n{draft}" if draft else request
+            session["pending"] = list(dict.fromkeys(list(sent.get("pending") or []) + list(session.get("pending") or [])))
+            session["carry_images"] = list(sent.get("carried") or []) + list(session.get("carry_images") or [])
+            notes = list(sent.get("notes") or [])
+            if notes:
+                session["pending_notes"] = notes + [n for n in session.get("pending_notes", []) if n not in notes]
         if session is not None:
             if sent.get("had_ledger"):
                 session["ledger"] = sent.get("ledger")
@@ -692,7 +729,7 @@ class TurnMixin:
         """The plan the next turn carries: the worker's live ledger after a WORK turn; after a question /
         inspect / other turn the previous plan stays as it was (the worker's ledger is a throwaway then)."""
         ledger = getattr(worker, "ledger", None)
-        session = self._current_session()
+        session = self._turn_chat()
         if ledger is None or session is None:
             return
         try:
@@ -764,9 +801,11 @@ class TurnMixin:
             if card_kind:   # the account card says what to do; the raw "Provider error: HTTP 402 ..." line does not
                 self._show_account_card(card_kind, returned=given_back)
             else:
-                self._append(Block.ERROR, answer)
+                self._turn_append(Block.ERROR, answer)
                 if given_back:
-                    self._on_notice("Your message is back in the input: send it again when you are ready.")
+                    self._on_notice("Your message is back in the input: send it again when you are ready."
+                                    if self._turn_chat_shown() else
+                                    "Your message is back in its chat's input: open that chat to send it again.")
         elif ok and answer:
             clarification = parse_clarification(answer) if outcome == "needs_input" else None
             if clarification is not None:
@@ -789,16 +828,16 @@ class TurnMixin:
                 self._current.text = answer
             elif self._current is None:
                 # turn ended without any streamed text (e.g. tool-only turn)
-                self._append(Block.ASSISTANT, answer)
+                self._turn_append(Block.ASSISTANT, answer)
         self._current = None
         actions = [("continue:", "Continue")] if outcome == "capped" else []
         if summary or actions:
-            self._append(Block.SUMMARY, summary).actions = actions
+            self._turn_append(Block.SUMMARY, summary).actions = actions
         if given_back:
-            self._persist_current()   # the chat without the message; no turn record: nothing happened
+            self._persist_current(self._turn_session)   # the chat without the message; no turn record: nothing happened
         else:
             self._remember_turn(outcome, card)
-        self._update_revert_flags()
+        self._update_revert_flags(self._turn_target_blocks())
         self._set_status("")
         self._set_busy(False)
         queued = list(self._queued_blocks)
@@ -806,14 +845,17 @@ class TurnMixin:
         self._finish_turn_widgets()
         # the turn a rating of it names (rating_gui), and its record on the OriginShape account (records)
         self._turn_ref = None if given_back or not sent else {"chat_id": sent.get("chat_id"), "turn": sent.get("turn")}
+        turn_blocks = self._turn_target_blocks()
         if not given_back:
-            steered = [b.steer_text or b.text for b in queued if b in self.blocks]   # delivered while the turn ran
+            steered = [b.steer_text or b.text for b in queued if b in turn_blocks]   # delivered while the turn ran
             self._record_turn(sent, ok, text, outcome, card, steered)
-        if ok and answer and not given_back:
-            self._maybe_offer_rating(answer, outcome, card)
+        if ok and answer and not given_back and self._turn_chat_shown():
+            self._maybe_offer_rating(answer, outcome, card)   # the card goes to the chat shown
         self._render()
         if problem or (sent and sent.get("account")):
             self._refresh_account(force=True)   # credits were spent, or the account is why the turn failed
+        self._turn_session = None   # the turn is fully closed: whatever comes next belongs to the chat shown
+        QtCore.QTimer.singleShot(0, self._deliver_waiting_sends)   # after any queued re-send of this turn's steers
 
     def _record_turn(self, sent: dict | None, ok: bool, text: str, outcome: str, card: Block | None,
                      steered: list[str]) -> None:
@@ -830,7 +872,7 @@ class TurnMixin:
             if not records.applies(account_profile=bool(sent.get("account")), workspace=bool(sent.get("workspace")),
                                    state=state):
                 return
-            session = self._current_session()
+            session = self._turn_chat()
             project = self._project_of(session)
             root = str(getattr(project, "root", "") or "")
             root = root if root and os.path.isdir(root) else ""
@@ -870,7 +912,7 @@ class TurnMixin:
 
     def _remember_turn(self, outcome: str, card: Block | None) -> None:
         """Append the finished turn's compact record to the chat's ``blocks_meta`` and persist the chat."""
-        session = self._current_session()
+        session = self._turn_chat()
         view = self._turn_view
         if session is None:
             return
@@ -888,15 +930,16 @@ class TurnMixin:
         if note and session.get("_storage_note") != note:
             session["_storage_note"] = note
             self._on_notice(note)
-        self._persist_current()
+        self._persist_current(session)
 
     def _finish_turn_widgets(self) -> None:
         """Strips and heartbeat after a turn: the plan stays pinned with its final state, the artifacts are
         re-read from the project folder (exports, NOTES.md and rebuild.py were written at the end)."""
         self._act_now_armed = True
-        fresh = self._artifacts_of(self._current_session())
-        if fresh is not None:
-            self._artifacts = fresh
+        session = self._turn_chat()
+        fresh = self._artifacts_of(session)
+        if fresh is not None and self._turn_chat_shown():
+            self._artifacts = fresh   # the strip shows the chat on screen
         self._refresh_artifacts_strip()
         self._refresh_plan_strip()
         self._update_heartbeat()
@@ -919,14 +962,15 @@ class TurnMixin:
         items = [i for i in unsent if isinstance(i, dict) and str(i.get("text", "")).strip()]
         images = [img for i in items for img in (i.get("images") or []) if img]
         waiting = list(self._queued_blocks)
+        blocks = self._turn_target_blocks()
         texts: list[str] = []
         for item in items:
             key = str(item.get("text", "")).strip()
             block = next((b for b in waiting if (b.steer_key or b.text.strip()) == key), None)
             if block is not None:
                 waiting.remove(block)
-                if block in self.blocks:
-                    self.blocks.remove(block)  # the re-send (or the input box) shows it again
+                if block in blocks:
+                    blocks.remove(block)  # the re-send (or the input box) shows it again
             texts.append((block.steer_text.strip() if block is not None else "") or key)
         for block in self._queued_blocks:
             block.queued = False
@@ -934,16 +978,27 @@ class TurnMixin:
         if not texts:
             return
         joined = "\n\n".join(texts)
+        session = self._turn_chat()
+        shown = session is None or session is self._current_session()
         if ok:
-            if images:
+            if not shown:
+                # the steered text belongs to the turn's chat, not the one on screen: it waits for its own
+                self._waiting_sends.append({"session": session, "text": joined, "images": list(images)})
+            elif images:
                 QtCore.QTimer.singleShot(0, lambda: self._send_text(joined, images=images))
             else:
                 QtCore.QTimer.singleShot(0, lambda: self._send_text(joined))
-        else:
+        elif shown:
             self._carry_images = list(images)
             if not self.input.toPlainText().strip():
                 self.input.setPlainText(joined)
             self._on_notice("Your queued message was not delivered; it is back in the input.")
+        else:
+            if images:
+                session["carry_images"] = list(images)   # home to the chat that steered them, not the one shown
+            draft = str(session.get("_draft") or "").strip()
+            session["_draft"] = f"{joined}\n\n{draft}" if draft else joined   # the text waits in its chat's composer
+            self._on_notice("Your queued message was not delivered; it is back in its chat's input.")
 
     def _send_text(self, text: str, images=()) -> None:
         """Send ``text`` as a new turn without losing what the user is typing meanwhile."""
@@ -954,7 +1009,9 @@ class TurnMixin:
         if images:
             self._carry_images = list(images)
         self._send()
-        if typed.strip() and not self.input.toPlainText().strip():
+        if self.worker is None or not self.input.toPlainText().strip():
+            # the send never started (blocked: the queued text was never the user's typing) or it did and
+            # cleared the box — either way what the user typed comes back
             self.input.setPlainText(typed)
 
     def _continue_turn(self) -> None:
