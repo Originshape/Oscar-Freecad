@@ -292,7 +292,10 @@ class HeartbeatMarkupTest(FlowTestCase):
         p._on_progress(j(progress(activity="running_tool", tool="<img src='x'>", started_at=1.0)))
         p._update_heartbeat()
         self.assertEqual(p.heartbeat_label.textFormat(), QtCore.Qt.PlainText)
-        self.assertIn("<img src='x'>", p.heartbeat_label.text())
+        # redesign: the heartbeat shows fixed phase phrases only — the model-chosen tool name is data
+        # (view.progress), never label text, so it can never render as markup
+        self.assertEqual(p.heartbeat_label.text(), "Oscar is building the model…")   # the BUILD-phase phrase
+        self.assertEqual(p._turn_view.progress.get("tool"), "<img src='x'>")
 
 
 class SteerWithImageResendTest(FlowTestCase):
@@ -1248,6 +1251,9 @@ class ThumbnailChurnTest(FlowTestCase):
                 return True
         return False
 
+    @unittest.skip("redesign 2026-11-16: process snapshots are decoded by the Logs page timeline, not the chat — "
+                   "_register_thumbnails deliberately holds only RESTORE/PREVIEW images (decoding every geometry "
+                   "step stalled the GUI). Re-point at the timeline when it grows a decode budget.")
     def test_more_visible_thumbnails_than_the_cache_limit_still_converge(self):
         p = self.p
         self.begin_turn()
@@ -1272,6 +1278,8 @@ class ThumbnailChurnTest(FlowTestCase):
         self.assertTrue(self.settle())                                          # 120 snapshots, none on screen: nothing to retry
         self.assertLessEqual(len(p._thumbs.keys()), p._thumbs.limit)
 
+    @unittest.skip("redesign 2026-11-16: expanded cards no longer decode step snapshots in the chat (the Logs page "
+                   "timeline owns them) — see the skip on test_more_visible_thumbnails_than_the_cache_limit.")
     def test_expanding_a_card_loads_its_thumbnails_and_converges(self):
         p = self.p
         for turn in range(3):
