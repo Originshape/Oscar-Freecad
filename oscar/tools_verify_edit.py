@@ -18,7 +18,20 @@ from typing import Any, Callable
 DELTA = 0.10
 MAX_PARAMS = 8
 BUDGET_S = 20.0
+MAX_BUDGET_S = 240.0     # hard cap; tools_verify._EDIT_TIMEOUT_S (300 s) wraps the probe so it is never killed mid-edit
 _ANGLE_UNITS = ("deg", "°", "degree", "degrees")
+
+
+def adaptive_budget(side_cost_s: float, count: int) -> float:
+    """The time cap for ``count`` parameters, from the MEASURED cost of one perturb+recompute+health side.
+
+    The old flat ``BUDGET_S`` assumed a fast machine: on a loaded runner it expired after 4 of 8 parameters, so
+    the tail reported ``not checked`` (CI ``test_42``). The measured pace scales the cap to the work actually left
+    (two sides per parameter, plus one side of margin so the last minus is not cut off), floored at ``BUDGET_S``
+    for fast machines and capped at ``MAX_BUDGET_S`` so a pathological model cannot run away."""
+    if side_cost_s <= BUDGET_S / (2 * max(count, 1) + 1):
+        return BUDGET_S
+    return min(MAX_BUDGET_S, side_cost_s * (2 * count + 1))
 
 
 def _cell_value(sheet: Any, name: str) -> float | None:
@@ -95,9 +108,13 @@ def _content(value: float, unit: str) -> str:
 
 
 def editability_test(doc: Any, table: dict, *, delta: float = DELTA, max_params: int = MAX_PARAMS,
-                     budget_s: float = BUDGET_S, clock: Callable[[], float] = time.monotonic,
+                     budget_s: float | None = None, clock: Callable[[], float] = time.monotonic,
                      should_stop: Callable[[], bool] | None = None) -> dict:
     """Perturb the driver parameters of ``doc`` by +-``delta`` and prove the model survives. GUI-thread only.
+
+    ``budget_s`` None (the product default) means the ADAPTIVE cap: ``BUDGET_S`` floor, scaled by the measured pace
+    of the first edit up to ``MAX_BUDGET_S`` (a loaded runner keeps the whole parameter tail). An explicit value is
+    used verbatim — ``0`` checks nothing.
 
     ``table`` is ``cad.health.read_param_table(doc)``. For every chosen parameter and sign the cell is rewritten,
     the document recomputed and ``model_health(strict=True)`` consulted: the edit is ``FAIL`` when it produces an
@@ -112,6 +129,8 @@ def editability_test(doc: Any, table: dict, *, delta: float = DELTA, max_params:
     there is nothing to edit."""
     from .cad import health_eval
 
+    adaptive = budget_s is None
+    budget_s = BUDGET_S if adaptive else budget_s
     started = clock()
     sheet = doc.getObject(str((table or {}).get("sheet") or "")) if (table or {}).get("sheet") else None
     if sheet is None:
@@ -146,7 +165,12 @@ def editability_test(doc: Any, table: dict, *, delta: float = DELTA, max_params:
         sig = _signature(health_eval.snapshot_state(doc, prev_findings=[]))
         return {"value": round(value, 4), "ok": not problems, "problems": problems}, sig
 
+    budget_started = clock() if adaptive else started   # explicit budgets keep the exact historical clock calls
     try:
+        # The adaptive cap applies only when the caller left the default: an explicit budget_s is the caller's
+        # decision (0 = check nothing, or a fixed cap in a test) and is never overridden.
+        effective = budget_s
+        side_total = 0.0
         for index, r in enumerate(chosen):
             name = str(r["name"])
             cell, original = originals[name]
@@ -160,17 +184,24 @@ def editability_test(doc: Any, table: dict, *, delta: float = DELTA, max_params:
             moved = False
             out_of_time = False
             for sign, key in ((+1, "plus"), (-1, "minus")):
-                if clock() - started >= budget_s or stopped():
+                if clock() - budget_started >= effective or stopped():   # '>=': a zero budget checks nothing, deterministically
                     out_of_time = True
                     break
                 value = _perturbed(base_value, sign, delta, unit)
                 if value is None:
                     continue
+                side_started = clock() if adaptive else 0.0
                 try:
                     side, sig = run_edit(name, cell, value, unit)
                 except Exception as e:  # noqa: BLE001 - a crashing recompute is the finding
                     side, sig = {"value": round(value, 4), "ok": False,
                                  "problems": [f"{type(e).__name__}: {str(e)[:80]}"]}, base_sig
+                if adaptive:
+                    # the running average side cost is this machine's pace — re-scale so the tail still fits
+                    side_total += clock() - side_started
+                    effective = adaptive_budget(side_total / result["checked"] if result["checked"] else
+                                                side_total, len(chosen))
+                    result["budget_s"] = effective
                 entry[key] = side
                 result["checked"] += 1
                 if sig != base_sig:

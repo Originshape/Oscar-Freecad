@@ -1,8 +1,11 @@
 """Write-location guard of ``save_document(path)`` / ``export_model(directory)`` (oscar/tools_project.py)."""
 
 import os
+import subprocess
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))   # oscar
 sys.path.insert(0, os.path.dirname(__file__))                        # tests/support
@@ -31,10 +34,63 @@ class WriteLocationTest(unittest.TestCase):
         self.assertEqual(self.problem(os.path.expanduser("~/Documents/a.FCStd")), "")
         self.assertEqual(self.problem(S.sandbox_dir(), directory=True), "")
 
+    @unittest.skipIf(sys.platform == "win32", "the /etc symlink scenario is POSIX-specific (no /etc on Windows)")
     def test_a_symlink_into_a_system_folder_is_refused(self):
         link = os.path.join(S.sandbox_dir(), "sneaky")
         os.symlink("/etc", link)
         self.assertIn("system", self.problem(os.path.join(link, "x.FCStd")))
+
+    # -- Windows protected roots (the guard reads the environment at CALL time; fake roots, never the real ones) ----
+
+    @staticmethod
+    def _fake_roots(*names):
+        return {name: tempfile.mkdtemp(prefix=f"oscar_{name}_", dir=S.sandbox_dir()) for name in names}
+
+    def test_windows_protected_roots_are_refused(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows environment roots only")
+        roots = self._fake_roots("SystemRoot", "ProgramFiles", "ProgramData")
+        # the sandbox counts as a temp folder, and temp bypasses the system check by design: make the
+        # guard see a DIFFERENT temp dir so the fake roots are judged as ordinary locations
+        elsewhere = mock.patch.object(tools_project.tempfile, "gettempdir",
+                                      return_value=os.path.join(S.sandbox_dir(), "not-a-root"))
+        with mock.patch.dict(os.environ, roots), elsewhere:
+            for root in roots.values():
+                self.assertIn("system directory", self.problem(os.path.join(root, "x.FCStd")))
+                self.assertIn("system directory", self.problem(root, directory=True))
+                # case- and separator-insensitive spellings of the same root
+                self.assertIn("system directory", self.problem(root.lower().replace("\\", "/") + "/x.FCStd"))
+                self.assertIn("system directory", self.problem(root + os.sep, directory=True))
+
+    def test_windows_lookalike_siblings_are_not_refused(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows environment roots only")
+        base = tempfile.mkdtemp(prefix="oscar_SystemRoot_", dir=S.sandbox_dir())
+        elsewhere = mock.patch.object(tools_project.tempfile, "gettempdir",
+                                      return_value=os.path.join(S.sandbox_dir(), "not-a-root"))
+        with mock.patch.dict(os.environ, {"SystemRoot": base}), elsewhere:
+            self.assertIn("system directory", self.problem(os.path.join(base, "x.FCStd")))
+            self.assertEqual(self.problem(base + "_backup", directory=True), "")
+            self.assertEqual(self.problem(os.path.join(base + "_backup", "x.FCStd")), "")
+
+    def test_a_junction_into_a_windows_protected_root_is_refused(self):
+        if sys.platform != "win32":
+            self.skipTest("junctions are a Windows feature")
+        root = self._fake_roots("ProgramData")["ProgramData"]
+        link = os.path.join(S.sandbox_dir(), "jroot")
+        subprocess.run(["cmd", "/c", "mklink", "/J", link, root], check=True, capture_output=True)
+        elsewhere = mock.patch.object(tools_project.tempfile, "gettempdir",
+                                      return_value=os.path.join(S.sandbox_dir(), "not-a-root"))
+        with mock.patch.dict(os.environ, {"ProgramData": root}), elsewhere:
+            self.assertIn("system directory", self.problem(os.path.join(link, "x.FCStd")))
+
+    def test_the_real_machine_windows_roots_are_refused(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows environment roots only")
+        for name in ("SystemRoot", "ProgramFiles", "ProgramData"):
+            root = os.environ.get(name, "")
+            if root:   # decision-only: nothing is ever written there
+                self.assertIn("system directory", self.problem(os.path.join(root, "oscar_probe.FCStd")), name)
 
     def test_an_existing_non_fcstd_file_is_never_replaced(self):
         target = os.path.join(S.sandbox_dir(), "notes.FCStd")
