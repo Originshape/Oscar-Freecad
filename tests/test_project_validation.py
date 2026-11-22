@@ -568,7 +568,7 @@ class ArtifactListTest(unittest.TestCase):
             self.assertEqual(sorted(entry), ["kind", "name", "path"])
             self.assertTrue(os.path.isabs(entry["path"]))
             self.assertTrue(os.path.isfile(entry["path"]), entry)
-            self.assertEqual(entry["path"], self.proj.path(*entry["name"].split("/")))
+            self.assertEqual(os.path.normpath(entry["path"]), os.path.normpath(self.proj.path(*entry["name"].split("/"))))
         self.assertTrue({e["kind"] for e in entries} <= {"fcstd", "notes", "rebuild", "provenance", "export", "snapshot"})
 
     def test_what_is_listed_and_what_is_not(self):
