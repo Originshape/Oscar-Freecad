@@ -867,7 +867,7 @@ class SetParameterTest(Base):
 
     def test_garbage_value_is_a_params_error_and_nothing_changes(self):
         self.build_to("params")
-        self.fails("set_parameter", "cannot read", name="wall_t", value="two")   # refused before any write
+        self.fails("set_parameter", "cannot read", "stays 2 mm", name="wall_t", value="two")
         self.assertAlmostEqual(params.Params(self.doc).get("wall_t"), 2.0)
 
     def test_count_parameter_rebuilds_the_vents_and_reports_it(self):

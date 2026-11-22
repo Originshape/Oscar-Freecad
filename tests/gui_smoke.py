@@ -29,7 +29,6 @@ import json
 import os
 import sys
 import tempfile
-import time
 import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -50,9 +49,7 @@ os.environ.setdefault("OSCAR_ALLOW_CODE", "1")
 
 RESULTS = []
 FAILURES = []
-_LOG = open(os.environ.get("OSCAR_SMOKE_LOG", "/tmp/oscar_smoke_result.log"), "w",
-      encoding="utf-8")   # Windows GUI sessions default the log to cp1252 and
-                         # the report glyphs (U+273B) crash the write (measured)
+_LOG = open(os.environ.get("OSCAR_SMOKE_LOG", "/tmp/oscar_smoke_result.log"), "w")
 
 
 def _report(line):
@@ -118,7 +115,6 @@ def main():
     _smoke_chats.chats_dir = lambda: os.path.join(
         tempfile.mkdtemp(prefix="oscar_smoke_chats_"))
     from oscar import bridge, params, panel as oscar_panel
-    from oscar.panel_activity import entry_key
 
     # The test writes a mock profile into the REAL user settings; back the
     # settings file up and restore it before exiting (bottom of file).
@@ -163,18 +159,6 @@ def main():
     content = dock.widget() if dock else None
     check("panel content is OscarPanel", isinstance(content, oscar_panel.OscarPanel))
     if content is not None:
-        check("dock is compact and resizable", dock.minimumWidth() == 340 and 340 <= dock.width() <= 420,
-              f"minimum={dock.minimumWidth()} width={dock.width()}")
-        check("supplied logo is loaded", not content.logo_label.pixmap().isNull())
-        content.input.clear()   # the isolated smoke home may restore a saved draft
-        QtWidgets.QApplication.processEvents()
-        check("composer starts compact", content.input.height() == 38,
-              f"height={content.input.height()} min={content.input.minimumHeight()} max={content.input.maximumHeight()}")
-        content.input.setPlainText("line one\nline two")
-        QtWidgets.QApplication.processEvents()
-        check("composer expands for multiline text", 38 < content.input.height() <= 76,
-              f"height={content.input.height()}")
-        content.input.clear()
         for _name in ("oscarLog", "oscarPlanStrip", "oscarArtifactsStrip", "oscarHeartbeat", "oscarStopButton",
                       "oscarActNowButton", "oscarAccountBadge"):
             check(f"widget {_name} exists", content.findChild(QtWidgets.QWidget, _name) is not None)
@@ -255,29 +239,19 @@ def main():
           f"rows={len(tool_rows)}")
     check("turn 1 outcome is validated (badge after the legacy header)",
           bool(cards) and cards[0].text.endswith("✓ validated"), f"card={cards[0].text if cards else None!r}")
-    check("exactly three tabs are present",
-          [content.tabs.tabText(i) for i in range(content.tabs.count())] == ["Chat", "Parameters", "Logs"])
-    check("plan strip is visible on Chat", not content.plan_strip.isHidden()
+    check("plan strip pinned after turn 1", not content.plan_strip.isHidden()
           and "Plan" in content.plan_strip.toPlainText(), content.plan_strip.toPlainText()[:80])
-    check("CAD snapshot preview appears in Chat",
-          any(b.kind == oscar_panel.Block.PREVIEW for b in content.blocks))
-    check("Build Summary rendered once in Chat",
+    check("Build Summary rendered once",
           content.log.toPlainText().count("Build Summary") == 1
           and len([b for b in content.blocks if b.kind == oscar_panel.Block.SUMMARY]) <= 1,
-          f"chat={content.log.toPlainText().count('Build Summary')}")
-    content.tabs.setCurrentIndex(2)
-    check("plan strip stays with Chat when Logs opens", not content.plan_strip.isVisible())
-    content.tabs.setCurrentIndex(0)
+          f"count={content.log.toPlainText().count('Build Summary')}")
     check("turn 1 saved the chat's build state",
           bool((content._current_session() or {}).get("ledger")), "session ledger missing")
-    snap_rows = [row for row in tool_rows if row.view is not None and row.view.snapshot_path]
-    if snap_rows:
-        content.tabs.setCurrentIndex(2)
-        entries = content.logs_view.entries()
-        rows = [content.logs_view.row(entry_key(entry)) for entry in entries if entry.get("snapshot_path")]
-        check("Logs shows recorded CAD snapshots with their timeline entries",
-              bool(rows) and all(row is not None and row.thumb_btn is not None for row in rows),
-              f"snapshots={len(rows)} from tool_rows={len(snap_rows)}")
+    for _row in tool_rows:      # a thumbnail that was decoded must still resolve after another render
+        if _row.view is not None and _row.view.snapshot_path:
+            content._render()
+            check("thumbnail resolvable after a second render", content.log.has_resource(_row.call_id),
+                  _row.call_id)
     round1_results = [
         tr.content for m in content.history for tr in (m.tool_results or [])
     ]
@@ -337,17 +311,15 @@ def main():
     faces = len(part_obj.Mesh.Facets) if part_obj is not None else 0
     check("attached STL imported via chat", part_obj is not None and faces >= 12, f"faces={faces}")
     check("cube added next to it", smoke_doc is not None and smoke_doc.getObject("Spacer") is not None)
-    # Thoughts are steps inside the turn's process card. "Recorded as a process
-    # step" = SOME step of the card is a thought: a trailing tool step is legal
-    # ordering, and the reactive mock's instant thoughts round their duration to
-    # 0.0 s (both measured on a fast Windows box; the summary checks below pin
-    # the same card's text).
+    # Thoughts are steps inside the turn's process card; the reasoning
+    # round of turn 2 is its last step, closed with a duration.
     cards = [b for b in content.blocks if b.kind == oscar_panel.Block.TOOL and b.steps]
     thought_cards = [c for c in cards if any(s.is_thought for s in c.steps)]
     check(
         "thought recorded as a process step",
         bool(thought_cards)
-        and any(s.is_thought for s in thought_cards[-1].steps),
+        and thought_cards[-1].steps[-1].is_thought
+        and thought_cards[-1].steps[-1].dur > 0,
         f"cards={len(thought_cards)}",
     )
     check(

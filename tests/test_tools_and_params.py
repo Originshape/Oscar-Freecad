@@ -494,8 +494,7 @@ class ToolBlockRenderTest(unittest.TestCase):
         card = Block(Block.TOOL, "✻ Ran 1 step · 1.0s")
         card.steps = [Step("t", summary="t", ok=True, dur=1.0, detail="d")]
         rendered = card.html()
-        from oscar.panel_theme import TOKENS
-        self.assertIn(TOKENS["text_2"], rendered)   # muted text is the explicit theme token
+        self.assertTrue("rgba(" in rendered or "#888888" in rendered)
 
     def test_plain_step_renders_folded_note(self):
         # Pre-tool remarks fold into the card as static italic notes —

@@ -598,54 +598,6 @@ class Project(SummaryMixin, RewindMixin):
                               checkpoint_note="", script="", replay={"kind": "none", "why": "project error"},
                               geometry=bool(geometry))
 
-    @_lifecycle("record_panel_action")
-    def record_panel_action(self, *, tool: str, title: str, args: dict, text: str, ok: bool, doc: str,
-                            geometry: bool = False, turn_id: str = "panel") -> StepRecord | None:
-        """Record a direct panel mutation in this chat's journal using the normal project hooks.
-
-        Unlike ``on_tool_result`` this has no agent ``ToolContext`` or tool round, but successful geometry
-        actions still receive the usual autosave, checkpoint, snapshot and parameter-sheet synchronization.
-        """
-        if not tool:
-            raise ProjectError("record_panel_action needs a tool name")
-        self.ensure_dir()
-        title = _clip_title(title) or tool
-        args = args if isinstance(args, dict) else {}
-        text = text if isinstance(text, str) else str(text or "")
-        with self._lock:
-            index = self._reserve_index()
-        rec = StepRecord(index=index, ts=self._now(), turn_id=str(turn_id or "panel"), round=0,
-                         call_id=f"panel-{uuid.uuid4().hex[:12]}", tool=tool, title=title,
-                         args=_json_safe(args), ok=bool(ok), result_head=text[:_RESULT_HEAD],
-                         result_chars=len(text), dur_s=0.0, doc=str(doc or ""),
-                         delta={"added": [], "removed": [], "changed": []}, health=None,
-                         snapshot="", snapshot_note="", checkpoint="", checkpoint_note="",
-                         script="", replay={"kind": "none", "why": "direct panel action"},
-                         geometry=bool(geometry))
-        if rec.geometry:
-            budget = _Budget(self.HOOK_BUDGET_S)
-            token = _BUDGET.set(budget)
-            try:
-                self._gui_hooks(rec, text=text, delta=rec.delta, ok=rec.ok, geometry=True,
-                                should_stop=lambda: False, budget=budget)
-            finally:
-                _BUDGET.reset(token)
-        elif rec.ok:
-            rec.snapshot_note = "not a geometry tool"
-        with self._lock:
-            if rec.doc:
-                self._note_doc(rec.doc)
-            if rec.geometry and rec.ok:
-                if rec.doc and not self.manifest.get("active_doc"):
-                    self.manifest["active_doc"] = rec.doc
-                self.manifest["last_geometry_step"] = index
-            self._append_raw(rec.to_line())
-            self._max_index = max(self._max_index, index)
-            self._jcache = None
-            self._save_manifest()
-            self._regenerate_docs(rebuild=True)
-        return rec
-
     def _record(self, *, turn_id: str, round_: int, call_id: str, tool: str, title: str, args: dict, text: str,
                 ok: bool, dur_s: float, doc: str, delta: dict, health: dict | None, geometry: bool) -> StepRecord:
         self.ensure_dir()
