@@ -473,11 +473,11 @@ class StepRowTest(FlowTestCase):
 
 class ThumbnailTest(FlowTestCase):
     def open_log(self):
-        """Switch to the process tab and open its Log sub-view — where step snapshots render now."""
+        """Switch to the Logs page — the timeline view that resolves and renders step snapshots now."""
         p = self.p
-        # UI redesign 2026-11-16: step thumbnails left the Chat; the Log view decodes and serves them
+        # UI redesign 2026-11-16: step thumbnails left the Chat; the Logs page timeline rebuilds from the
+        # project journal (refresh_from) when the tab opens, resolving snapshot paths against the root
         p.tabs.setCurrentIndex(2)
-        p.summary_view.log_btn.click()
 
 
 
@@ -525,8 +525,14 @@ class ThumbnailTest(FlowTestCase):
         self.assertEqual(p._abs_snapshot("/abs/x.png"), "/abs/x.png")
         self.begin_turn()
         self.rich_step(snapshot_path="snapshots/001_a.png")
-        self.open_log()                                     # the Log view resolves against the project root
-        self.assertTrue(p._thumbs.has(self.card().steps[0].call_id))
+        self.open_log()                                     # the Logs page follows the journal (a mock project here)
+        # the timeline resolves the record's relative snapshot against the project root — the path the
+        # Logs page feeds refresh_from -> build_timeline(snapshot_dir=project.root)
+        from oscar.panel_activity import build_timeline
+        entries = build_timeline([{"call_id": self.card().steps[0].call_id, "tool": "execute_code", "ok": True,
+                                   "snapshot": "snapshots/001_a.png"}], snapshot_dir=root)
+        self.assertEqual(os.path.normpath(entries[0]["snapshot_path"]),
+                         os.path.normpath(os.path.join(root, "snapshots", "001_a.png")))
 
     def test_cache_is_bounded_and_remembers_failures(self):
         from oscar.panel_blocks import ThumbCache

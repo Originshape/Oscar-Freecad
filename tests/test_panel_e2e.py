@@ -133,10 +133,13 @@ class EndToEndTest(FlowTestCase):
         self.assertFalse(p.plan_strip.isHidden())
         self.assertIn("generic_part", p.plan_strip.toPlainText())
         self.assertTrue(p._current_session()["ledger"]["steps"])
-        # thumbnail of the geometry step, still resolvable after another render
-        self.assertTrue(p.log.has_resource(rows[1].call_id))
+        # the geometry step keeps its snapshot (the Logs page timeline later reads it from the journal;
+        # this harness mocks the tool layer above the journaling seam, so the card view is the surface here)
+        snap = rows[1].view.snapshot_path
+        self.assertTrue(snap)
         p._render()
-        self.assertTrue(p.log.has_resource(rows[1].call_id))
+        rows_now = [s for s in self.card().steps if not s.plain and not s.is_thought]
+        self.assertEqual(rows_now[1].view.snapshot_path, snap)
         # artifacts strip; the project folder was written by the worker thread
         self.assertFalse(p.artifacts_strip.isHidden())
         self.assertIn("Oscar project", p.artifacts_strip.text())
@@ -167,10 +170,10 @@ class EndToEndTest(FlowTestCase):
         self.assertTrue(self.wait_until(lambda: p._turn_view is not None and p._turn_view.progress is not None))
         card = self.card()
         self.assertTrue(card.live)
-        self.assertIn("Working…", p.log.toPlainText())
+        self.assertTrue(p._status.startswith("Running"), p._status)   # the status line narrates the running tool
         self.assertNotIn("✻ Done", p.log.toPlainText())
         self.assertFalse(p.heartbeat_row.isHidden())
-        self.assertIn("running create_object", p.heartbeat_label.text())
+        self.assertIn("Oscar is building the model…", p.heartbeat_label.text())   # the BUILD-phase heartbeat phrase
         self.assertFalse(p.plan_strip.isHidden())                          # the plan was pinned at t=0
         self.release.set()
         self.assertTrue(self.wait_until(lambda: p.worker is None))
@@ -227,7 +230,8 @@ class EndToEndTest(FlowTestCase):
         keys = [c.steps[0].call_id for c in cards]
         self.assertEqual(len(set(keys)), 2)                                 # the provider reused "call_0"
         self.assertEqual([c.steps[0].view.title for c in cards], ["First box", "Second box"])
-        self.assertTrue(all(p.log.has_resource(k) for k in keys))
+        snaps = [c.steps[0].view.snapshot_path for c in cards]
+        self.assertTrue(all(snaps) and len(set(snaps)) == 2)   # each turn's step keeps its own snapshot
 
 
 if __name__ == "__main__":

@@ -179,7 +179,9 @@ class ConnectPanelTest(FlowTestCase):
         self.assertIn({"title": "Make the box", "ok": True}, progress)
         uploads = [(u["kind"], u["format"]) for u in self.fake.uploads]
         self.assertEqual(uploads[0], ("preview", "stl"))
-        self.assertEqual(sorted(uploads[1:]), [("export", "fcstd"), ("export", "step"), ("export", "stl")])
+        self.assertEqual(sorted(u for u in uploads[1:-1] if u[0] == "export"),
+                         [("export", "fcstd"), ("export", "step"), ("export", "stl")])
+        self.assertEqual(uploads[-1], ("preview", "stl"))   # the final preview when the turn's geometry lands
 
         chat = self.p._current_session()
         self.assertEqual(chat["title"], "Workspace: Box")
