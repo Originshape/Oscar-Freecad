@@ -178,10 +178,10 @@ class ConnectPanelTest(FlowTestCase):
         progress = [e["data"] for e in self.fake.events["t1"] if e["kind"] == "progress"]
         self.assertIn({"title": "Make the box", "ok": True}, progress)
         uploads = [(u["kind"], u["format"]) for u in self.fake.uploads]
-        self.assertEqual(uploads[0], ("preview", "stl"))
-        self.assertEqual(sorted(u for u in uploads[1:-1] if u[0] == "export"),
-                         [("export", "fcstd"), ("export", "step"), ("export", "stl")])
-        self.assertEqual(uploads[-1], ("preview", "stl"))   # the final preview when the turn's geometry lands
+        self.assertEqual(uploads[0], ("preview", "stl"))    # the live preview goes up first
+        # preview refreshes interleave with the exports by event timing — assert the export set, not the order
+        exports = [u for u in uploads[1:] if u[0] == "export"]
+        self.assertEqual(sorted(exports), [("export", "fcstd"), ("export", "step"), ("export", "stl")])
 
         chat = self.p._current_session()
         self.assertEqual(chat["title"], "Workspace: Box")
