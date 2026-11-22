@@ -18,7 +18,6 @@ checked, opened, and reported, including a download that fails and a FreeCAD tha
 Pure python (stdlib + requests); the keystore runs in memory.
 """
 import hashlib
-import json
 import os
 import shutil
 import sys
@@ -38,13 +37,6 @@ from oscar import connect  # noqa: E402
 from oscar.auth import account, discovery, keystore, session  # noqa: E402
 from oscar.auth.transport import AuthUnavailable, TokenSet  # noqa: E402
 from support.fake_workspace import FakeWorkspace  # noqa: E402
-
-try:   # the FreeCAD side of connect mode needs PySide: it exists only inside the FreeCAD runtime,
-    from oscar import connect_gui   # so the pure CI job skips these tests instead of failing to import
-    HAVE_CONNECT_GUI = True
-except Exception:  # noqa: BLE001
-    connect_gui = None
-    HAVE_CONNECT_GUI = False
 
 FAST = {"FLUSH_S": 0.01, "KEEPALIVE_S": 0.05, "PREVIEW_INTERVAL_S": 0.0, "HEARTBEAT_S": 0.05,
         "BACKOFF_S": (0.01, 0.01, 0.01), "SIGNED_OUT_RETRY_S": 0.02, "BLOCKED_RETRY_S": 0.02}
@@ -251,76 +243,11 @@ class LoopTests(ConnectCase):
         self.assertTrue(wait_until(lambda: "t1" in self.fake.finished))
         self.assertEqual(self.fake.finished["t1"], ("Built the flange.", True))
         kinds = [e["kind"] for e in self.fake.events["t1"]]
-        self.assertEqual(kinds, ["progress", "reply", "artifacts"])
+        self.assertEqual(kinds, ["progress", "reply"])
         uploads = [(u["kind"], u["format"], u["version"]) for u in self.fake.uploads]
         self.assertEqual(uploads, [("preview", "stl", "3"), ("export", "step", "3"), ("export", "stl", "3")])
         self.assertIn("working", self.state_names())
         self.assertEqual(self.fake.hellos[0]["oscar_version"], connect.__version__)
-
-    def test_the_final_preview_is_retried_and_reported_when_the_server_is_busy(self):
-        """Issue #7: the turn's FINAL preview is the model the browser keeps showing once the turn
-        ends — losing it to a busy server silently left the viewer on the previous model. It gets
-        the export retry ladder, and the browser is told when it still doesn't arrive."""
-        class FinalOnlyTurn(FakeTurn):
-            """No preview until the turn ends; the last take is the model the browser keeps."""
-
-            def __init__(self, job):
-                super().__init__(job, steps=(), hold=True)
-                self.mid_takes = 0
-
-            def take_preview(self):
-                if not self._done.is_set():
-                    self.mid_takes += 1
-                    return None
-                return (2, b"\x00" * 84)
-
-        logged = []
-
-        def log(kind, **fields):
-            logged.append((kind, fields))
-
-        def unavailable(*args, **kwargs):
-            raise AuthUnavailable("The server is busy.")
-
-        self.fake.add_job("A flange", task_id="t1")
-        made = []
-        with mock.patch.object(connect.Client, "upload", unavailable), \
-                mock.patch.object(connect, "UPLOAD_RETRY_S", (0.0, 0.0)):
-            loop = connect.Loop(lambda: self.session,
-                                start_turn=lambda job, files: made.append(FinalOnlyTurn(job)) or made[0],
-                                is_idle=lambda: True, on_state=lambda state, message: None,
-                                versions=connect.versions("1.1.3"), files_dir=lambda: self.files_dir, log=log)
-            self.addCleanup(loop.stop, 2.0)
-            loop.start()
-            self.assertTrue(wait_until(lambda: made and made[0].mid_takes >= 1))   # mid-turn: no preview yet
-            made[0].release()                                                      # the turn ends
-            self.assertTrue(wait_until(lambda: "t1" in self.fake.finished))
-        failed = [fields for kind, fields in logged if kind == "connect_upload_failed"]
-        attempts = [f["attempt"] for f in failed if f["file_kind"] == "preview"]
-        self.assertEqual(attempts, [1, 2, 3])                       # retried like an export
-        errors = [e["data"]["message"] for e in self.fake.events["t1"] if e["kind"] == "error"]
-        self.assertIn("Couldn’t upload preview-2.stl: the OriginShape server was busy.", errors)
-
-    def test_the_turn_ends_with_a_verifiable_artifacts_manifest(self):
-        """Issue #7: everything a turn uploaded is posted as one manifest (name, version, size,
-        sha256) so the workspace can prove WHICH bytes the finished turn produced instead of
-        guessing artifact identity from filenames."""
-        self.fake.add_job("A flange", task_id="t1")
-        loop = self.loop()
-        loop.start()
-        self.assertTrue(wait_until(lambda: "t1" in self.fake.finished))
-        manifests = [e["data"] for e in self.fake.events["t1"] if e["kind"] == "artifacts"]
-        self.assertEqual(len(manifests), 1)
-        upload_by_name = {u["name"]: u for u in self.fake.uploads}
-        files = manifests[0]["files"]
-        self.assertEqual([e["name"] for e in files],
-                         ["preview-3.stl", "flange.step", "flange.stl"])
-        for entry in files:
-            uploaded = upload_by_name[entry["name"]]
-            self.assertEqual(entry["kind"], uploaded["kind"])
-            self.assertEqual(entry["version"], int(uploaded["version"]))
-            self.assertEqual(entry["bytes"], len(uploaded["data"]))
-            self.assertEqual(entry["sha256"], hashlib.sha256(uploaded["data"]).hexdigest())
 
     def test_an_oscar_older_than_the_server_supports_stays_blocked_until_it_may_connect(self):
         self.fake.me["plugin"] = {"latest_version": "99.0.0", "min_version": "99.0.0"}
@@ -697,65 +624,6 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual(gltf["nodes"], [{"name": "D", "rotation": gltf["nodes"][0]["rotation"]}])
         self.assertEqual(binary, b"")
         self.assertNotIn("meshes", gltf)
-
-
-@unittest.skipUnless(HAVE_CONNECT_GUI, "connect_gui needs PySide (the FreeCAD runtime)")
-class GuiTurnTests(unittest.TestCase):
-    """The workspace turn adapter's issue-#7 hardening: preview/export versions never regress
-    within a task, the turn's last state is still previewed when the final step failed, and a
-    document that existed before the turn cannot hijack the task's previews and exports."""
-
-    @staticmethod
-    def _job(task_id):
-        return connect.Job.parse({"task_id": task_id, "title": "Flange", "model": "origin1",
-                                  "message": {"id": "m1", "text": "Build it"}, "turn": 1})
-
-    @staticmethod
-    def _step(name, index, ok=True):
-        return json.dumps({"ok": ok, "name": name, "title": name.title(), "step_index": index,
-                           "text": "" if ok else "the tool failed"})
-
-    def test_versions_never_regress_across_turns_of_one_task(self):
-        with mock.patch.object(connect_gui, "_glb_preview", lambda doc: b"glb"):
-            first = connect_gui.GuiTurn(self._job("t-monotonic"), "TaskDoc")
-            first._on_step_finished(self._step("pad", 3))
-            v_first = first.take_preview()[0]                     # a task's first turn: unchanged
-            second = connect_gui.GuiTurn(self._job("t-monotonic"), "TaskDoc")
-            second._on_step_finished(self._step("pad", 1))        # a SHORTER second rebuild…
-            v_second = second.take_preview()[0]
-            third = connect_gui.GuiTurn(self._job("t-monotonic"), "TaskDoc")
-            third._on_step_finished(self._step("pad", 2))
-            v_third = third.take_preview()[0]
-            other = connect_gui.GuiTurn(self._job("t-other"), "OtherDoc")
-            other._on_step_finished(self._step("pad", 2))
-            self.assertEqual((v_first, v_third), (3, 6))
-            self.assertGreater(v_second, v_first)                 # …still versions above turn one
-            self.assertGreater(v_third, v_second)                 # and keeps climbing
-            self.assertEqual(other.take_preview()[0], 2)          # another task starts fresh
-
-    def test_a_turn_whose_last_step_failed_still_ends_with_a_final_preview(self):
-        turn = connect_gui.GuiTurn(self._job("t-final"), "TaskDoc")
-        turn._on_step_finished(self._step("pad", 2))
-        with mock.patch.object(connect_gui, "_glb_preview", lambda doc: b"glb"):
-            self.assertEqual(turn.take_preview()[0], 2)           # the mid-turn preview
-            self.assertIsNone(turn.take_preview())                # nothing due in between
-            turn._on_step_finished(self._step("cut", 3, ok=False))   # a failed step previews nothing
-            self.assertIsNone(turn.take_preview())
-            turn._done.set()                                      # …but the turn can still end ok:
-            final = turn.take_preview()                           # the last state goes out anyway
-            self.assertIsNotNone(final)
-            self.assertEqual(final[0], 2)                         # the last SUCCESSFUL step's version
-            self.assertIsNone(turn.take_preview())                # exactly once
-
-    def test_a_pre_existing_document_cannot_hijack_the_previews(self):
-        turn = connect_gui.GuiTurn(self._job("t-doc"), "TaskDoc")
-        turn._docs_at_start = {"TaskDoc", "Scratch"}              # both existed before the turn
-        with mock.patch.object(connect_gui, "_active_doc_name", lambda: "Scratch"):
-            turn._on_step_finished(self._step("verify", 1))
-        self.assertEqual(turn._doc, "TaskDoc")                    # the scratch doc is ignored
-        with mock.patch.object(connect_gui, "_active_doc_name", lambda: "MadeNow"):
-            turn._on_step_finished(self._step("pad", 2))
-        self.assertEqual(turn._doc, "MadeNow")                    # a document created this turn is followed
 
 
 class AttachmentTests(ConnectCase):

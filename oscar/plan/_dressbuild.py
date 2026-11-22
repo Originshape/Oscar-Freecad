@@ -266,20 +266,13 @@ def build_linear_pattern(doc, body, feat: dict, plan: dict, built: dict, ctx: Ct
 
 
 def build_polar_pattern(doc, body, feat: dict, plan: dict, built: dict, ctx: Ctx):
-    """PartDesign::PolarPattern of an earlier feature: ``count`` occurrences
-    over ``angle`` degrees (360 = a full circle, evenly spaced) about a Body
-    origin axis, or about ``sketch_normal`` — the ORIGINAL feature's own
-    sketch normal (a bolt circle turns about the circle's centre, wherever the
-    sketch was placed; the object reference is stable, no datum needed)."""
+    """PartDesign::PolarPattern of an earlier feature about a Body axis:
+    ``count`` occurrences over ``angle`` degrees (360 = a full circle, evenly
+    spaced)."""
     original = _original(feat, built)
+    axis = _origin(body, _AXIS_ROLES[feat.get("axis", "z")])
     obj = _transformed(doc, body, feat, ctx, "PartDesign::PolarPattern", original)
-    if feat.get("axis") == "sketch_normal":
-        prof = getattr(original, "Profile", None)
-        sketch = prof[0] if prof else original
-        obj.Axis = (sketch, ["N_Axis"])
-    else:
-        axis = _origin(body, _AXIS_ROLES[feat.get("axis", "z")])
-        obj.Axis = (axis, [""])
+    obj.Axis = (axis, [""])
     n = _count(doc, obj, feat, plan, ctx)
     obj.Angle = _length(plan, feat, "angle", "angle")
     _bind(obj, "Angle", feat["angle"], ctx)

@@ -276,8 +276,7 @@ def _export_model(doc_name: str, objects: list | None = None, formats: list | No
     lines = []
     for item in result.files:
         solids = f"{item.solids} solid" + ("" if item.solids == 1 else "s")
-        lines.append(f"{item.rel}  {_fmt_size(item.bytes)}  sha256 {item.sha256[:12]}  "
-                     f"({item.label}, {solids})")
+        lines.append(f"{item.rel}  {_fmt_size(item.bytes)}  sha256 {item.sha256[:12]}  ({item.label}, {solids})")
     if result.errors:
         lines.append("Some files were NOT written: " + "; ".join(result.errors[:6]))
     oriented = list(dict.fromkeys(f"{item.label} {item.orientation}" for item in result.files
@@ -285,12 +284,7 @@ def _export_model(doc_name: str, objects: list | None = None, formats: list | No
     if oriented:
         lines.append("Print orientation (print_orientation in spec.json): " + ", ".join(oriented) + "; the other parts "
                      "are as modelled.")
-    # V-2 verdicts ride the Notes lines (problems first), never the per-file line: its
-    # format is the pinned tool contract (tests/test_project_tools.py LINE).
-    notes = list(result.notes)
-    notes += [f"{os.path.basename(item.path)}: re-import EQUAL" for item in result.files
-              if (item.verified or {}).get("verdict") == "EQUAL"]
-    lines += [f"Note: {note}." for note in notes[:4]]
+    lines += [f"Note: {note}." for note in result.notes[:4]]
     folder = os.path.dirname(result.files[0].path)
     lines.append(f"Folder: {folder}")
     return "\n".join(lines)

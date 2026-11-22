@@ -285,10 +285,6 @@ class HeartbeatMarkupTest(FlowTestCase):
     chose, so a tool called ``<img src=...>`` was rendered as markup."""
 
     def test_the_heartbeat_shows_a_markup_tool_name_verbatim(self):
-        """UI redesign 2026-11-16/20: the heartbeat is a PHRASE panel — a running tool maps to a
-        user-facing sentence and the tool's raw text (which may carry markup like <img src='x'>)
-        never reaches the label at all. The label stays PlainText; the markup-safety intent of
-        the old verbatim test is preserved more strongly: no tool text, so no interpretation."""
         from test_panel_render import progress
 
         p = self.p
@@ -296,15 +292,7 @@ class HeartbeatMarkupTest(FlowTestCase):
         p._on_progress(j(progress(activity="running_tool", tool="<img src='x'>", started_at=1.0)))
         p._update_heartbeat()
         self.assertEqual(p.heartbeat_label.textFormat(), QtCore.Qt.PlainText)
-        self.assertNotIn("<img", p.heartbeat_label.text())
-        self.assertNotIn("src=", p.heartbeat_label.text())
-        self.assertIn("Oscar is", p.heartbeat_label.text())          # a real phrase, not raw data
-        for activity in ("thinking", "writing", "tool_args", "retrying",
-                         "waiting_approval", "paused", "validating"):
-            p._on_progress(j(progress(activity=activity, tool="<img src='x'>", started_at=1.0)))
-            p._update_heartbeat()
-            self.assertNotIn("<", p.heartbeat_label.text(), activity)
-            self.assertEqual(p.heartbeat_label.textFormat(), QtCore.Qt.PlainText, activity)
+        self.assertIn("<img src='x'>", p.heartbeat_label.text())
 
 
 class SteerWithImageResendTest(FlowTestCase):
@@ -1266,28 +1254,13 @@ class ThumbnailChurnTest(FlowTestCase):
         return False
 
     def test_more_visible_thumbnails_than_the_cache_limit_still_converge(self):
-        """Phase 10: the timeline cache keeps at most 48 decoded pixmaps; requesting MORE than
-        the limit still serves every row (evicted paths simply re-decode on demand — bounded
-        memory, unbounded coverage, and a re-request always converges: the anti-churn intent)."""
-        import tempfile
-
-        from test_panel_flow import png
-        from oscar.panel_timeline import TimelineTab
-
-        tmp = tempfile.mkdtemp(prefix="churn_over_")
-        paths = []
-        for i in range(130):
-            paths.append(png(os.path.join(tmp, f"o{i}.png"), 60, 40))
-        tab = TimelineTab()
-        self.addCleanup(tab.deleteLater)
-        tab.load_entries([{"op": "execute_code", "explanation": "step", "snapshot": paths[i],
-                           "snapshot_key": f"k{i}"} for i in range(130)])
-        for p in paths:                                # every row served, first pass
-            self.assertIsNotNone(tab._thumb(p), p)
-        retained = [v for v in tab._thumbs.values() if v is not None]
-        self.assertLessEqual(len(retained), 48)        # memory stays bounded
-        for p in paths[:10] + paths[-10:]:             # re-requests converge after eviction
-            self.assertIsNotNone(tab._thumb(p), p)
+        p = self.p
+        self.begin_turn()
+        self.snapshot_steps(130)
+        self.assertTrue(self.settle(), "the render retry loop never ended")
+        card = self.card()
+        self.assertTrue(all(p._thumbs.has(s.call_id) for s in card.steps))     # every visible row has its image
+        self.assertTrue(all(p.log.has_resource(s.call_id) for s in card.steps[:5] + card.steps[-5:]))
 
     def test_collapsed_cards_cause_no_render_loop_and_the_cache_stays_bounded(self):
         p = self.p
@@ -1305,31 +1278,17 @@ class ThumbnailChurnTest(FlowTestCase):
         self.assertLessEqual(len(p._thumbs.keys()), p._thumbs.limit)
 
     def test_expanding_a_card_loads_its_thumbnails_and_converges(self):
-        """Phase 10: step snapshots left the panel ThumbCache with the 2026-11-16 redesign —
-        the Logs page TimelineTab decodes them ON DEMAND from the project journal through its
-        own path-keyed cache. The convergence contract, at its real home: every requested
-        snapshot decodes exactly once and later requests reuse the cached pixmap (no churn)."""
-        import tempfile
-
-        from test_panel_flow import png
-        from oscar.panel_timeline import TimelineTab
-
-        tmp = tempfile.mkdtemp(prefix="churn_entries_")
-        paths = []
-        for i in range(6):
-            paths.append(png(os.path.join(tmp, f"e{i}.png"), 60, 40))
-        tab = TimelineTab()
-        self.addCleanup(tab.deleteLater)
-        entries = [{"op": "execute_code", "explanation": "step", "snapshot": paths[i],
-                    "snapshot_key": f"k{i}"} for i in range(6)]
-        tab.load_entries(entries)
-        for _ in range(3):
-            self.app.processEvents()
-        for p in paths:
-            pixmap = tab._thumb(p)
-            self.assertIsNotNone(pixmap, p)
-            self.assertIs(tab._thumb(p), pixmap)      # decoded once, cached: no re-decode churn
-        self.assertEqual(len(tab.entries()), 6)
+        p = self.p
+        for turn in range(3):
+            self.begin_turn()
+            self.snapshot_steps(40, prefix=f"t{turn}_")
+            with mock.patch.object(p, "_fit_view_after_turn"):
+                self.finish_turn(True, "ok")
+        cards = [b for b in p.blocks if b.kind == Block.TOOL and b.steps]
+        p._on_anchor_target(f"tool:{cards[1].bid}")
+        self.assertTrue(self.settle())
+        self.assertTrue(all(p._thumbs.has(s.call_id) for s in cards[1].steps))
+        self.assertTrue(all(p.log.has_resource(s.call_id) for s in cards[1].steps))
 
     def test_the_cache_never_evicts_a_protected_image_and_otherwise_stays_bounded(self):
         from oscar.panel_blocks import ThumbCache

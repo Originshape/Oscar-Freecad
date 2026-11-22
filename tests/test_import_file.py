@@ -90,25 +90,6 @@ class _DocTestCase(unittest.TestCase):
                     pass
 
 
-class SourceHashStampTest(_DocTestCase):
-    """Issue 003 Area 4b: every import stamps the SOURCE file's sha256 on the created objects,
-    so a later measure_reference_part on a plain import records real provenance."""
-
-    def test_imported_objects_carry_the_source_files_sha256(self):
-        import hashlib
-
-        path = _binary_stl(_cube(12), "stamped.stl")
-        _new_doc("StampDoc")
-        res = self.engine.import_file(path, "StampDoc")
-        self.assertTrue(res["success"])
-        digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
-        doc = App.getDocument(res["document_name"])
-        for name in res["objects"]:
-            obj = doc.getObject(name)
-            self.assertIsNotNone(obj, name)
-            self.assertEqual(getattr(obj, "OscarImportSha256", ""), digest, name)
-
-
 class MeshImportTest(_DocTestCase):
     def test_a_binary_stl_lands_as_a_mesh_with_its_size_and_position(self):
         path = _binary_stl(_cube(20, at=(100, 200, 0)))

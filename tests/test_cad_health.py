@@ -868,39 +868,6 @@ class ParamTableTest(DocCase):
         self.assertIsNone(row["value"])
 
 
-class ParamTableSheetChoiceTest(DocCase):
-    """M1 F2 (RC2): with more than one parameter sheet in the document the
-    table reports the sheet that actually drives geometry (the one holding
-    the expression bindings) and lists every sheet, so the inconsistency is
-    visible instead of silently picking by name."""
-
-    def test_the_bound_sheet_wins_over_a_name_match(self):
-        self.sheet([("dead_dim", "=5 mm", "mm", "", "")], name="Parameters")
-        self.sheet([("live_dim", "=7 mm", "mm", "", "")], name="Parameters001")
-        box = self.doc.addObject("Part::Box", "B")
-        box.setExpression("Length", "Parameters001.live_dim * 2")
-        self.doc.recompute()
-        table = health_eval.read_param_table(self.doc)
-        self.assertEqual(table["sheet"], "Parameters001")
-        self.assertEqual([r["name"] for r in table["rows"]], ["live_dim"])
-        self.assertEqual(table["sheets"], [{"name": "Parameters001", "rows": 1, "bound": 1},
-                                           {"name": "Parameters", "rows": 1, "bound": 0}])
-
-    def test_without_bindings_the_name_order_pick_stands(self):
-        self.sheet([("a_val", "=1 mm", "mm", "", "")], name="Parameters")
-        self.sheet([("b_val", "=1 mm", "mm", "", "")], name="Parameters001")
-        table = health_eval.read_param_table(self.doc)
-        self.assertEqual(table["sheet"], "Parameters")
-        self.assertEqual([r["name"] for r in table["rows"]], ["a_val"])
-        self.assertEqual(len(table["sheets"]), 2)      # the inconsistency stays visible
-
-    def test_a_single_sheet_table_is_unchanged(self):
-        self.sheet([("only", "=2 mm", "mm", "", "")])
-        table = health_eval.read_param_table(self.doc)
-        self.assertEqual((table["sheet"], [r["name"] for r in table["rows"]]), ("Params", ["only"]))
-        self.assertNotIn("sheets", table)
-
-
 # ---------------------------------------------------------------------------------------------- any-thread wrappers
 
 

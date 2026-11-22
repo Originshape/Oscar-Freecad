@@ -35,9 +35,8 @@ LABELS = {
     "fit.retention": "Snap-fit retention (lid lift test)",
     "dfm": "Printability rules (minimum wall, vent web, hook strain)",
     "editability": "Parameter editability (+-10% rebuild)",
-    "reference.deviation": "Reconstruction accuracy vs the imported reference",
-    "recon.deviation": "Scan-to-model deviation of the reconstruction",
     "rebuild": "rebuild.py reproduces the model headless",
+    "step_collision": "STEP-based collision check",
 }
 
 
@@ -55,7 +54,7 @@ def validation(**over):
                      {"id": "ports.usb_c", "kind": "containment", "status": "PASS"},
                      {"id": "hooks.retention", "kind": "retention", "status": "PASS"}],
         "dfm": [{"id": "dfm.min_wall", "status": "PASS"}],
-        "coverage": [], "not_validated": ["physical"],
+        "coverage": [], "not_validated": ["step_collision", "physical"],
     }
     data.update(over)
     return data
@@ -90,8 +89,8 @@ class ClassifyValidationTest(unittest.TestCase):
 
     def test_catalog_order_and_labels(self):
         self.assertEqual(D.VALIDATION_CATALOG, ("health", "fit.interference", "fit.clearance", "fit.ports",
-                                                "fit.retention", "dfm", "editability", "reference.deviation", "recon.deviation",
-                                                "rebuild", "physical"))
+                                                "fit.retention", "dfm", "editability", "rebuild", "step_collision",
+                                                "physical"))
         self.assertEqual(P.VALIDATION_CATALOG, D.VALIDATION_CATALOG)
         for key, label in LABELS.items():
             self.assertEqual(D.VALIDATION_LABELS[key], label)
@@ -109,14 +108,15 @@ class ClassifyValidationTest(unittest.TestCase):
         reasons = {b["id"]: b["reason"] for b in bad}
         self.assertEqual([k for k, v in reasons.items() if v == "not run"],
                          ["health", "fit.interference", "fit.clearance", "fit.ports", "fit.retention", "dfm",
-                          "editability", "reference.deviation", "recon.deviation", "rebuild"])
+                          "editability", "rebuild"])
+        self.assertIn("no reference part was sourced", reasons["step_collision"])
         self.assertIn("physical", reasons)
 
     def test_a_passing_record_validates_what_ran_in_catalog_order(self):
         good, bad = D.classify_validation(validation(), reference_status="catalog-nominal")
         self.assertEqual(self.ids(good), ["health", "fit.interference", "fit.clearance", "fit.ports",
                                           "fit.retention", "dfm"])
-        self.assertEqual(self.ids(bad), ["editability", "reference.deviation", "recon.deviation", "rebuild", "physical"])
+        self.assertEqual(self.ids(bad), ["editability", "rebuild", "step_collision", "physical"])
         by_id = {g["id"]: g for g in good}
         self.assertEqual(by_id["health"]["result"], "valid (7 objects, 2 solids)")
         self.assertEqual(by_id["fit.interference"]["result"], "1 PASS")
@@ -169,11 +169,37 @@ class ClassifyValidationTest(unittest.TestCase):
         _, bad = D.classify_validation(None)
         self.assertIn("and material shrinkage", next(b for b in bad if b["id"] == "physical")["label"])
 
-    def test_the_dead_step_collision_id_is_gone(self):
-        # V-3: removed — its evidence is the reference interference rows under
-        # fit.interference, which never needed a second catalog entry
-        self.assertNotIn("step_collision", D.VALIDATION_CATALOG)
-        self.assertNotIn("step_collision", D.VALIDATION_LABELS)
+    def test_step_collision_needs_a_step_reference_and_computed_rows(self):
+        ref_rows = [{"id": "interference.reference_shell", "kind": "interference", "status": "PASS"}]
+        base = validation()["fit_rows"]
+        # nominal reference: never validated, with the exact reason
+        for status in ("none", "catalog-nominal"):
+            good, bad = D.classify_validation(validation(fit_rows=base + ref_rows), reference_status=status)
+            self.assertNotIn("step_collision", self.ids(good))
+        _, bad = D.classify_validation(validation(), reference_status="catalog-nominal")
+        self.assertEqual({b["id"]: b["reason"] for b in bad}["step_collision"],
+                         "the reference is nominal board data; no STEP file was imported")
+        # a STEP reference but no reference rows computed
+        for status in ("step-imported", "step-measured", "user-attached"):
+            good, bad = D.classify_validation(validation(), reference_status=status)
+            self.assertNotIn("step_collision", self.ids(good), status)
+            self.assertEqual({b["id"]: b["reason"] for b in bad}["step_collision"],
+                             "interference against the imported reference was not run")
+        # a STEP reference with computed rows
+        for status in ("step-imported", "step-measured", "user-attached"):
+            good, _ = D.classify_validation(validation(fit_rows=base + ref_rows), reference_status=status)
+            self.assertIn("step_collision", self.ids(good), status)
+        # skipped reference rows do not count
+        skipped = [{"id": "interference.reference_shell", "kind": "interference", "status": "SKIP"}]
+        good, _ = D.classify_validation(validation(fit_rows=base + skipped), reference_status="step-imported")
+        self.assertNotIn("step_collision", self.ids(good))
+        # a failing reference row
+        failing = [{"id": "interference.reference_shell", "kind": "interference", "status": "FAIL"}]
+        good, bad = D.classify_validation(validation(fit_rows=base + failing), reference_status="step-imported")
+        self.assertNotIn("step_collision", self.ids(good))
+        # interference itself not run
+        good, _ = D.classify_validation(validation(fit_rows=base + ref_rows, ran=["health"]), reference_status="step-imported")
+        self.assertNotIn("step_collision", self.ids(good))
 
     def test_rebuild_and_editability(self):
         good, _ = D.classify_validation(validation(ran=["health", "editability"]), rebuild_ok=True)
@@ -222,6 +248,8 @@ class SummaryTest(unittest.TestCase):
         not_validated = text.split("### NOT validated\n")[1].split("\n### ")[0]
         self.assertIn("- Model health (valid solids, no recompute errors): valid (7 objects, 2 solids)", validated)
         self.assertIn("- Part-to-part interference: 1 PASS", validated)
+        self.assertIn("- STEP-based collision check (the reference is nominal board data; no STEP file was imported)",
+                      not_validated)
         self.assertTrue(re.search(r"- Physical fit, printing, thermal behaviour and material shrinkage on a real printer \(", not_validated))
         self.assertNotIn("Physical fit", validated)
         self.assertIn("- rebuild.py reproduces the model headless (not run)", not_validated)
@@ -352,22 +380,6 @@ class SummaryTest(unittest.TestCase):
         self.proj.record_rebuild_check(False, "volumes differ")
         good = self.build(ledger(), "validated", validation(after_step=2)).data["validated"]
         self.assertNotIn("rebuild", [g["id"] for g in good])
-
-    def test_a_fresh_rebuild_check_produces_the_ran_id_in_validation_json(self):
-        # V-3: the headless rebuild check is a PRODUCER of the "rebuild" catalog id —
-        # the stored record must agree with the Build Summary, not just feed it
-        partial = {"ok": True, "doc": "PiCase", "ran": ["health"], "gate_errors": [],
-                   "fit_rows": [], "health": {},
-                   "not_validated": ["editability", "rebuild", "physical"]}
-        self.proj.record_validation(partial)
-        rec = json.load(open(self.proj.path("validation.json"), encoding="utf-8"))
-        self.assertNotIn("rebuild", rec["ran"])
-        self.assertIn("rebuild", rec["not_validated"])
-        self.proj.record_rebuild_check(True, "1 object matched")
-        self.proj.record_validation(partial)
-        rec = json.load(open(self.proj.path("validation.json"), encoding="utf-8"))
-        self.assertIn("rebuild", rec["ran"])
-        self.assertNotIn("rebuild", rec["not_validated"])
 
     def test_render_summary_is_pure_and_deterministic(self):
         kwargs = dict(outcome="validated", reference_status="none", project_dir="/p", tree=[], requirements=[],
@@ -706,79 +718,3 @@ class RebuildCheckHelpersTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class AccuracyReportTest(unittest.TestCase):
-    """V-4: the human-readable accuracy report — pure rendering of RECORDED evidence
-    (analysis payloads + stored recon.deviation rows); nothing re-derived."""
-
-    @staticmethod
-    def payload(**over):
-        data = {"schema": 1, "mode": "parametric", "mesh": "Scan", "document": "D",
-                "quality": {"sigma_mm": 0.05},
-                "scan_quality": {"readiness": {"verdict": "ready", "reasons": []}},
-                "extra": {
-                    "outcome": "verified_parametric",
-                    "units": {"status": "SCALE_PLAUSIBLE", "source_unit": "unknown",
-                              "dims_mm": [60, 40, 10]},
-                    "measured_mask": {"scan_excluded": 4, "model_excluded": 0,
-                                      "regions": 0, "note": ""},
-                    "nominal_snaps": [
-                        {"param": "plate_t", "measured": 10.02, "nominal": 10.0,
-                         "delta": 0.02, "sigma_ratio": 0.4, "applied": True},
-                        {"param": "hole_d", "measured": 6.62, "nominal": 6.6,
-                         "delta": 0.02, "sigma_ratio": 0.4, "applied": False}],
-                    "residual_clusters": [{"kind": "missing", "points": 12,
-                                           "area_mm2": 40.0, "centroid_mm": [1, 2, 3]}],
-                    "plan": {"id": "scan_recon",
-                             "features": [{"id": "base_sk", "op": "sketch"},
-                                          {"id": "base_pad", "op": "pad"}],
-                             "parameters": {
-                                 "plate_t": {"value": 10.0, "source": {"ref": "planes"}},
-                                 "hole_d": {"value": 6.62,
-                                            "source": {"ref": "wall fit"}}}}}}
-        (data["extra"]).update(over.pop("extra", {}))
-        data.update(over)
-        return data
-
-    def test_the_report_renders_every_recorded_section(self):
-        rows = [{"id": "hausdorff", "kind": "recon_deviation", "value": 0.21,
-                 "status": "PASS"},
-                {"id": "exact_scan_to_model.max", "kind": "recon_deviation",
-                 "value": 0.24, "status": "PASS"}]
-        text = D.render_accuracy_md([self.payload()], project_name="bracket",
-                                    recon_rows=rows, now="2026-11-15T10:00")
-        for needle in ("# bracket - reconstruction accuracy",
-                       "## Scan - verified_parametric",
-                       "units: **SCALE_PLAUSIBLE**",
-                       "scan readiness: **ready**",
-                       "measured-only mask: 4 synthetic",
-                       "| parameter | value | evidence |",
-                       "10.02 measured -> **10**",
-                       "Drill-size suggestions (NOT applied): hole_d O6.62 -> 6.6",
-                       "| base_pad | pad |",
-                       "Residual clusters",
-                       "| exact_scan_to_model.max | 0.24 | PASS |",
-                       "## Assumptions and limitations"):
-            self.assertIn(needle, text, needle)
-
-    def test_without_payloads_the_report_says_so_and_nothing_is_invented(self):
-        text = D.render_accuracy_md([], project_name="x")
-        self.assertIn("no accuracy evidence to report", text)
-        self.assertNotIn("verified", text)
-
-    def test_the_project_writes_the_file_only_from_parametric_evidence(self):
-        proj = S.make_project(create=True)
-        self.assertIsNone(proj.write_accuracy_md())
-        self.assertFalse(os.path.exists(proj.path("ACCURACY.md")))
-        proj.write_analysis("Scan", self.payload())
-        proj.record_validation({"ok": True, "doc": "D", "ran": ["health"],
-                                "gate_errors": [], "health": {},
-                                "fit_rows": [{"id": "hausdorff",
-                                              "kind": "recon_deviation",
-                                              "value": 0.21, "status": "PASS"}]})
-        out = proj.write_accuracy_md()
-        self.assertIsNotNone(out)
-        text = open(out, encoding="utf-8").read()
-        self.assertIn("## Scan - verified_parametric", text)
-        self.assertIn("| hausdorff | 0.21 | PASS |", text)

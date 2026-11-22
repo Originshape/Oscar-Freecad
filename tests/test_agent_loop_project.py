@@ -273,7 +273,7 @@ class ElidedScriptTest(RealCase):
         script = [calls(call("create_document", name=doc))] + [
             calls(call("execute_code", code=code(i), include_screenshot=False)) for i in range(8)] + [say("Done.")]
         worker = self.worker("make eight boxes", script, project=project, validator=False,
-                             caps=ModelCaps(context_window=10240, max_output=1024))   # the 003 prompt/tools grew: elision fires one rung higher
+                             caps=ModelCaps(context_window=8192, max_output=1024))
         worker.run_turn()
         elided = [c.arguments["code"] for r in self.provider.requests for m in r.messages for c in m.tool_calls
                   if c.name == "execute_code" and c.arguments.get("code", "").startswith("[script elided")]

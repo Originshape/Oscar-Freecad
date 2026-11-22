@@ -17,7 +17,7 @@ change):
 * ``linear_pattern``: ``of`` (an earlier pad / pocket / hole / revolution /
   boss), ``count`` and ``spacing`` parameters, ``direction`` x | y | z (a
   leading ``-`` reverses); ``polar_pattern``: ``of``, ``count``, ``angle``
-  (the total sweep, 360 = a full circle) and ``axis`` x | y | z | sketch_normal
+  (the total sweep, 360 = a full circle) and ``axis`` x | y | z through the
   Body origin; ``mirror``: ``of`` and ``plane`` xy | xz | yz (through the
   Body origin);
 * ``boss``: a pad of ``profile`` / ``profiles`` of ``length`` on a face
@@ -40,10 +40,7 @@ EDGE_OF_FEATURE = "edges_of_feature:"
 FACE_RULES = ("top", "bottom", "front", "back", "left", "right")
 OPEN_FACE_RULES = ("top", "bottom")
 PATTERN_DIRECTIONS = ("x", "y", "z", "-x", "-y", "-z")
-AXIS_NAMES = ("x", "y", "z", "sketch_normal")   # sketch_normal: the ORIGINAL
-                                             # feature's own sketch axis (a bolt
-                                             # circle turns about the circle's
-                                             # centre, not the Body origin)
+AXIS_NAMES = ("x", "y", "z")
 MIRROR_PLANES = ("xy", "xz", "yz")
 THICKNESS_DIRECTIONS = ("inward", "outward")
 PATTERN_ORIGINALS = ("pad", "pocket", "hole", "revolution", "boss")

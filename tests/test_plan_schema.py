@@ -677,62 +677,6 @@ class DimensionRefsTest(unittest.TestCase):
         self.assertEqual(schema.dimension_refs(plan), [("y", "pad.length", 5, "positive")])
 
 
-class PlanReferenceTest(unittest.TestCase):
-    """Issue 003 Area 2: a generated, drift-proof vocabulary the model can read."""
-
-    def test_every_registered_op_and_its_keys_are_listed(self):
-        text = schema.plan_reference()
-        for op, spec in sorted(schema.OPS.items()):
-            self.assertIn(op, text, op)
-            for key in spec.keys:
-                self.assertIn(key, text, f"{op}.{key}")
-
-    def test_the_reference_states_the_orientation_conventions(self):
-        text = schema.plan_reference()
-        self.assertIn("centre on the plane origin", text)
-        self.assertIn("NEGATIVE normal", text)
-        self.assertIn("OUT of the material", text)
-        self.assertIn("position {x, y} is in the sketch plane", text)
-
-    def test_the_reference_states_the_source_rules(self):
-        text = schema.plan_reference()
-        self.assertIn("derived", text)
-        self.assertIn("expr", text)
-        self.assertIn("8 characters", text)
-
-
-class UnknownKeyHintsTest(unittest.TestCase):
-    """The observed plan-guessing mistakes get a use-instead hint (Area 2)."""
-
-    def plan_with(self, feat):
-        return {"schema_version": 2, "id": "hints", "part_class": "part", "units": "mm",
-                "frame": {"planes": {"base": {"origin": [0, 0, 0], "normal": [0, 0, 1]}}},
-                "parameters": {"thk": _p(10), "dia": _p(6)},
-                "features": [
-                    {"id": "sk", "op": "sketch", "plane": {"frame_plane": "base"},
-                     "profile": {"shape": "rectangle", "width": "thk", "height": "thk"}},
-                    {"id": "pad", "op": "pad", "sketch": "sk", "length": "thk"},
-                    feat]}
-
-    def test_a_hole_with_axis_or_xyz_keys_is_told_about_position(self):
-        plan = self.plan_with({"id": "h", "op": "hole", "plane": {"frame_plane": "base"},
-                               "position": {"x": 0, "y": 0}, "diameter": "dia",
-                               "axis": "z", "x": 3, "z": 3, "through": True})
-        joined = _joined(plan)
-        self.assertIn("plane normal", joined)
-        self.assertIn("position {x, y} is in the sketch plane", joined)
-
-    def test_a_circle_with_radius_is_told_diameter(self):
-        plan = self.plan_with({"id": "c", "op": "sketch", "plane": {"frame_plane": "base"},
-                               "profile": {"shape": "circle", "radius": "dia"}})
-        self.assertIn("diameter", _joined(plan))
-
-    def test_a_pad_with_reversed_is_told_invert(self):
-        plan = self.plan_with({"id": "p2", "op": "pad", "sketch": "sk", "length": "thk",
-                               "reversed": True})
-        self.assertIn("'invert'", _joined(plan))
-
-
 
 
 if __name__ == "__main__":

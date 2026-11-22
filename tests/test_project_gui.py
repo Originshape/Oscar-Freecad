@@ -612,17 +612,11 @@ class CaptureSnapshotTest(unittest.TestCase):
         self.assertIn("updateGui", self.calls)
 
     def test_without_capture_checked_a_frame_that_stays_blank_is_reported(self):
-        # B2 polling (Phase 8) retries blanks; this test validates the SINGLE-attempt blank detection,
-        # so it pins attempts=1 — the default bounded polling (6) is covered by its own diagnostics.
-        os.environ["OSCAR_SNAPSHOT_ATTEMPTS"] = "1"
-        try:
-            self.views.capture = lambda path, *a: True
-            blank = [[(10, 10, 10)] * 64 for _ in range(48)]
-            with self.mock.patch.object(gui, "_sample_image", lambda path: blank):
-                self.assertEqual(gui.capture_snapshot("PiCase", self.path, 480, 360), (False, "blank frame"))
-            self.assertEqual(self.fit_calls, [1])
-        finally:
-            os.environ.pop("OSCAR_SNAPSHOT_ATTEMPTS", None)
+        self.views.capture = lambda path, *a: True
+        blank = [[(10, 10, 10)] * 64 for _ in range(48)]
+        with self.mock.patch.object(gui, "_sample_image", lambda path: blank):
+            self.assertEqual(gui.capture_snapshot("PiCase", self.path, 480, 360), (False, "blank frame"))
+        self.assertEqual(self.fit_calls, [1])
 
     def test_without_capture_checked_a_missing_view_is_reported(self):
         self.views.capture = lambda path, *a: False

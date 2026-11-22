@@ -78,9 +78,8 @@ class FullRegistryLintTest(unittest.TestCase):
         never get its sentence dropped when it is hidden."""
         self.assertFalse(registry() - prompt.KNOWN_TOOLS, sorted(registry() - prompt.KNOWN_TOOLS))
 
-    def test_the_lite_set_is_the_twentytwo_tools_the_prompt_assumes(self):
-        # 22 since the 003 lineage added compare_to_reference to the lite set
-        self.assertEqual(len(toolrun.LITE_TOOLS), 22)
+    def test_the_lite_set_is_the_nineteen_tools_the_prompt_assumes(self):
+        self.assertEqual(len(toolrun.LITE_TOOLS), 19)
         self.assertEqual({s.name for s in tools.specs(lite=True)}, set(toolrun.LITE_TOOLS))
         self.assertLessEqual(set(named(prompt.LITE)), set(toolrun.LITE_TOOLS))
 
@@ -105,12 +104,11 @@ class FullRegistryLintTest(unittest.TestCase):
                 self.assertLessEqual(context.estimate_tokens_text(base), 500 if lite else 1100, (intent, lite))
 
     def test_ultra_lite_keeps_the_enclosure_story(self):
-        # the 003 lineage moved the story from prompt prose to tool availability: the
-        # ultra-lite floor still OFFERS the enclosure pair (spec + build) and stays a
-        # lean, budgeted prompt without the full stage prose or validation tools
-        self.assertTrue({"enclosure_spec", "build_enclosure"} <= set(context.ULTRA_LITE_TOOLS))
         text = prompt.build_system_prompt(lite=True, tool_names=context.ULTRA_LITE_TOOLS)
-        self.assertLessEqual(context.estimate_tokens_text(text), 500)
+        self.assertIn("`enclosure_spec`", text)
+        self.assertIn("`build_enclosure`", text)
+        for stage in STAGE_NAMES:
+            self.assertIn(stage, text)
         self.assertNotIn("validate_model", text)   # not offered in the 9-tool floor set
 
 
@@ -148,9 +146,7 @@ class EnclosureSequenceTest(unittest.TestCase):
     def test_the_stages_the_prompts_list_are_the_kit_stages_in_order(self):
         kit_order = [s for s in kit_spec.STAGES if s in STAGE_NAMES]
         self.assertEqual(tuple(kit_order), STAGE_NAMES)   # the kit builds params and reference first (next)
-        # The 2026-11-15 prompt rewrite moved the stage list out of CORE/LITE into the
-        # phase guidance; the order guarantee is checked where the list now lives.
-        for label in ("PHASE BUILD",):
+        for label in ("CORE", "LITE", "PHASE BUILD"):
             text = texts()[label]
             start = text.index("`build_enclosure` once per stage")
             positions = []
@@ -162,15 +158,14 @@ class EnclosureSequenceTest(unittest.TestCase):
 
     def test_core_order_is_spec_then_stages_then_checks_then_export(self):
         text = prompt.CORE
-        start = text.index("For enclosures, call `enclosure_spec`")
-        end = text.index("`export_model`", start)
-        workflow = text[start:end]              # the enclosure sentence, in situ
-        self.assertLess(workflow.index("`enclosure_spec`"), workflow.index("`build_enclosure`"))
-        # validate_model / check_fit are no longer BACKTICKED in CORE (renderings name only
-        # offered tools); the sentence still orders them as plain words before the export:
-        self.assertLess(workflow.index("setting parameters"), workflow.index("Validate,"))
-        self.assertLess(workflow.index("Validate,"), workflow.index("check fit"))
+        order = ["`enclosure_spec`", "`build_enclosure`", "`validate_model`", "`check_fit`", "`export_model`"]
+        positions, start = [], text.index("Enclosure order:")
+        for o in order:
+            start = text.index(o, start)
+            positions.append(start)
+        self.assertEqual(positions, sorted(positions))
         self.assertLess(text.index("`find_reference_part`"), text.index("`enclosure_spec`"))
+        self.assertLess(text.index("`set_parameters`"), text.index("`validate_model`"))
         self.assertIn("execute_code", text)   # free-form remains for what the kit does not cover
 
     def test_phase_guidance_walks_the_sequence(self):
@@ -212,15 +207,14 @@ class EnclosureSequenceTest(unittest.TestCase):
 
     def test_the_final_report_template_demands_validated_vs_not_validated_from_recorded_checks(self):
         template = prompt.FINAL_REPORT_TEMPLATE
-        self.assertIn("two concise paragraphs", template)          # the 2026-11-15 rewrite
-        self.assertIn("Checks actually run and what was NOT validated", template)
+        self.assertIn("Validated vs NOT validated", template)
         self.assertIn("Never claim a check you did not run", template)
-        self.assertIn("invented measurements", template)           # no fabricated results
+        self.assertIn("Only recorded checks count", template)
         self.assertFalse(named(template))
         self.assertLessEqual(len(template.splitlines()), 20)
         # the same wording for the lite model
-        self.assertIn("two concise paragraphs", prompt.LITE)
-        self.assertIn("never claim unrun checks", prompt.LITE)
+        self.assertIn("validated vs NOT validated", prompt.LITE)
+        self.assertIn("only checks you ran", prompt.LITE)
 
     def test_the_enclosure_template_is_the_pi4_housing_request(self):
         text = prompt.TEMPLATES["enclosure_intake"]

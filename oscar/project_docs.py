@@ -24,13 +24,15 @@ VALIDATION_LABELS = {
     "fit.clearance": "Clearances",
     "fit.ports": "Port openings contain every connector",
     "fit.retention": "Snap-fit retention (lid lift test)",
-    "reference.deviation": "Reconstruction accuracy vs the imported reference",
-    "recon.deviation": "Scan-to-model deviation of the reconstruction",
     "dfm": "Printability rules (minimum wall, vent web, hook strain)",
     "editability": "Parameter editability (+-10% rebuild)",
     "rebuild": "rebuild.py reproduces the model headless",
+    "step_collision": "STEP-based collision check",
     "physical": "Physical fit, printing, thermal behaviour and <MATERIAL> shrinkage on a real printer",
 }
+
+STEP_REFERENCE_STATUSES = ("step-imported", "step-measured", "user-attached")
+
 
 def _count_line(rows: Iterable[dict], order: tuple[str, ...] = ("PASS", "WARN", "INFO")) -> str:
     counts: dict[str, int] = {}
@@ -52,10 +54,10 @@ def classify_validation(validation: dict | None, *, reference_status: str = "non
     """Split the catalog into what was validated and what was not.
 
     A catalog entry is VALIDATED iff ``validation["ran"]`` contains it and its rows have no FAIL (and, for
-    the fit entries, not every row was skipped). ``physical`` is ALWAYS not validated. ``rebuild`` is
-    validated when ``rebuild_ok`` (the headless replay check passed after the last geometry step). The
-    dead ``step_collision`` id was removed (V-3) — its evidence is the reference interference rows
-    under ``fit.interference``. Every other entry that did not run is NOT validated
+    the fit entries, not every row was skipped). ``physical`` is ALWAYS not validated. ``step_collision``
+    is validated only when the reference status is a STEP one AND the reference interference rows were
+    really computed (neither SKIP nor missing). ``rebuild`` is validated when ``rebuild_ok`` (the headless
+    replay check passed after the last geometry step). Every other entry that did not run is NOT validated
     with the reason ``not run``.
 
     ``stale`` (a non-empty reason from ``project_validation.stale_reason``) means the validation does not describe
@@ -127,6 +129,21 @@ def classify_validation(validation: dict | None, *, reference_status: str = "non
                 good(entry, "the headless replay matched the live model")
             else:
                 bad(entry, "not run")
+        elif entry == "step_collision":
+            ref_rows = [r for r in fit_rows if str(r.get("id", "")).startswith("interference.reference")]
+            computed = [r for r in ref_rows if str(r.get("status", "")).upper() not in ("SKIP", "")]
+            if reference_status not in STEP_REFERENCE_STATUSES:
+                if reference_status == "none":
+                    bad(entry, "no reference part was sourced")
+                else:
+                    bad(entry, "the reference is nominal board data; no STEP file was imported")
+            elif "fit.interference" not in ran or not computed:
+                bad(entry, "interference against the imported reference was not run")
+            elif any(str(r.get("status", "")).upper() == "FAIL" for r in computed):
+                bad(entry, "FAIL: " + _ids(computed, "FAIL"))
+            else:
+                good(entry, "interference against the imported reference solids: "
+                     + (_count_line(computed) or "checked"))
     if stale:
         for item in not_validated:
             if item["reason"] in ("not run", "interference against the imported reference was not run"):
@@ -222,7 +239,7 @@ def material_shrink(material: str) -> float | None:
 
 _SUMMARY_CAPS = (
     # (tree rows, requirement rows, parameter rows, validated, not validated, open items, provenance extras)
-    (12, 10, 14, 10, 10, 8, 3),  # not-validated cap 10: the catalog grew to 12 entries (recon.deviation, recon engine)
+    (12, 10, 14, 10, 8, 8, 3),
     (8, 8, 10, 8, 6, 6, 2),
     (5, 5, 6, 6, 5, 4, 1),
     (3, 3, 3, 4, 4, 3, 0),
@@ -487,115 +504,3 @@ def render_rebuild(*, title: str, script_path: str, mod_dir: str, project_dir: s
         title=safe_title, script_path=repr(script_path), mod_dir=repr(mod_dir), project_dir=repr(project_dir),
         doc_name=repr(doc_name), params=pprint.pformat(params, width=110, sort_dicts=False),
         steps=pprint.pformat(steps, width=110, sort_dicts=False))
-
-
-# ------------------------------------------------------------------ V-4: accuracy report
-ACCURACY_FILE = "ACCURACY.md"
-
-
-def render_accuracy_md(payloads: list[dict], *, project_name: str = "",
-                       recon_rows: "Iterable[dict] | None" = None,
-                       now: str = "") -> str:
-    """V-4: the human-readable accuracy report of every reconstruction in the project.
-
-    ``payloads`` are the ``analysis/<mesh>.json`` records of parametric reconstructions
-    (``_analysis_payload``); each becomes a section with the outcome class, the unit and
-    scan-quality verdicts, the per-feature and per-parameter tables (measured vs nominal
-    wherever G8 snapped), the deviation rows (sampled bounds AND exact worst points),
-    the residual clusters and the measured-only mask. ``recon_rows`` (the project's
-    stored ``recon.deviation`` rows) render once at the end when no payload carries
-    them. Everything here is EVIDENCE that was recorded — nothing is re-derived or
-    invented. Pure."""
-    import json as _json
-
-    head = [f"# {project_name or 'project'} - reconstruction accuracy",
-            f"_Generated by Oscar {now}. Per-feature measured vs nominal parameters, "
-            "deviation rows, residual clusters and the assumptions behind them. "
-            "Do not edit: it is rewritten at finalize._", ""]
-    if not payloads:
-        head += ["_No parametric reconstruction has been recorded for this project, so "
-                 "there is no accuracy evidence to report (analysis-only work leaves "
-                 "this file absent)._"]
-        return "\n".join(head) + "\n"
-
-    def _table(header, rows):
-        out = ["| " + " | ".join(header) + " |",
-               "|" + "|".join("---" for _ in header) + "|"]
-        out += ["| " + " | ".join(str(c) for c in r) + " |" for r in rows]
-        return out
-
-    for payload in payloads:
-        extra = payload.get("extra") or {}
-        plan = extra.get("plan") or {}
-        snaps = {s.get("param"): s for s in extra.get("nominal_snaps") or []}
-        rows_md = [f"## {payload.get('mesh', 'mesh')} - "
-                   f"{extra.get('outcome') or 'outcome unknown'}", ""]
-        units = extra.get("units") or {}
-        scan = ((payload.get("scan_quality") or {}).get("readiness") or {})
-        rows_md.append(f"- units: **{units.get('status', 'unknown')}** (source "
-                       f"{units.get('source_unit', 'unknown')}) · dims "
-                       f"{units.get('dims_mm')}")
-        rows_md.append(f"- scan readiness: **{scan.get('verdict', 'unknown')}** · noise "
-                       f"sigma {(payload.get('quality') or {}).get('sigma_mm')} mm")
-        if scan.get("reasons"):
-            rows_md.append("  - degraded: " + "; ".join(str(r) for r in scan["reasons"][:3]))
-        mask = extra.get("measured_mask")
-        if mask:
-            rows_md.append(f"- measured-only mask: {mask.get('scan_excluded')} synthetic "
-                           f"scan vertex/vertices and {mask.get('model_excluded')} model "
-                           f"sample(s) in {mask.get('regions')} missing region(s) excluded")
-        rows_md.append("")
-        feats = plan.get("features") or []
-        if feats:
-            rows_md.append("### Features")
-            rows_md += _table(["#", "id", "op"],
-                              [(i + 1, f.get("id"), f.get("op"))
-                               for i, f in enumerate(feats)])
-            rows_md.append("")
-        params = plan.get("parameters") or {}
-        if params:
-            rows_md.append("### Parameters (measured vs nominal)")
-            prows = []
-            for name, spec in params.items():
-                value = spec.get("value")
-                snap = snaps.get(name)
-                if snap and snap.get("applied"):
-                    value = f"{snap['measured']:g} measured -> **{snap['nominal']:g}** " \
-                            f"(D {snap['delta']:g}, {snap['sigma_ratio']:g} sigma)"
-                prows.append((name, value, str(spec.get("source", ""))[:90]))
-            rows_md += _table(["parameter", "value", "evidence"], prows)
-            listed = [s for s in snaps.values() if not s.get("applied")]
-            if listed:
-                rows_md.append("")
-                rows_md.append("Drill-size suggestions (NOT applied): " + "; ".join(
-                    f"{s['param']} O{s['measured']:g} -> {s['nominal']:g}"
-                    for s in listed[:6]))
-            rows_md.append("")
-        clusters = extra.get("residual_clusters") or []
-        if clusters:
-            rows_md.append("### Residual clusters (beyond warn, signed)")
-            rows_md += _table(["kind", "points", "~area mm2", "centroid"],
-                              [(c.get("kind"), c.get("points"), c.get("area_mm2"),
-                                c.get("centroid_mm")) for c in clusters[:8]])
-            rows_md.append("")
-        rows_md.append("### Deviation rows (sampled bounds; exact worst via distToShape)")
-        dev_rows = [r for r in (recon_rows or [])
-                    if str(r.get("kind")) == "recon_deviation"]
-        if dev_rows:
-            rows_md += _table(["id", "value", "status"],
-                              [(r.get("id"), r.get("value"), r.get("status"))
-                               for r in dev_rows[:18]])
-        else:
-            rows_md.append("_no recon.deviation rows stored in validation.json — the "
-                           "reconstruction did not record deviation evidence_")
-        head += rows_md + [""]
-    head += ["## Assumptions and limitations",
-             "- sampled nearest-neighbour distances are LOWER bounds; the `exact_*` rows "
-             "refine the worst points with exact OCC distances (`Shape.distToShape`)",
-             "- deviation covers MEASURED regions only (synthetic fill geometry and "
-             "recorded missing regions are excluded and reported, never silently)",
-             "- nominal snaps are band-protected (within 2 sigma) and never forced on "
-             "hole diameters",
-             "- physical printing behaviour always needs a real print (the app cannot "
-             "check it)"]
-    return "\n".join(head) + "\n"

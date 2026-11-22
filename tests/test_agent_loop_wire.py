@@ -177,9 +177,8 @@ class WeakModelOnTheWireTest(WireCase):
     def test_the_view_that_shrank_still_alternates_roles_on_the_wire(self):
         script = [calls(call("create_object", obj_name=f"B{i}")) for i in range(7)] + [say("Done.")]
         server = self.serve(script)
-        # window 24000 (was 20000): the 003 prompt grew, and 20000 now trips the ultra-lite floor
         self.run_agent(server, "make a plate", fake=FakeTools(texts={"create_object": "z" * 9000}),
-                       caps=ModelCaps(context_window=24000, max_output=2048), validator=False)
+                       caps=ModelCaps(context_window=20000, max_output=2048), validator=False)
         last = server.requests[-1].json["messages"]
         roles = [m["role"] for m in last if m["role"] != "system"]
         self.assertEqual(roles[0], "user")

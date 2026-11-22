@@ -20,15 +20,9 @@ from . import fsretry as _fsretry
 
 from . import project_gui as gui
 
-FORMATS = ("step", "stl", "3mf", "brep", "svg", "pdf")
+FORMATS = ("step", "stl", "3mf", "brep")
 EXPORT_TIMEOUT_S = 120.0
 AS_MODELED = "as_modeled"
-# V-2 re-import equality tolerances: STEP/BREP are exact-BREP formats, so a round-trip
-# differs only by float/precision noise; mesh and drawing formats are tessellations or
-# projections by design and are never re-import-compared.
-VERIFY_FORMATS = ("step", "brep")
-VERIFY_VOLUME_TOL = 0.005       # |Δvolume| within 0.5 % of the exported shape
-VERIFY_BBOX_MM = 1e-3           # per-axis bbox delta within 1 µm (+ relative slack)
 # The orientations the kit spec accepts per part role (``kit.spec.SHELL_ORIENTATIONS`` / ``LID_ORIENTATIONS``);
 # used only when the kit cannot be imported.
 _DEFAULT_ORIENTATIONS = {"shell": ("floor_down", AS_MODELED), "lid": ("top_down", AS_MODELED)}
@@ -80,42 +74,6 @@ class ExportedFile:
     label: str
     solids: int
     orientation: str = AS_MODELED   # floor_down | top_down | as_modeled (how the part sits in the file)
-    verified: dict | None = None    # V-2 re-import equality verdict (STEP/BREP only)
-
-
-def verify_reimport(path: str, reference) -> dict:
-    """V-2: re-import an exported STEP/BREP and compare volume and bounding box against
-    the ``reference`` shape that was written. The sha256 proves the BYTES; this proves
-    the GEOMETRY a re-importer reads back is the same part. Returns a verdict dict —
-    ``EQUAL`` / ``MISMATCH`` / ``SKIPPED`` (a failed re-import is reported, never
-    raised; mesh and drawing formats are skipped by design)."""
-    import Part
-
-    try:
-        imported = Part.read(path)
-        if imported.isNull():
-            return {"verdict": "SKIPPED", "note": "the re-import produced a null shape"}
-        v0 = float(reference.Volume)
-        v1 = float(imported.Volume)
-        b0, b1 = reference.BoundBox, imported.BoundBox
-        extent = max(b0.XLength, b0.YLength, b0.ZLength, 1e-9)
-        deltas = {"x": abs(b1.XLength - b0.XLength), "y": abs(b1.YLength - b0.YLength),
-                  "z": abs(b1.ZLength - b0.ZLength)}
-        worst_bbox = max(deltas.values())
-        bbox_tol = max(VERIFY_BBOX_MM, 1e-6 * extent)
-        vol_ok = abs(v1 - v0) <= VERIFY_VOLUME_TOL * max(abs(v0), 1e-9)
-        bbox_ok = worst_bbox <= bbox_tol
-        out = {"verdict": "EQUAL" if (vol_ok and bbox_ok) else "MISMATCH",
-               "volume_exported_mm3": round(v0, 4), "volume_reimported_mm3": round(v1, 4),
-               "volume_delta_pct": round(100.0 * (v1 - v0) / max(abs(v0), 1e-9), 4),
-               "bbox_max_delta_mm": round(worst_bbox, 6)}
-        if not vol_ok:
-            out["note"] = "the re-imported volume differs beyond tolerance"
-        elif not bbox_ok:
-            out["note"] = "the re-imported bounding box differs beyond tolerance"
-        return out
-    except Exception as e:  # noqa: BLE001 - verification is honesty, never a blocker
-        return {"verdict": "SKIPPED", "note": f"re-import failed ({type(e).__name__}: {e})"[:160]}
 
 
 @dataclass
@@ -179,63 +137,12 @@ def _orient(shape, mode: str):
     return out
 
 
-def _write_drawing(shape, fmt: str, path: str) -> None:
-    """A TechDraw A4 landscape page with one top view of ``shape``, exported as SVG or PDF
-    (M9). Needs the GUI module — console sessions get the honest refusal instead of a fake
-    file. The template is copied to a temp file first: TechDraw's C++ reader rejects paths
-    under ``Program Files`` on some builds (probed on FreeCAD 1.1.4, 2026-11-14)."""
-    import shutil
-    import tempfile
-
-    import FreeCAD as App
-
-    try:
-        import TechDrawGui
-    except ImportError:
-        raise RuntimeError("drawing export needs the FreeCAD GUI (TechDrawGui) — run it from "
-                           "FreeCAD, not a headless session") from None
-    src = os.path.join(App.getHomePath(), "data", "Mod", "TechDraw", "Templates",
-                       "Default_Template_A4_Landscape.svg")
-    if not os.path.isfile(src):
-        raise RuntimeError(f"the TechDraw A4 template is missing at {src}")
-    doc = App.newDocument("OscarDrawing")
-    try:
-        part = doc.addObject("Part::Feature", "Part")
-        part.Shape = shape
-        page = doc.addObject("TechDraw::DrawPage", "Page")
-        template = doc.addObject("TechDraw::DrawSVGTemplate", "Template")
-        handle, copied = tempfile.mkstemp(suffix=".svg")
-        os.close(handle)
-        shutil.copyfile(src, copied)
-        template.Template = copied
-        page.Template = template
-        view = doc.addObject("TechDraw::DrawViewPart", "View")
-        view.Source = [part]
-        view.Direction = App.Vector(0, 0, 1)
-        page.addView(view)
-        doc.recompute()
-        if fmt == "pdf":
-            TechDrawGui.exportPageAsPdf(page, path)
-        else:
-            TechDrawGui.exportPageAsSvg(page, path)
-        try:
-            os.remove(copied)
-        except OSError:
-            pass
-    finally:
-        App.closeDocument(doc.Name)
-    if not os.path.isfile(path) or os.path.getsize(path) == 0:
-        raise RuntimeError(f"the {fmt} drawing writer produced no file")
-
-
 def _write_one(shape, fmt: str, path: str, tolerance: float) -> None:
     """Write ``shape`` as ``fmt`` to ``path`` (the extension of ``path`` is the format). Raises on failure."""
     if fmt == "step":
         shape.exportStep(path)
     elif fmt == "brep":
         shape.exportBrep(path)
-    elif fmt in ("svg", "pdf"):
-        _write_drawing(shape, fmt, path)
     else:
         try:
             import MeshPart
@@ -254,7 +161,7 @@ def _write_one(shape, fmt: str, path: str, tolerance: float) -> None:
 def export_tips(project, doc_name: str, *, objects: list[str] | None = None,
                 formats: tuple[str, ...] | list[str] = ("step", "stl"), per_part: bool = True,
                 print_orientation: bool = True, stl_tolerance: float = 0.05, directory: str | None = None,
-                verify: bool = True, should_stop: Callable[[], bool] | None = None) -> ExportResult:
+                should_stop: Callable[[], bool] | None = None) -> ExportResult:
     """Export ``doc_name``'s model to files (any thread; the FreeCAD work is one GUI-thread task).
 
     ``objects`` names the objects to export (each must hold a solid); the default is every visible solid TIP
@@ -343,13 +250,7 @@ def export_tips(project, doc_name: str, *, objects: list[str] | None = None,
                 tmp = os.path.join(work, f"{index:02d}-{safe_stem(label, 'part')}.{fmt}")
                 try:
                     _write_one(shape, fmt, tmp, tolerance)
-                    item = {"label": label, "format": fmt, "tmp": tmp, "solids": solids,
-                            "orientation": mode}
-                    if fmt in VERIFY_FORMATS and verify:
-                        # V-2: the file that was just written is re-imported and its
-                        # geometry compared against the shape that was written
-                        item["verified"] = verify_reimport(tmp, shape)
-                    produced.append(item)
+                    produced.append({"label": label, "format": fmt, "tmp": tmp, "solids": solids, "orientation": mode})
                 except Exception as e:  # noqa: BLE001 - one bad format must not lose the others
                     errors.append(f"{label}.{fmt}: {type(e).__name__}: {e}")
         return {"doc": doc.Name, "produced": produced, "errors": errors, "notes": task_notes}
@@ -381,16 +282,7 @@ def export_tips(project, doc_name: str, *, objects: list[str] | None = None,
                 continue
             rel = project.rel(final) if project is not None and _inside(project.root, final) else final
             result.files.append(ExportedFile(final, rel, item["format"], size, digest, item["label"], item["solids"],
-                                             item.get("orientation", AS_MODELED),
-                                             item.get("verified")))
-            verdict = (item.get("verified") or {}).get("verdict")
-            if verdict == "MISMATCH":
-                result.notes.append(f"{os.path.basename(final)}: re-import MISMATCH "
-                                    "(volume/bbox differ beyond tolerance — see "
-                                    "verified fields)")
-            elif verdict == "SKIPPED":
-                result.notes.append(f"{os.path.basename(final)}: re-import check skipped "
-                                    f"({(item.get('verified') or {}).get('note', '')})")
+                                             item.get("orientation", AS_MODELED)))
     finally:
         shutil.rmtree(work, ignore_errors=True)
     if result.files and project is not None and not directory:

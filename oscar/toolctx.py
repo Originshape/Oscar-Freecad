@@ -59,8 +59,6 @@ class ToolContext:
     outcome: ToolOutcome | None = None   # filled by run_tool
     state: dict = field(default_factory=dict)  # per-TURN scratch: the agent creates ONE dict per turn and passes the SAME dict to every per-call ToolContext
     should_stop: Callable[[], bool] = _never
-    request: str = ""              # original user request; never model-authored tool arguments
-    conversation_id: str = ""      # the chat/session id: ask_user routes answers back through it
 
     @property
     def active(self) -> bool:

@@ -87,7 +87,7 @@ from ._buildcore import (STAGE_BUILD, STAGE_BUILT, STAGE_DOCUMENT,  # noqa: F401
 
 __all__ = ["BuildError", "apply_plan", "apply_feature", "rebuild_from",
            "sync_parameters", "build_spreadsheet", "format_build_failure",
-           "checkpoint", "refresh_edge_rules", "drop_feature"]
+           "checkpoint", "refresh_edge_rules"]
 
 _PREFIX_PROP = "OscarPlanPrefix"
 
@@ -146,24 +146,6 @@ def _number(value) -> float:
     return float(getattr(value, "Value", value))
 
 
-def _write_source_metadata(sheet, cell: str, source) -> None:
-    """Columns D/E of a parameter's row carry the source kind and ref (Issue 003 Area 6, the kit's
-    sheet contract: name | value | unit | source | note). Written only when the plan states a
-    source; cells are never cleared, and the value cell (B) is untouched. Never raises."""
-    kind = str((source or {}).get("kind") or "").strip()
-    if not kind or not cell.startswith("B"):
-        return
-    row = cell[1:]
-    try:
-        if sheet.getContents(f"D{row}").lstrip("'").strip() != kind:
-            sheet.set(f"D{row}", kind)
-        ref = str((source or {}).get("ref") or "").strip()
-        if ref:
-            sheet.set(f"E{row}", ref[:120])
-    except Exception:  # noqa: BLE001 - metadata must never fail the build
-        pass
-
-
 def _upsert_parameters(doc, sheet, plan: dict) -> dict:
     """Write every plan parameter into ``sheet`` by alias.
 
@@ -201,7 +183,6 @@ def _upsert_parameters(doc, sheet, plan: dict) -> dict:
         same = (current.replace(" ", "") == content.replace(" ", "") if is_formula
                 else _same_number(current, values.get(name)))
         if same and not added:
-            _write_source_metadata(sheet, cell, (params.get(name) or {}).get("source"))
             report["unchanged"].append(name)
             return
         sheet.set(cell, content)
@@ -212,7 +193,6 @@ def _upsert_parameters(doc, sheet, plan: dict) -> dict:
                 raise _alias_error(name, e) from None
         else:
             report["updated"].append(name)
-        _write_source_metadata(sheet, cell, (params.get(name) or {}).get("source"))
 
     for name in plain:
         put(name, f"={float(values[name])!r}", False)
@@ -422,8 +402,7 @@ def _build_one(doc, body, plan: dict, ctx: Ctx, feat: dict, built: dict,
             if before is not None:
                 info["metrics"] = check_postconditions(
                     op, fid, before, body_metrics(body),
-                    kind=_post_kind_of(plan, feat),
-                    context=_cut_context(op, feat, plan, built, info, doc))
+                    kind=_post_kind_of(plan, feat))
         _dressbuild.settle(doc, body, obj, built)   # after the commit: see _dressbuild
     except BuildError as e:
         _remove_created(doc, body, names0)
@@ -434,34 +413,6 @@ def _build_one(doc, body, plan: dict, ctx: Ctx, feat: dict, built: dict,
         _remove_created(doc, body, names0)
         raise BuildError(fid, f"{type(e).__name__}: {e}") from None
     return obj, info
-
-
-def _cut_context(op: str, feat: dict, plan: dict, built: dict, info: dict, doc):
-    """The computed facts of a cut-nothing error (Issue 003): the drill direction
-    (holes/pockets cut along the plane's NEGATIVE normal) and the consumed profile's
-    global box. ``None`` for anything but a subtractive op, or when the pieces are
-    unavailable — the error then falls back to the generic hint. Never raises."""
-    if op not in ("pocket", "hole"):
-        return None
-    try:
-        basis = schema.sketch_basis(plan, feat.get("plane", {}))
-        context = {"drill": [-float(v) for v in basis["normal"]]}
-    except Exception:  # noqa: BLE001 - the enrichment must never fail the build
-        return None
-    sketch = None
-    if op == "hole":
-        name = str((info or {}).get("sketch") or "")
-        sketch = doc.getObject(name) if name else None
-    else:
-        made = built.get(feat.get("sketch") or "")
-        sketch = made[0] if made else None
-    try:
-        box = sketch.Shape.BoundBox
-        context["profile_bbox"] = [round(v, 3) for v in
-                                   (box.XMin, box.YMin, box.ZMin, box.XMax, box.YMax, box.ZMax)]
-    except Exception:  # noqa: BLE001 - a shapeless sketch just loses its box line
-        pass
-    return context
 
 
 def _post_kind_of(plan: dict, feat: dict) -> str | None:
@@ -517,14 +468,13 @@ def _name_problem(label: str, name, allow_empty: bool = False) -> str | None:
 
 
 def _only_parameter_rows(sheet) -> bool:
-    """True while ``sheet`` holds nothing but parameter rows in the sheet
-    contract the parameter tools and Issue 003 write: column A the parameter
-    name, column B its value aliased by that name, C/D/E the unit, source kind
-    and ref. A user who added their own cells beyond that contract owns the
-    sheet from then on: the build must not touch it (see ``_pick``)."""
+    """True while ``sheet`` holds nothing but what the builder wrote: column A
+    the parameter name, column B its value aliased by that name. A user who
+    added their own cells to a stamped sheet owns it from then on: replacing
+    the build must not delete those (see ``_pick``)."""
     rows: set[str] = set()
     for addr in sheet.getUsedCells():
-        if addr[0] not in "ABCDE" or not addr[1:].isdigit():
+        if addr[0] not in "AB" or not addr[1:].isdigit():
             return False
         rows.add(addr[1:])
     for row in rows:
@@ -543,14 +493,7 @@ def _pick(doc, plan_id: str, explicit, default: str, type_id: str, what: str):
     ``Parameters`` sheet or ``Body``, is foreign and never touched. An
     EXPLICIT name held by a foreign object is a problem (never overwrite); a
     DEFAULT name held by a foreign object moves to the next free
-    ``<default>001``-style name. EXCEPTION (M1 F1): a DEFAULT name held by a
-    sheet the parameter tools wrote (``OscarRole == "params"``, the tag
-    ``kit.params.ensure_sheet`` sets for ``set_parameters`` /
-    ``measure_reference_part`` / the params stage) that still holds nothing
-    but parameter rows is ADOPTED: returned with no previous object, so the
-    caller updates it in place instead of spawning ``Parameters001`` beside
-    it. A user's own hand-made sheet carries no such tag and is never
-    adopted."""
+    ``<default>001``-style name."""
     def ours(obj) -> bool:
         # a stamped sheet the user has since added their own cells to is no
         # longer disposable: it is left alone and the new build moves aside
@@ -570,10 +513,6 @@ def _pick(doc, plan_id: str, explicit, default: str, type_id: str, what: str):
         obj = doc.getObject(name)
         if obj is None or ours(obj):
             return name, obj, None
-        if (type_id == "Spreadsheet::Sheet" and obj.TypeId == type_id
-                and str(getattr(obj, "OscarRole", "") or "") == "params"
-                and _only_parameter_rows(obj)):
-            return name, None, None        # adopted: updated in place, never replaced
     return default, None, f"no free {what} name near {default!r}"
 
 
@@ -590,10 +529,8 @@ def _foreign_features(body, plan_id: str) -> list[str]:
 
 def _remove_previous(doc, bodies, sheet) -> list[str]:
     """Delete a previous build of the same plan (per Body: features newest
-    first, then the Body); returns the removed object names. ``bodies`` is one
-    Body, a list of them, or None. The ``sheet`` is deliberately NOT deleted
-    (M1 F1): a previous or adopted parameter sheet is updated in place by the
-    caller, so rows another tool wrote and user-edited cells survive."""
+    first, then the Body; then the sheet); returns the removed object names.
+    ``bodies`` is one Body, a list of them, or None."""
     removed: list[str] = []
     if bodies is not None and not isinstance(bodies, (list, tuple)):
         bodies = [bodies]
@@ -603,6 +540,9 @@ def _remove_previous(doc, bodies, sheet) -> list[str]:
             _drop(doc, obj)
         removed.append(body.Name)
         _drop(doc, body)
+    if sheet is not None:
+        removed.append(sheet.Name)
+        _drop(doc, sheet)
     if removed:
         try:
             doc.recompute()
@@ -735,23 +675,7 @@ def _apply_plan(doc, plan, warnings, body_name, sheet_name, prefix) -> dict:
         with checkpoint(doc, "Oscar: plan setup"):
             _preflight_parameters(doc, plan)
             removed.extend(_remove_previous(doc, old_bodies, old_sheet))
-            existing = doc.getObject(sheet_target)
-            if existing is not None and existing.TypeId == "Spreadsheet::Sheet":
-                # a previous build's sheet or an adopted plain parameter sheet
-                # (set_parameters / measure wrote it first): updated in place,
-                # never deleted, so foreign rows and edited cells survive
-                before = _sheet_cells(existing)
-                try:
-                    _upsert_parameters(doc, existing, plan)
-                except Exception:
-                    _restore_sheet(doc, existing, before)
-                    raise
-                if not _marked(existing):
-                    tag_object(existing, plan_id)
-                    existing.Label2 = PLAN_MARK
-                sheet = existing
-            else:
-                sheet = build_spreadsheet(doc, plan, sheet_target)
+            sheet = build_spreadsheet(doc, plan, sheet_target)
             for unit, target in zip(units, body_targets):
                 body = doc.addObject("PartDesign::Body", target)
                 body.Label = target
@@ -990,80 +914,3 @@ def rebuild_from(doc, plan: dict, feature_id: str, *, body_name: str | None = No
         return _failed(e, [])
     except Exception as e:  # noqa: BLE001 - never raise into the caller
         return failure(STAGE_BUILD, f"{type(e).__name__}: {e}", feature_id=feature_id)
-
-
-def drop_feature(doc, plan: dict, feature_id: str, *, body_name: str | None = None,
-                 sheet_name: str | None = None) -> dict:
-    """Remove ONE provably-plan-built feature (and its ``_sketch`` twin) from an
-    existing build — the refinement reject path's surgical undo.
-
-    The feature's objects go newest-first (the feature, then its sketch), the
-    Body's Tip is restored to the last surviving feature, the ORIGINAL plan's
-    parameters are re-synced (any cell the dropped feature's build changed
-    returns to the plan's value; a parameter the dropped feature introduced and
-    this plan no longer names stays behind as an inert orphan row — nothing is
-    ever deleted from the sheet), and the document recomputes. Mirrors the
-    ``_replay`` prelude's stale-object sweep as a public, testable entry.
-    Fails the document stage when the feature (or its build) is not in the
-    document. Same result contract; success adds ``dropped`` (object names) and
-    ``parameters``."""
-    ok, errors, warnings = schema.validate(plan)
-    if not ok:
-        return failure(STAGE_VALIDATION, errors=errors, warnings=warnings)
-    body, sheet, problem = _targets(doc, plan, body_name, sheet_name)
-    if problem:
-        return problem
-    prefix = getattr(body, _PREFIX_PROP, "") if _PREFIX_PROP in body.PropertiesList else ""
-    plan_id = plan["id"]
-
-    def existing(fid: str):
-        return find_feature_object(doc, body, plan_id, fid, f"{prefix}{fid}")
-
-    targets = [o for o in (existing(feature_id), existing(feature_id + "_sketch"))
-               if o is not None]
-    if not targets:
-        return failure(STAGE_DOCUMENT,
-                       f"no feature {feature_id!r} built by plan {plan_id!r} in "
-                       f"the document; nothing to drop")
-    dropped: list[str] = []
-    try:
-        with checkpoint(doc, f"Oscar: drop {feature_id}"):
-            for obj in targets:                      # newest-first: feature before sketch
-                dropped.append(obj.Name)
-                _drop(doc, obj)
-            _restore_tip(body)
-            if sheet is not None:
-                _upsert_parameters(doc, sheet, plan)
-            doc.recompute()
-    except BuildError as e:
-        return _failed(e, [])
-    except Exception as e:  # noqa: BLE001 - never raise into the caller
-        return failure(STAGE_BUILD, f"{type(e).__name__}: {e}", feature_id=feature_id)
-    return success(feature_id=feature_id, document=doc.Name, body=body.Name,
-                   spreadsheet=sheet.Name if sheet is not None else "",
-                   dropped=dropped, parameters={})
-
-
-def macro_text(plan: dict) -> str:
-    """S8 (B-5): a FreeCAD ``.FCMacro`` that replays ``plan`` through the SAME builder
-    (``apply_plan``) — a cheap, dependency-free parametric deliverable: the macro
-    embeds the plan as a dict literal, so editing its values and rerunning rebuilds
-    the model. Pure text generation; no document access."""
-    import os
-    import pprint
-
-    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    return f'''# Oscar reconstruction plan macro (S8) — edit the PLAN values and rerun.
-# Replays the SAME FeaturePlan the session built (oscar.plan.builder.apply_plan).
-import sys
-
-sys.path.insert(0, {root!r})
-import FreeCAD as App  # noqa: E402
-from oscar.plan import builder  # noqa: E402
-
-PLAN = {pprint.pformat(plan, width=100, sort_dicts=False)}
-
-doc = App.newDocument("OscarRecon")
-report = builder.apply_plan(doc, PLAN)
-print("built:" if report.get("success") else "failed:", report)
-'''

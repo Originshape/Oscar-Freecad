@@ -57,8 +57,7 @@ VALID_TARGETS = ("freecad",)   # other CAD backends register here
 VALID_UNITS = ("mm",)          # the builder interprets every number as millimetres
 
 SKETCH_SHAPES = ("rectangle", "circle", "slot", "profile")
-FEATURE_OPS = ("sketch", "pad", "pocket", "revolution", "groove", "hole",   # the v1 vocabulary
-               "sweep", "sweep_cut", "loft", "loft_cut")
+FEATURE_OPS = ("sketch", "pad", "pocket", "revolution", "hole")   # the v1 vocabulary
 
 # keys each level of a plan may carry; anything else is an error (features,
 # profiles, planes, segments, parameters) or a warning (top level, frame)
@@ -67,7 +66,7 @@ PLAN_KEYS = ("schema_version", "id", "part_class", "units", "target", "frame",
 PLAN_KEYS_V2 = PLAN_KEYS + ("parts", "assembly", "references")
 PARAM_KEYS = ("value", "expr", "evidence", "assumption", "note", "source")
 # where a parameter's number comes from (v2 ``source`` = {kind, ref})
-SOURCE_KINDS = ("user_requirement", "datasheet", "step_measurement", "scan_fit",
+SOURCE_KINDS = ("user_requirement", "datasheet", "step_measurement",
                 "standard", "derived", "assumption")
 SOURCE_KEYS = ("kind", "ref", "note")
 FRAME_KEYS = ("origin", "planes", "axes", "note")
@@ -80,15 +79,9 @@ FEATURE_KEYS = {
                "invert"),
     "revolution": ("id", "op", "note", "sketch", "axis", "angle", "midplane",
                    "invert"),
-    "groove": ("id", "op", "note", "sketch", "axis", "angle", "midplane",
-               "invert"),
     "hole": ("id", "op", "note", "plane", "position", "diameter", "through",
              "depth", "exact", "counterbore", "countersink",
              "cb_diameter", "cb_depth", "cs_diameter", "cs_angle"),
-    "sweep": ("id", "op", "note", "sketch", "spine", "mode"),
-    "sweep_cut": ("id", "op", "note", "sketch", "spine", "mode"),
-    "loft": ("id", "op", "note", "sketch", "sections", "ruled"),
-    "loft_cut": ("id", "op", "note", "sketch", "sections", "ruled"),
 }
 PROFILE_KEYS = {
     "rectangle": ("shape", "width", "height", "center", "note"),
@@ -177,45 +170,6 @@ def ops_for(version: Any) -> tuple[str, ...]:
     return tuple(n for n, o in OPS.items() if o.since <= v)
 
 
-# Use-instead hints for the keys models guess wrong most often (Issue 003 Area 2): appended to the
-# unknown-key error so the fix is named in the same round. Keyed by key alone (generic, every op).
-KEY_HINTS = {
-    "axis": "the drill direction comes from the plane normal, not a key",
-    "x": "position {x, y} is in the sketch plane's own axes",
-    "y": "position {x, y} is in the sketch plane's own axes",
-    "z": "position {x, y} is in the sketch plane's own axes",
-    "radius": "a circle is dimensioned by diameter",
-    "reversed": "the key is 'invert'",
-    "path": "a sweep's guide sketch key is 'spine'",
-}
-
-# The orientation / sourcing conventions every plan shares (kept beside the generator below).
-_REFERENCE_NOTES = (
-    "Conventions: profiles centre on the plane origin; a pad extrudes along the plane normal, "
-    "holes and pockets cut along the plane's NEGATIVE normal — put the plane origin at the entry "
-    "face with the normal pointing OUT of the material; position {x, y} is in the sketch plane's "
-    "own axes (its x_dir, default the least-aligned world axis).",
-    "Parameters: source kind derived needs an expr formula over other parameters; every source.ref "
-    "says where the number comes from (at least 8 characters).",
-    "Side-face hole example: plane {normal: [1, 0, 0], origin: at that face's centre}, "
-    "position {x: 0, y: 0}, diameter <parameter>, through: true drills inward.",
-)
-
-
-def plan_reference() -> str:
-    """A compact, GENERATED vocabulary of the plan schema (Issue 003 Area 2): every
-    registered op with its keys and required fields, plus the shared conventions.
-    Rendered from ``OPS`` itself so it cannot drift from the validator. Pure."""
-    lines = ["PLAN VOCABULARY (generated from the validator's registry):"]
-    for name in sorted(OPS):
-        spec = OPS[name]
-        req = ", ".join(sorted(spec.required)) or "-"
-        lines.append(f"{name} ({spec.kind}, post {spec.post or '-'}): "
-                     f"keys {', '.join(sorted(spec.keys))}; required: {req}")
-    lines.extend(_REFERENCE_NOTES)
-    return "\n".join(lines)
-
-
 @dataclass
 class VCtx:
     """What an op validator sees: the plan pieces and the sink for messages.
@@ -280,8 +234,7 @@ def _unknown_keys(obj: dict, allowed, what: str, errors: list[str],
     for key in obj:
         if key in allowed:
             continue
-        hint = f"; {KEY_HINTS[key]}" if key in KEY_HINTS else ""
-        msg = (f"{what}: unknown key {key!r}{suggest(key, allowed)}{hint}"
+        msg = (f"{what}: unknown key {key!r}{suggest(key, allowed)}"
                f" (known: {', '.join(sorted(map(str, allowed)))})")
         (warnings if warnings is not None else errors).append(msg)
 
@@ -968,52 +921,6 @@ def _check_revolution_op(feat: dict, fid: str, vc: VCtx) -> None:
 
 MAX_PROFILES = 24              # profiles in one sketch
 
-# sweep modes (PartDesign Pipe's Mode, the ones a plan can express: Auxiliary
-# needs an auxiliary spine, Binormal a vector — neither is in the vocabulary)
-SWEEP_MODES = ("standard", "frenet", "fixed")
-
-
-def _check_sweep_op(feat: dict, fid: str, vc: VCtx) -> None:
-    """``sweep`` / ``sweep_cut``: the mode enum, and the profile must be a
-    DIFFERENT sketch than the spine."""
-    mode = feat.get("mode", "standard")
-    if mode not in SWEEP_MODES:
-        vc.errors.append(f"feature {fid}: {feat['op']}.mode {mode!r} not in "
-                         f"{list(SWEEP_MODES)}{suggest(mode, SWEEP_MODES)}")
-    if isinstance(feat.get("spine"), str) and feat["spine"] == feat.get("sketch"):
-        vc.errors.append(f"feature {fid}: {feat['op']} sweeps the profile "
-                         f"sketch {feat.get('sketch')!r} along itself; give a "
-                         f"separate 'spine' guide sketch")
-
-
-def _check_loft_op(feat: dict, fid: str, vc: VCtx) -> None:
-    """``loft`` / ``loft_cut``: ``sections`` is a non-empty list of EARLIER
-    sketch ids, none repeating and none equal to the profile sketch."""
-    op = feat["op"]
-    sections = feat.get("sections")
-    if not isinstance(sections, list) or not sections:
-        vc.errors.append(f"feature {fid}: {op} requires 'sections': a non-empty "
-                         f"list of earlier sketch ids (the profile grows "
-                         f"through them in order)")
-        return
-    sketches = vc.sketches()
-    for i, ref in enumerate(sections):
-        if not isinstance(ref, str) or ref not in sketches:
-            vc.errors.append(f"feature {fid}: {op}.sections[{i}] references "
-                             f"sketch {ref!r} which does not precede it")
-    dupes = sorted({r for r in sections if isinstance(r, str)
-                    and sections.count(r) > 1})
-    if dupes:
-        vc.errors.append(f"feature {fid}: {op}.sections repeats {dupes}; each "
-                         f"section is one sketch")
-    if feat.get("sketch") in sections:
-        vc.errors.append(f"feature {fid}: {op} names its own profile sketch "
-                         f"{feat.get('sketch')!r} as a section; sections come "
-                         f"after the profile")
-    if "ruled" in feat and not isinstance(feat["ruled"], bool):
-        vc.errors.append(f"feature {fid}: {op}.ruled must be true or false, "
-                         f"got {feat['ruled']!r}")
-
 
 def _register_v1_ops() -> None:
     """The v1 vocabulary as registry entries (the keys, dimensional fields
@@ -1031,21 +938,10 @@ def _register_v1_ops() -> None:
     register_op(OpSpec("revolution", "solid", "additive",
                        FEATURE_KEYS["revolution"], dims={"angle": "angle360"},
                        refs={"sketch": "sketch"}, check=_check_revolution_op))
-    register_op(OpSpec("groove", "solid", "subtractive", FEATURE_KEYS["groove"],
-                       dims={"angle": "angle360"},
-                       refs={"sketch": "sketch"}, check=_check_revolution_op))
     register_op(OpSpec("hole", "solid", "subtractive", FEATURE_KEYS["hole"],
                        required=("diameter",),
                        dims={"diameter": "positive", "depth": "positive"},
                        check=_check_hole_op))
-    for _op, _post in (("sweep", "additive"), ("sweep_cut", "subtractive")):
-        register_op(OpSpec(_op, "solid", _post, FEATURE_KEYS[_op],
-                           refs={"sketch": "sketch", "spine": "sketch"},
-                           check=_check_sweep_op, nondim=("spine", "mode")))
-    for _op, _post in (("loft", "additive"), ("loft_cut", "subtractive")):
-        register_op(OpSpec(_op, "solid", _post, FEATURE_KEYS[_op],
-                           refs={"sketch": "sketch"}, check=_check_loft_op,
-                           nondim=("sections", "ruled")))
 
 
 def validate(plan: dict) -> tuple[bool, list[str], list[str]]:
@@ -1255,28 +1151,18 @@ def _validate_plan(plan: dict, errors: list[str], warnings: list[str]) -> None:
     # -- cross checks over the whole plan ---------------------------------------
     _check_ranges(plan, values, errors)
     _check_relations(plan, values, errors, warnings)
-    # an OPEN polyline is legal in one place: as the guide wire (``spine``) a
-    # later sweep sweeps along — never as a consumed profile (``sketch`` of a
-    # pad / pocket / revolution / groove / sweep / loft feature)
-    spines = {f.get("spine") for f in features if f.get("op") in ("sweep",
-                                                                  "sweep_cut")}
-    consumed = {f.get("sketch") for f in features
-                if isinstance(f.get("sketch"), str)}
     for feat in features:
         if feat.get("op") not in ("sketch", "boss"):
             continue
-        open_guide = (feat.get("id") in spines and feat.get("id") not in consumed)
         for prof in feature_profiles(feat):
             if prof.get("shape") != "profile":
                 continue
             gap = _profile_gap(prof, values)
-            if gap is not None and gap > 1e-3 and not open_guide:
+            if gap is not None and gap > 1e-3:
                 errors.append(f"feature {feat.get('id')}: profile is not "
                               f"closed — the last segment ends {gap:g} mm "
                               f"from the start; end the last segment at the "
-                              f"start point"
-                              + ("" if feat.get("id") not in spines else
-                                 " (or keep it open ONLY as a sweep spine)"))
+                              f"start point")
     sketch_owner = {f"{f['id']}_sketch": f["op"] for f in features
                     if f.get("op") in ("hole", "boss")
                     and isinstance(f.get("id"), str)}
@@ -1290,7 +1176,7 @@ def _validate_plan(plan: dict, errors: list[str], warnings: list[str]) -> None:
                   "evidence", "detail", "op", "note", "id", "plane",
                   "frame_plane", "frame_axis", "sketch", "type", "shape",
                   "of", "edges", "open_faces", "face", "axis", "part", "kind",
-                  "name", "ref", "body", "spine", "sections", "mode"}
+                  "name", "ref", "body"}
 
     def walk(node: Any) -> None:
         if isinstance(node, dict):

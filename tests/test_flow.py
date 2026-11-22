@@ -1255,44 +1255,5 @@ class PlanEvidenceTest(unittest.TestCase):
                 self.assertEqual(ledger.step(sid).hint_tools[0], "apply_feature_plan", (text, sid))
 
 
-class ReconstructionGateTest(unittest.TestCase):
-    """Issue 003 Area 5: a reconstruction turn with an imported reference is only validated
-    when the comparison rows were recorded (compare_to_reference ran last)."""
-
-    cfg = AgentConfig()
-
-    def reconstruction(self, status):
-        ledger = built_plate()
-        ledger.request = "Convert the imported STEP model into an editable parametric body"
-        ledger.intent = "generic_part"
-        ledger.reference_status = status
-        return ledger
-
-    def test_a_reference_without_comparison_rows_is_not_validated(self):
-        verdict = finish_gate(self.reconstruction("user-attached"), state(validation=good_validation()), self.cfg)
-        self.assertFalse(verdict.ok)
-        self.assertIn("RECONSTRUCTION_UNVERIFIED", verdict.codes)
-        self.assertIn("compare_to_reference", verdict.nudge)
-
-    def test_the_recorded_comparison_settles_it(self):
-        validation = good_validation(ran=["health", "reference.deviation"])
-        self.assertTrue(finish_gate(self.reconstruction("user-attached"), state(validation=validation), self.cfg).ok)
-
-    def test_no_reference_or_no_reconstruction_wording_no_code(self):
-        validation = good_validation()
-        self.assertTrue(finish_gate(self.reconstruction("none"), state(validation=validation), self.cfg).ok)
-        plate = built_plate()
-        plate.reference_status = "user-attached"
-        self.assertTrue(finish_gate(plate, state(validation=validation), self.cfg).ok)
-
-    def test_the_wording_matches_any_capitalisation(self):
-        for request in ("Reconstruct this imported model as an editable parametric part",
-                        "convert the stl into a parametric body"):
-            ledger = built_plate()
-            ledger.request, ledger.intent, ledger.reference_status = request, "generic_part", "step-imported"
-            verdict = finish_gate(ledger, state(validation=good_validation()), self.cfg)
-            self.assertIn("RECONSTRUCTION_UNVERIFIED", verdict.codes, request)
-
-
 if __name__ == "__main__":
     unittest.main()

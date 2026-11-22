@@ -120,31 +120,6 @@ def _is_ascii_stl(body: bytes) -> bool:
     return b"facet" in window or b"endsolid" in window
 
 
-def ply_facts(head: bytes) -> "dict | None":
-    """The PLY header's element counts: ``{"vertices", "faces", "point_cloud"}`` — ``None`` when the data is
-    not a PLY whose header ends inside ``head``. A vertices-only PLY is a POINT CLOUD: that fact is what the
-    import reports, instead of an opaque 'no faces' importer failure."""
-    body = head.lstrip(b"\xef\xbb\xbf \t\r\n")
-    if not body.startswith(b"ply"):
-        return None
-    window = body[:SNIFF_BYTES].lower()
-    end = window.find(b"end_header")
-    if end < 0:
-        return None
-    vertices = None
-    faces = 0
-    for line in window[:end].splitlines():
-        parts = line.split()
-        if len(parts) >= 3 and parts[0] == b"element":
-            if parts[1] == b"vertex" and parts[2].isdigit():
-                vertices = int(parts[2])
-            elif parts[1] == b"face" and parts[2].isdigit():
-                faces = int(parts[2])
-    if vertices is None:
-        return None
-    return {"vertices": vertices, "faces": faces, "point_cloud": faces == 0}
-
-
 def _is_iges(body: bytes) -> bool:
     first = body.split(b"\n", 1)[0].rstrip(b"\r")
     return len(first) >= 73 and first[72:73] == b"S" and first[73:80].strip().isdigit()

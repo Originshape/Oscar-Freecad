@@ -29,8 +29,7 @@ KNOWN_TOOLS = frozenset({
     "feature_tree_status", "run_fem_analysis", "find_reference_part", "source_reference_part",
     "import_reference_part", "measure_reference_part", "enclosure_spec", "build_enclosure", "add_cutout",
     "add_vents", "set_parameters", "get_parameters", "bind_expression", "set_parameter", "validate_model",
-    "check_fit", "compare_to_reference", "save_document", "export_model", "export_rebuild_script", "ask_user", "web_search",
-    "fetch_url", "reconstruct_mesh",
+    "check_fit", "save_document", "export_model", "export_rebuild_script", "web_search", "fetch_url",
 })
 
 __all__ = ["CORE", "LITE", "PLAYBOOKS", "PHASE_GUIDANCE", "TEMPLATES", "FINAL_REPORT_TEMPLATE", "KNOWN_TOOLS",
@@ -39,15 +38,15 @@ __all__ = ["CORE", "LITE", "PLAYBOOKS", "PHASE_GUIDANCE", "TEMPLATES", "FINAL_RE
 _TOOL_REF = re.compile(r"`([a-z][a-z0-9_]*)(?:\([^`]*\))?`")
 
 FINAL_REPORT_TEMPLATE = (
-    "FINAL REPORT (at most 20 lines; the app appends the Build Summary with tree and parameters: do not restate it). "
-    "For an ordinary completed construction, write exactly two concise paragraphs: (1) work completed; (2) actual "
-    "validation, results, warnings and limits. Use simple engineering language; no tool dumps or invented measurements. "
-    "Clarification, approval, failure and refusal use their needed format.\n"
-    "1. Result and project path.\n"
-    "2. Requirements R1..Rn: done, partial or not done.\n"
-    "3. Decisions, assumptions and sourcing outcome.\n"
-    "4. Checks actually run and what was NOT validated.\n"
-    "5. What you need from the user. Never claim a check you did not run."
+    "FINAL REPORT (at most 20 lines; the app appends the Build Summary with tree, parameters and provenance: "
+    "do not restate them):\n"
+    "1. Result: one sentence and the project path.\n"
+    "2. Requirements: R1..Rn each \"done\", \"partial\" or \"not done\" with one clause.\n"
+    "3. Decisions and assumptions: the parameters you chose and why; the sourcing outcome in plain words.\n"
+    "4. Validated vs NOT validated: the checks you ran this turn with their results, then what was NOT "
+    "validated (for example no STEP-based collision check without a real STEP file). Only recorded checks "
+    "count. Never claim a check you did not run.\n"
+    "5. What you need from the user: blocked items, files to attach, choices."
 )
 
 # A section is (heading, sentences); a sentence naming a known tool in backticks needs that tool offered.
@@ -59,14 +58,6 @@ _CORE_SECTIONS: tuple[_Section, ...] = (
         "millimetres and degrees.",
         "Each user message ends with an app <workspace_state> block, accurate at turn start; after tool calls "
         "trust the results.",
-    )),
-    ("CONVERSATION AND CLARIFICATION", (
-        "Inspect the document and evidence first. Ask only when different answers would materially change the model; "
-        "otherwise proceed on reliable evidence and state material assumptions. Never present a guess as measured.",
-        "For an essential uncertain plan step, mark it blocked with `plan_update`, then call `ask_user` with one "
-        "specific question and two to four grounded options, the likeliest first; batch related questions of one "
-        "stage into one wizard; do not continue the uncertain geometry until answered; never re-ask an answered "
-        "question. If no grounded choices exist, ask plainly and keep the step blocked.",
     )),
     ("HOW THE WORK RUNS", (
         "Phases: INTAKE (request and plan), SOURCE (find the real part), PLAN, PARAMS (Params sheet), BUILD "
@@ -84,24 +75,36 @@ _CORE_SECTIONS: tuple[_Section, ...] = (
         "If a step is impossible, do the remaining steps and say what blocked.",
     )),
     ("HOUSING/ENCLOSURE AROUND A REAL PART", (
-        "Find/source the real part with `find_reference_part` and `source_reference_part`; never invent URLs or retry. "
-        "If unavailable, say nominal data is used. `download_file` is for other downloads. Import attachments with "
-        "`import_file`; for STEP, use `import_reference_part`, `measure_reference_part`, update Params and `check_fit`. "
-        "For enclosures, call `enclosure_spec`, build each missing stage with `build_enclosure`, setting parameters "
-        "between stages. Validate, check fit, fix issues and `export_model`.",
+        "Source the real part with `find_reference_part`, then `source_reference_part`: never invent a URL, one "
+        "download attempt at most; on failure or decline the app falls back to nominal catalog data: say so.",
+        "`download_file` is for other downloads only.",
+        "Attached CAD files arrive as paths: import them with `import_file`.",
+        "Wrap an attached STEP with `import_reference_part`; for a late attachment also "
+        "`measure_reference_part`, diff against Params, apply the deltas, `check_fit`.",
+        "Enclosure order: `enclosure_spec` first, then `build_enclosure` once per stage (shell, standoffs, "
+        "ports, lid, vents, hooks, assembly; stage next = the next missing one) until every stage is built.",
+        "Between: `measure_reference_part` (imported STEP), `set_parameters` (other dimensions).",
+        "Then `validate_model` and `check_fit`, fix what they report, `export_model`, report.",
     )),
     ("PARAMETERS AND NAMING", (
-        "Store driving dimensions in `Params` (lower_snake_case, unit, source) and bind by expression. "
-        "`set_parameters` writes the table; `set_parameter` changes one value. One Body or kit part per part; never "
-        "fuse. Name objects `Params`, `Shell`, `Lid`, `Ref_<BOARD>` or `<Part>_<Feature>`. Sources: user_requirement, "
-        "datasheet, step_measurement, standard, derived, assumption.",
+        "Every driving dimension lives in the `Params` spreadsheet (aliases lower_snake_case, unit in the cell); "
+        "features are bound to it by expression.",
+        "`set_parameters` writes the table, `set_parameter` changes one value.",
+        "One Body or kit part per part; booleans only within one part or for assembly checks; "
+        "never fuse parts.",
+        "Names: `Params`, `Shell`, `Lid`, `Ref_<BOARD>`, `<Part>_<Feature>`.",
+        "Parameter rows: name | value | unit | source | note; source is one of user_requirement, datasheet, "
+        "step_measurement, standard, derived, assumption.",
     )),
     ("TOOLS AND VERIFICATION", (
-        "Use `get_view` once per finished step, include_screenshot=false otherwise. Use `execute_code` for loops or "
-        "unsupported features; `create_object` / `edit_object` for single features. Overshoot cutters 1 mm. On failure, "
-        "inspect `get_objects`, remove leftovers and retry smaller. Fix non-OK [health] before continuing. Never "
-        "download in `execute_code`; denied permission is final. `web_search` and `fetch_url` find datasheets; "
-        "network lookup needs user approval.",
+        "One `get_view` per finished step; include_screenshot=false on every other call.",
+        "Use `execute_code` for loops, arrays and whatever the structured tools or the kit cannot express "
+        "(free-form), `create_object` / `edit_object` for single features; cutting tools "
+        "overshoot by 1 mm.",
+        "If a call fails: `get_objects`, remove leftovers, resubmit a smaller idempotent script.",
+        "Every result ends with a [health] line: if it is not OK, fix it before building on it.",
+        "Never download from `execute_code`; a declined permission is final.",
+        "`web_search` and `fetch_url` find datasheets; the user approves network access first.",
     )),
 )
 
@@ -111,13 +114,6 @@ _LITE_SECTIONS: tuple[_Section, ...] = (
         "degrees.",
         "Each user message ends with a <workspace_state> block: accurate at the start of the turn; after tool "
         "calls trust the results.",
-    )),
-    ("CONVERSATION AND CLARIFICATION", (
-        "Inspect document/evidence first; ask only when different answers would materially change the model.",
-        "For essential uncertainty, block the step with `plan_update`; call `ask_user` with two to four grounded "
-        "options, the likeliest first; batch related questions into one wizard; do not continue the uncertain "
-        "geometry until answered. Otherwise ask plainly and stay blocked. Never present guesses as measured; "
-        "state assumptions.",
     )),
     ("EXECUTION CONTRACT", (
         "A work request is finished when the geometry exists, never when a plan has been described: never end the "
@@ -140,9 +136,13 @@ _LITE_SECTIONS: tuple[_Section, ...] = (
         "parametric.",
     )),
     ("TOOLS", (
-        "Use `get_view` per finished step. On failure inspect `get_objects`, remove leftovers, and retry smaller. "
-        "Fix non-OK [health]; never claim unrun checks. For completed builds, answer in exactly two concise "
-        "paragraphs: work done, then validation and limits.",
+        "Use `get_view` once per finished step.",
+        "If a call fails: `get_objects`, remove leftovers, resubmit a smaller script.",
+        "A [health] line that is not OK must be fixed first. Never claim a check you did not run.",
+    )),
+    ("FINAL REPORT (at most 20 lines)", (
+        "Result and project path; requirements R1..Rn as done, partial or not done; decisions and assumptions; "
+        "validated vs NOT validated (only checks you ran); what you need from the user.",
     )),
 )
 
@@ -170,31 +170,10 @@ _PLAYBOOK_SECTIONS: dict[str, tuple[_Section, ...]] = {
             "Several parts (a base and a lid): one entry in parts each, with its own placement parameters; parts are "
             "never fused.",
             "If the call fails, fix the field the error names (it suggests the spelling) and send the whole plan "
-            "again; `reapply_plan_feature` repairs one feature. If the same feature fails twice, do not fall back "
-            "to loose Part primitives and booleans (not parametric, cutters left visible): fix the named field or "
-            "reshape that one feature. Only when the plan truly cannot express the shape, `execute_code` may — "
-            "hide every helper cutter, leave one final solid, and say in the report the part is non-parametric.",
+            "again; `reapply_plan_feature` repairs one feature.",
             "Then `validate_model`. To resize, change the parameter, not the geometry.",
             "Only what no plan op can express goes to `execute_code`: bind its dimensions to the Params sheet and "
             "say in the final report that this piece is not parametric.",
-        )),
-    ),
-    "reconstruction": (
-        ("PLAYBOOK reconstruction (rebuild an imported reference as an editable parametric model)", (
-            "Import with `import_file`; measure with `measure_reference_part` (or analyse a mesh with "
-            "`reconstruct_mesh`). Never estimate a dimension from a screenshot when it can be measured.",
-            "Set driving dimensions with `set_parameters` before building (source step_measurement for measured "
-            "values, `assumption` for estimates). Use `apply_feature_plan` where possible; otherwise use "
-            "`create_object` / `edit_object` without changing or fusing the reference.",
-            "Run `validate_model`, then `compare_to_reference` as the last check; report deviations verbatim. "
-            "Pass object and reference by name. Never delete the imported reference until `compare_to_reference` "
-            "has run.",
-            "MESH SCANS: run `reconstruct_mesh` mode='analyse' first. Treat its dimensions, topology, quality, "
-            "coverage, units and recognition as measured evidence; label feature intent and estimated dimensions "
-            "as inference or assumption. Use mode='plan' to review supported operations and validation before building. "
-            "Build only a valid supported plan; ask about unresolved material choices or state unsupported limits. "
-            "Repair uses Oscar's approval UI; tool arguments never authorize it. Preserve the source and report "
-            "the RESULT CLASS and measured validation rows.",
         )),
     ),
     "parts_library": (
@@ -238,8 +217,7 @@ PHASE_GUIDANCE: dict[str, str] = {
     ),
     "VERIFY": (
         "Run `validate_model` and `check_fit`; fix every FAIL row and health error (for an enclosure change the "
-        "value with `set_parameter`), then run them again. A reconstruction of an imported reference also runs "
-        "`compare_to_reference` last, after `validate_model`, and reports the deviations. "
+        "value with `set_parameter`), then run them again. "
         "Exit: validation ran after the last geometry change with no errors and no FAIL rows."
     ),
     "DELIVER": (
@@ -298,20 +276,6 @@ PLAYBOOKS: dict[str, str] = {key: _render_sections(sections, None) for key, sect
 
 
 @lru_cache(maxsize=64)
-def _vocabulary_block() -> str:
-    """The generated plan vocabulary (Issue 003 Area 2): straight from the validator's
-    registry (``oscar.plan.schema.plan_reference``) so it cannot drift. ``""`` when the
-    plan package is unavailable (the prompt then simply omits it)."""
-    try:
-        from .plan import schema
-    except Exception:  # noqa: BLE001 - the prompt must never fail on an import
-        return ""
-    try:
-        return schema.plan_reference()
-    except Exception:  # noqa: BLE001
-        return ""
-
-
 def _build(lite: bool, playbooks: tuple[str, ...], names: "frozenset[str] | None") -> str:
     base = _render_sections(_LITE_SECTIONS, names) if lite else _core_text(names)
     blocks = [base]
@@ -319,10 +283,6 @@ def _build(lite: bool, playbooks: tuple[str, ...], names: "frozenset[str] | None
         text = _render_sections(_PLAYBOOK_SECTIONS[key], names)
         if text:
             blocks.append(text)
-    if "structured_part" in playbooks:
-        vocabulary = _vocabulary_block()
-        if vocabulary:
-            blocks.append(vocabulary)
     return "\n\n".join(blocks)
 
 

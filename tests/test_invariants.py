@@ -230,7 +230,7 @@ class I2BuildSummaryTest(RealFlowCase):
         result = self.work()
         not_validated = self.section(result.text, "NOT validated")
         for unrecorded in ("Clearances", "Part-to-part interference", "Snap-fit retention", "Port openings",
-                           "Printability", "Parameter editability"):
+                           "Printability", "Parameter editability", "STEP-based collision check"):
             self.assertIn(unrecorded, not_validated)
 
     def test_a_model_that_claims_checks_the_app_never_ran_cannot_move_them_into_validated(self):
@@ -241,7 +241,7 @@ class I2BuildSummaryTest(RealFlowCase):
         validated = self.section(result.text, "Validated")
         for word in ("clearance", "snap", "collision", "interference", "port"):
             self.assertNotIn(word, validated.lower())
-        self.assertIn("Part-to-part interference", self.section(result.text, "NOT validated"))
+        self.assertIn("STEP-based collision check", self.section(result.text, "NOT validated"))
 
     def _self_validated(self):
         doc = self.doc_name("I2v")
@@ -514,7 +514,7 @@ class I4ProvenanceTest(RealFlowCase):
         self.assertEqual(project.read_provenance()["reference"]["status"], "none")
         self.assertEqual(project.read_provenance()["entries"], [])
         self.assertIn("reference status: none", result.text)
-        self.assertIn("Part-to-part interference", self.section(result.text, "NOT validated"))
+        self.assertIn("STEP-based collision check", self.section(result.text, "NOT validated"))
 
     def test_catalog_nominal_records_source_and_status_and_has_no_hash(self):
         result = self.source_then_build()
@@ -527,7 +527,7 @@ class I4ProvenanceTest(RealFlowCase):
     def test_the_catalog_nominal_summary_cannot_claim_a_step_based_check(self):
         result = self.source_then_build(final="Verified against the real STEP file, collision check passed.")
         self.assertIn("reference status: catalog-nominal", result.text)
-        self.assertIn("Part-to-part interference", self.section(result.text, "NOT validated"))
+        self.assertIn("STEP-based collision check", self.section(result.text, "NOT validated"))
         self.assertNotIn("STEP", self.section(result.text, "Validated"))
         provenance = self.section(result.text, "Provenance")
         self.assertIn("**catalog-nominal**", provenance)
@@ -551,7 +551,7 @@ class I4ProvenanceTest(RealFlowCase):
         result = self.source_then_build(import_step=True)
         text = result.text
         self.assertIn("reference status: step-imported", text)
-        line = next(x for x in self.section(text, "NOT validated").splitlines() if "Part-to-part interference" in x)
+        line = next(x for x in self.section(text, "NOT validated").splitlines() if "STEP-based collision check" in x)
         self.assertNotIn("no reference part was sourced", line)       # a STEP is there: the reason is the check, not the source
         self.assertIn("sha256:", self.section(text, "Provenance"))
         self.assertNotIn("sha256: n/a", self.section(text, "Provenance"))
@@ -575,7 +575,7 @@ class I4ProvenanceTest(RealFlowCase):
         declined = next(e for e in self.prov["entries"] if e["status"] == "declined")
         self.assertTrue(declined["source"])
         self.assertEqual(declined["sha256"], "")
-        self.assertIn("Part-to-part interference", self.section(result.text, "NOT validated"))
+        self.assertIn("STEP-based collision check", self.section(result.text, "NOT validated"))
 
     def test_the_summary_reads_the_status_from_provenance_not_from_the_model(self):
         result = self.source_then_build(final="reference status: step-measured (I measured the real STEP).")

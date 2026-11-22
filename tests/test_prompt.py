@@ -21,15 +21,15 @@ list_documents get_objects get_object get_view plan_set plan_update record_note 
 import_file download_file get_parts_list insert_part_from_library create_object edit_object delete_object execute_code
 execute_code_async execute_code_headless get_async_status
 apply_feature_plan reapply_plan_feature feature_tree_status run_fem_analysis find_reference_part source_reference_part
-import_reference_part measure_reference_part reconstruct_mesh enclosure_spec build_enclosure add_cutout add_vents set_parameters
-get_parameters bind_expression set_parameter validate_model check_fit compare_to_reference save_document export_model ask_user
+import_reference_part measure_reference_part enclosure_spec build_enclosure add_cutout add_vents set_parameters
+get_parameters bind_expression set_parameter validate_model check_fit save_document export_model
 export_rebuild_script web_search fetch_url
 """.split())
 OPTIONAL_TOOLS = frozenset({"web_search", "fetch_url"})
 LITE_TOOLS = frozenset("""
 plan_set plan_update record_note list_documents get_objects get_object get_view create_document create_object
 edit_object execute_code import_file find_reference_part source_reference_part build_enclosure enclosure_spec
-set_parameter validate_model check_fit compare_to_reference reconstruct_mesh ask_user
+set_parameter validate_model check_fit
 """.split())
 KIT_HIDDEN = frozenset("""
 execute_code_async get_async_status execute_code_headless apply_feature_plan reapply_plan_feature
@@ -99,14 +99,6 @@ class LintTest(unittest.TestCase):
         for name, text in prompt.PLAYBOOKS.items():
             self.assertLessEqual(context.estimate_tokens_text(text), 400, name)
 
-    def test_concise_final_reply_and_grounded_clarifications_are_in_both_prompts(self):
-        for label, text in (("CORE", prompt.CORE), ("LITE", prompt.LITE)):
-            with self.subTest(prompt=label):
-                self.assertIn("exactly two concise paragraphs", text)
-                self.assertIn("different answers would materially change the model", text)
-                self.assertIn("two to four grounded", text)
-                self.assertIn("do not continue the uncertain geometry", text)
-
     def test_budget_holds_for_every_rendering_variant(self):
         for names in (None, LITE_TOOLS, CONTRACT_TOOLS - KIT_HIDDEN, CONTRACT_TOOLS - OPTIONAL_TOOLS):
             self.assertLessEqual(est(prompt.build_system_prompt(lite=False, tool_names=names)), 1100)
@@ -114,7 +106,7 @@ class LintTest(unittest.TestCase):
 
     def test_known_tools_match_the_contract_matrix(self):
         self.assertEqual(prompt.KNOWN_TOOLS, CONTRACT_TOOLS)
-        self.assertEqual(len(CONTRACT_TOOLS), 46)
+        self.assertEqual(len(CONTRACT_TOOLS), 43)
 
     def test_tool_names_exist(self):
         referenced = set()
@@ -189,7 +181,6 @@ class LintTest(unittest.TestCase):
         self.assertLessEqual(len(prompt.FINAL_REPORT_TEMPLATE.splitlines()), 20)
         self.assertIn(prompt.FINAL_REPORT_TEMPLATE, prompt.CORE)
         self.assertEqual(numbered_lists(prompt.FINAL_REPORT_TEMPLATE), [[1, 2, 3, 4, 5]])
-        self.assertIn("write exactly two concise paragraphs", prompt.FINAL_REPORT_TEMPLATE)
         self.assertIn("Build Summary", prompt.FINAL_REPORT_TEMPLATE)
 
     def test_build_system_prompt_is_deterministic_and_static(self):
@@ -216,53 +207,9 @@ class LintTest(unittest.TestCase):
         self.assertNotIn("UniqueObjectName9137", after)
 
     def test_playbook_keys_and_headings(self):
-        self.assertEqual(set(prompt.PLAYBOOKS), {"fem", "parts_library", "reconstruction", "structured_part"})
+        self.assertEqual(set(prompt.PLAYBOOKS), {"fem", "parts_library", "structured_part"})
         for key, text in prompt.PLAYBOOKS.items():
             self.assertTrue(text.startswith(f"PLAYBOOK {key}"), key)
-
-    def test_the_reconstruction_playbook_teaches_measure_build_compare(self):
-        text = prompt.PLAYBOOKS["reconstruction"]
-        for needle in ("import_file", "measure_reference_part", "set_parameters", "step_measurement",
-                       "apply_feature_plan", "compare_to_reference", "validate_model"):
-            self.assertIn(needle, text)
-        self.assertIn("Never estimate a dimension from a screenshot when it can be measured", text)
-        self.assertIn("as the last check", text, "the compare rows must be the newest validation record")
-        self.assertIn("by name", text, "name object/reference: a plain import's solid is otherwise indistinguishable")
-        self.assertIn("Never delete the imported reference", text, "the reference must survive until compare ran")
-        self.assertIn("until `compare_to_reference` has run", text)
-
-    def test_mesh_reconstruction_guidance_separates_evidence_from_inference(self):
-        text = prompt.PLAYBOOKS["reconstruction"]
-        for needle in ("mode='analyse' first", "measured evidence", "inference or assumption",
-                       "mode='plan'", "validation before building", "unsupported",
-                       "approval UI", "tool arguments never authorize it",
-                       "measured validation rows"):
-            self.assertIn(needle, text)
-
-    def test_the_structured_part_playbook_forbids_the_loose_boolean_fallback(self):
-        text = prompt.PLAYBOOKS["structured_part"]
-        self.assertIn("do not fall back", text)
-        self.assertIn("non-parametric", text)
-        self.assertIn("hide every helper cutter", text)
-        self.assertIn("one final solid", text)
-
-    def test_the_reconstruction_playbook_needs_its_tools_offered(self):
-        all_names = frozenset(prompt.KNOWN_TOOLS)
-        self.assertIn("PLAYBOOK reconstruction", prompt.build_system_prompt(playbooks=("reconstruction",),
-                                                                           tool_names=all_names))
-        without_measure = all_names - {"measure_reference_part"}
-        self.assertNotIn("Never estimate a dimension from a screenshot when it can be measured",
-                         prompt.build_system_prompt(playbooks=("reconstruction",), tool_names=without_measure))
-
-    def test_phase_guidance_mentions_the_reconstruction_flow(self):
-        self.assertIn("compare_to_reference", prompt.PHASE_GUIDANCE["VERIFY"])
-        self.assertIn("after `validate_model`", prompt.PHASE_GUIDANCE["VERIFY"], "compare runs last, after validation")
-        self.assertIn("measure_reference_part", prompt.PHASE_GUIDANCE["PARAMS"])
-
-    def test_the_structured_part_prompt_carries_the_generated_vocabulary(self):
-        text = prompt.build_system_prompt(playbooks=("structured_part",), tool_names=None)
-        self.assertIn("PLAN VOCABULARY", text)
-        self.assertIn("NEGATIVE normal", text)
 
     def test_contradictions_of_the_old_prompt_are_gone(self):
         # AUDIT F-21: batch vs one-per-call, two modelling doctrines, a doubled rule 13, a garbled 11a

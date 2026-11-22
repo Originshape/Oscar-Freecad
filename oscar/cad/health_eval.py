@@ -1025,65 +1025,23 @@ def read_param_table(doc: Any, sheet_names: tuple[str, ...] = ("Params", "Parame
     when the cell holds text); ``expr`` is the formula text (with its ``=``) when it is a real formula, ``""`` for a
     literal. ``bound`` counts the ExpressionEngine entries of the document that reference ``<sheet>.<alias>``;
     ``needs_rebuild`` marks a kit stage / count parameter that is not expression-bound (editing its cell changes
-    nothing until the stage is rebuilt).
-
-    M1 F2: with several parameter sheets in the document (``Params`` / ``Parameters`` and their
-    ``…001``-style siblings) the sheet that actually drives the geometry — the one holding the
-    expression bindings — is reported as ``sheet`` and every candidate is listed under ``sheets``
-    (``name`` / aliased ``rows`` / total ``bound``), so the inconsistency is visible instead of a
-    sheet being picked merely for its name. A single-sheet document returns exactly the old shape."""
-    family = tuple(sheet_names)
-    candidates: list = []
-    for obj in _attr(doc, "Objects", []) or []:
-        if _attr(obj, "TypeId", "") != "Spreadsheet::Sheet":
-            continue
-        names = (obj.Name, str(_attr(obj, "Label", obj.Name)))
-        if not any(n == f or n.startswith(f) for n in names for f in family):
-            continue
-        try:
-            if any(obj.getAlias(addr) for addr in obj.getUsedCells()):
-                candidates.append(obj)
-        except Exception:
-            continue
-    if not candidates:
+    nothing until the stage is rebuilt)."""
+    sheet = _find_sheet(doc, tuple(sheet_names))
+    if sheet is None:
         return {"sheet": "", "rows": []}
-
-    def refs_of(sh) -> dict:
-        counts: dict[str, int] = {}
-        ref_re = re.compile(r"(?<![\w.$])(?:%s|<<%s>>)\.([A-Za-z_]\w*)" % (
-            re.escape(sh.Name), re.escape(str(_attr(sh, "Label", sh.Name)))))
-        for obj in _attr(doc, "Objects", []) or []:
-            if obj is sh:
-                continue
-            try:
-                entries = list(obj.ExpressionEngine or [])
-            except Exception:
-                continue
-            for _path, expr in entries:
-                for alias in set(ref_re.findall(str(expr))):
-                    counts[alias] = counts.get(alias, 0) + 1
-        return counts
-
-    # M1 F2: with several parameter sheets the one that actually drives the
-    # geometry (the one holding the expression bindings) is reported and every
-    # sheet is listed, so the inconsistency is visible — a sheet is never
-    # chosen merely because it carries the expected name
-    ranked = []
-    for idx, sh in enumerate(candidates):
-        counts = refs_of(sh)
-        names = (sh.Name, str(_attr(sh, "Label", sh.Name)))
-        fam_rank = 100 + len(family)          # a suffixed sibling (…001) ranks after every exact name
-        for j, wanted in enumerate(family):
-            if any(n == wanted for n in names):
-                fam_rank = j
-                break
+    refs: dict[str, int] = {}
+    ref_re = re.compile(r"(?<![\w.$])(?:%s|<<%s>>)\.([A-Za-z_]\w*)" % (re.escape(sheet.Name),
+                                                                       re.escape(str(_attr(sheet, "Label", sheet.Name)))))
+    for obj in _attr(doc, "Objects", []) or []:
+        if obj is sheet:
+            continue
         try:
-            alias_n = sum(1 for addr in sh.getUsedCells() if sh.getAlias(addr))
+            entries = list(obj.ExpressionEngine or [])
         except Exception:
-            alias_n = 0
-        ranked.append((sum(counts.values()), fam_rank, idx, sh, counts, alias_n))
-    ranked.sort(key=lambda item: (-item[0], item[1], item[2]))
-    _, _, _, sheet, refs, _ = ranked[0]
+            continue
+        for _path, expr in entries:
+            for alias in set(ref_re.findall(str(expr))):
+                refs[alias] = refs.get(alias, 0) + 1
     stage_params = _stage_params()
     cells: list[tuple[int, str, str]] = []
     try:
@@ -1120,8 +1078,4 @@ def read_param_table(doc: Any, sheet_names: tuple[str, ...] = ("Params", "Parame
                      "source": _cell_text(sheet, f"D{row_no}").strip(), "note": _cell_text(sheet, f"E{row_no}").strip(),
                      "cell": addr, "bound": bound,
                      "needs_rebuild": bool(bound == 0 and (alias in stage_params or alias.endswith("_count")))})
-    table = {"sheet": sheet.Name, "rows": rows}
-    if len(candidates) > 1:
-        table["sheets"] = [{"name": sh.Name, "rows": alias_n, "bound": tot}
-                           for tot, _rank, _idx, sh, _counts, alias_n in ranked]
-    return table
+    return {"sheet": sheet.Name, "rows": rows}

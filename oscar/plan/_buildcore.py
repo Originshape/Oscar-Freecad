@@ -329,8 +329,7 @@ BBOX_SLACK_REL = 1e-3     # ... or this fraction of the largest extent, whicheve
 
 
 def check_postconditions(op: str, feature_id: str, before: dict,
-                         after: dict, kind: str | None = None,
-                         context: "dict | None" = None) -> dict:
+                         after: dict, kind: str | None = None) -> dict:
     """Assert what a solid feature must have done to the Body; returns the
     metrics (``volume_before/after/delta``, ``solids``, ``bbox``).
 
@@ -343,11 +342,6 @@ def check_postconditions(op: str, feature_id: str, before: dict,
     * the Body stays one valid solid;
     * the bounding box never shrinks under an additive feature and never
       grows under a subtractive or dress one, and is never degenerate.
-
-    ``context`` (subtractive features, Issue 003) carries the computed facts of an
-    actionable cut-nothing error: ``drill`` (the world direction the feature cuts)
-    and ``profile_bbox`` (the consumed profile's global box); without it the error
-    falls back to the generic hint.
 
     Raises BuildError (with the metrics) naming what to change."""
     metrics = _round_metrics(before, after)
@@ -391,22 +385,11 @@ def check_postconditions(op: str, feature_id: str, before: dict,
         raise fail(f"{op} changed nothing: volume {metrics['volume_before']:g} "
                    f"→ {metrics['volume_after']:g}; {hint}")
     if subtractive and before["solids"] and delta >= -tol:
-        facts = ""
-        if context:
-            drill = ", ".join(f"{v:g}" for v in context.get("drill") or [])
-            profile = ", ".join(f"{v:g}" for v in context.get("profile_bbox") or [])
-            material = ", ".join(f"{v:g}" for v in before["bbox"] or [])
-            facts = (f" — profile box ({profile}) in material box ({material}), "
-                     f"drills towards ({drill}); ")
-        if op == "hole":
-            hint = ("a hole has no 'invert': flip the plane normal so it points OUT of the "
-                    "material (holes drill along the plane's negative normal)")
-        else:
-            hint = ("check the sketch plane, its position, the depth and 'invert' "
-                    "(holes and pockets drill along the plane's negative normal)")
         raise fail(f"{op} cut nothing: volume {metrics['volume_before']:g} → "
                    f"{metrics['volume_after']:g}; the profile lies outside "
-                   f"the material or cuts the wrong way{facts}{'— ' if not facts else ''}{hint}")
+                   f"the material or cuts the wrong way — check the sketch "
+                   f"plane, its position, the depth and 'invert' (holes "
+                   f"drill along the plane's negative normal)")
     bb0, bb1 = before["bbox"], after["bbox"]
     if bb1 is None or any(not math.isfinite(v) for v in bb1):
         raise fail(f"{op} left no usable bounding box")

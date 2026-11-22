@@ -1116,7 +1116,7 @@ from .toolrun import (  # noqa: E402,F401
 # ``@tool`` and every registry function above exists, so that import is safe. A module that is
 # not delivered yet is tolerated; a missing DEPENDENCY inside one is a real bug and raises.
 
-_TOOL_MODULES = ("tools_flow", "tools_ask", "tools_project", "tools_ref", "tools_recon", "tools_kit", "tools_verify", "tools_web")
+_TOOL_MODULES = ("tools_flow", "tools_project", "tools_ref", "tools_kit", "tools_verify", "tools_web")
 
 
 def _import_tool_modules(modules: Iterable[str] = _TOOL_MODULES) -> list[str]:

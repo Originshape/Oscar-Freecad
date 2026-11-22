@@ -30,12 +30,11 @@ CORE_TOOLS = frozenset({
     "plan_set", "plan_update", "record_note", "list_documents", "get_objects", "get_object", "get_view",
 })
 
-# What a small-context model is offered (20 names): the CORE tools plus the ones that build.
+# What a small-context model is offered (19 names): the CORE tools plus the ones that build.
 LITE_TOOLS = CORE_TOOLS | frozenset({
     "create_document", "create_object", "edit_object", "execute_code", "import_file",
     "find_reference_part", "source_reference_part", "build_enclosure", "enclosure_spec",
-    "set_parameter", "validate_model", "check_fit", "compare_to_reference", "reconstruct_mesh",
-    "ask_user",
+    "set_parameter", "validate_model", "check_fit",
 })
 
 # Same list as ``oscar.tools.CATEGORIES`` (a test pins the equality); spelled out here so this

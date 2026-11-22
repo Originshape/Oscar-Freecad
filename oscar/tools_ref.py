@@ -718,9 +718,7 @@ def _measure_task(doc_name: str, wanted: str, write: bool, top_n: int) -> dict:
             doc.abortTransaction()
         doc.UndoMode = previous
     return {"text": text, "m": m.to_dict(), "sync": sync, "object": root.Name, "frame_applied": frame_applied, "is_ref_part": is_ref_part,
-            "ref_id": ref_id, "kind": m.kind,
-            "sha256": ((getattr(root, "OscarRefSha256", "") if "OscarRefSha256" in props else "")
-                       or (getattr(root, "OscarImportSha256", "") if "OscarImportSha256" in props else "")),
+            "ref_id": ref_id, "kind": m.kind, "sha256": getattr(root, "OscarRefSha256", "") if "OscarRefSha256" in props else "",
             "trust_label": getattr(root, "OscarRefTrust", "") if "OscarRefTrust" in props else ""}
 
 
@@ -748,8 +746,6 @@ def _measure_text(ctx, project, result: dict, doc_name: str, write: bool) -> str
     wanted = "step-measured" if (result["kind"] == "brep" and m.get("pcb") and result["is_ref_part"]) else ""
     ledger_status = getattr(ctx.ledger, "reference_status", "") if ctx.ledger is not None else ""
     base_status = status_now if status_now != "none" else (ledger_status or "none")
-    if base_status == "none" and not result["is_ref_part"]:
-        base_status = "user-attached"   # Issue 003: a measured plain import IS a user-attached reference
     new_status = "step-measured" if (wanted and base_status == "step-imported") else base_status
     claim = f"Measured {result['object']}: "
     if m.get("pcb"):
@@ -760,9 +756,6 @@ def _measure_text(ctx, project, result: dict, doc_name: str, write: bool) -> str
         claim += f", {len(m.get('connectors') or [])} connector candidates"
     else:
         claim += "bounding box " + " x ".join(_mm(v) for v in (m.get("bbox") or {}).get("size", []))
-        part = m.get("part") or {}
-        if part.get("volume"):
-            claim += f", volume {_mm(part['volume'])} mm3, {part.get('hole_count', 0)} measured hole(s)"
     note = str((m.get("frame") or {}).get("description", ""))
     label = "" if "user-attached" in (status_now, ledger_status) else str(result.get("trust_label") or "")
     source = f"measure_reference_part on {result['object']} ({'exact B-rep' if result['kind'] == 'brep' else 'mesh bounding box'})"
@@ -775,7 +768,7 @@ def _measure_text(ctx, project, result: dict, doc_name: str, write: bool) -> str
               "note": (note + (f" Params written: {', '.join(sync['written'])}." if sync["written"] else ""))[:600]}
     if len(fields["sha256"]) != 64:
         fields["sha256"] = ""
-    entry_id, record_note = _record(project, fields, result["ref_id"], _ref_name(result["ref_id"]), new_status if new_status != status_now else "")
+    entry_id, record_note = _record(project, fields, result["ref_id"], _ref_name(result["ref_id"]), new_status if new_status != base_status else "")
     extra = {"status": "measured", "reference_status": new_status, "object": result["object"], "kind": result["kind"], "provenance": entry_id,
              "written": list(sync["written"])}
     _set_extra(ctx, **extra)

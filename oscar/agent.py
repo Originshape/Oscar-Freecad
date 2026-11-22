@@ -47,7 +47,6 @@ from typing import Any, Callable, Sequence
 import FreeCAD
 from PySide import QtCore
 
-from . import askuser as _askuser
 from . import context as _context
 from . import loopcore
 from . import params as _params
@@ -64,7 +63,7 @@ from .agent_ctx import ContextTooSmall, ContextWiring, default_validator
 from .flow_intent import is_goahead
 from .flow import (AgentConfig, FailureBreaker, Ledger, TERMINAL, TurnState, WORK, Watchdog, classify_intent,  # noqa: F401
                    compose_capped, compose_failed, compose_needs_help, compose_unverified, finish_gate,
-                   format_governor, health_label, is_continuation, resolve_mesh_intent, tool_category)
+                   format_governor, health_label, is_continuation, tool_category)
 from .providers import Message, StopRequested, ToolResult, make_provider
 from .toolctx import ToolContext, ToolOutcome, use_context
 from .turnlog import log_event
@@ -80,6 +79,7 @@ _CALL_BLOCK_TYPES = frozenset({"tool_use", "server_tool_use"})   # provider bloc
 
 def build_system_prompt(caps=None, *, lite: bool | None = None, playbooks=(), tool_names=None) -> str:
     """The static system prompt: ``prompt.build_system_prompt``; no argument = the full text.
+
     Deliberately static: it never embeds live state. The system prompt is the first thing in every request; any
     change to it invalidates the model's cached prefix and, on current Claude models, the thinking blocks replayed
     in a tool loop. Live document state travels in the user message instead (see ``workspace_snapshot``). The
@@ -355,10 +355,10 @@ class AgentWorker(ContextWiring, QtCore.QThread):
         self._stop = True
         try:
             from . import netguard as _netguard
+
             _netguard.cancel_open_questions()
         except Exception:  # noqa: BLE001 - Stop itself must never fail
             pass
-        _askuser.cancel_run(self._turn_id)   # never raises (Stop itself must never fail)
 
     def pause(self) -> None:
         """Hold the flow at the next round boundary (between provider calls and tool runs); generation in flight finishes first."""
@@ -530,14 +530,13 @@ class AgentWorker(ContextWiring, QtCore.QThread):
             if carried is not None and is_continuation(self._request, carried, attachments=self._attachments):
                 ledger, live = carried, True
                 ledger.round = 0
-                ledger.absorb_explicit_change(self._request)     # W-1: explicit change = retarget
             elif (carried is not None and carried.steps and carried.request and is_goahead(self._request)
                   and not carried.has_open_required_steps()):
                 # A bare "continue" / "yes" after a FINISHED plan is no new request: the throwaway ledger carries the ORIGINAL
                 # request, so an escalation (the model starts building) seeds a plan for it and never for the word "continue".
                 ledger, live = Ledger.from_request(carried.request, intent="other"), False
             else:
-                ledger = Ledger.from_request(self._request, mesh_intent=resolve_mesh_intent(self._request), attachments=self._attachments)
+                ledger = Ledger.from_request(self._request, attachments=self._attachments)
                 live = ledger.is_work_turn()
                 if live and carried is not None and carried.steps:
                     self._archive(carried)
@@ -1080,8 +1079,7 @@ class AgentWorker(ContextWiring, QtCore.QThread):
         flow_on = self._flow()
         self._state["flow_enforcement"] = flow_on     # run_tool reads it: the kill switch also reaches its health / ledger hooks
         return ToolContext(project=self.project, ledger=self._ledger if flow_on else None, turn_id=self._turn_id,
-                           round=self._tool_round + 1, call_id=call_id, request=self._request,
-                           conversation_id=self._session_value(), phase=self._ledger.phase if flow_on else "",
+                           round=self._tool_round + 1, call_id=call_id, phase=self._ledger.phase if flow_on else "",
                            intent=self._ledger.intent if flow_on else "", state=self._state,
                            should_stop=self._should_stop)
 
@@ -1497,3 +1495,4 @@ class AgentWorker(ContextWiring, QtCore.QThread):
             return self._result(True, compose_unverified(verdict.reasons, text, summary), "unverified", verdict.reasons)
         empty = self._empty_reply_message(stop) if not text.strip() else ""
         return self._result(False, compose_failed(verdict.reasons, empty), "failed", verdict.reasons)
+
