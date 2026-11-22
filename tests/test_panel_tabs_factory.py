@@ -5,11 +5,11 @@ import os
 import sys
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.dirname(__file__))
-from support import isolation  # noqa: E402  (the header every test that imports oscar must carry)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))   # oscar
+sys.path.insert(0, os.path.dirname(__file__))                        # tests/support
+from support import isolation  # noqa: E402
 
-isolation.isolate_process()   # sandboxed settings/projects/logs BEFORE importing oscar
+isolation.isolate_process()   # temp settings / projects / logs / cache / downloads BEFORE importing oscar
 
 from PySide import QtWidgets  # noqa: E402
 from oscar.panel_params import ParamsTab  # noqa: E402

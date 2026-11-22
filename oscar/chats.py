@@ -90,10 +90,6 @@ def new_session(title: str = "") -> dict[str, Any]:
         "project_dir": None,   # absolute folder of the chat's Project (oscar.project), set by the panel
         "ledger": None,        # the C5 ledger dict, set by the panel from plan_changed / the turn result
         "blocks_meta": [],     # compact JSON list of the rendered cards for the restore card
-        "profile_name": "",    # per-chat provider profile selection
-        "model": "",           # per-chat model override for that profile
-        "profile_selection_explicit": False,  # Settings may refresh only chats still using the global default
-        "doc_name": "",         # FreeCAD document last bound to this chat's Parameters page
     }
 
 
@@ -242,14 +238,6 @@ def _payload_of(session: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]
         payload["ledger"] = session["ledger"]
     if session.get("blocks_meta"):
         payload["blocks_meta"] = session["blocks_meta"]
-    if session.get("profile_name"):
-        payload["profile_name"] = session["profile_name"]
-    if session.get("model"):
-        payload["model"] = session["model"]
-    if session.get("profile_selection_explicit"):
-        payload["profile_selection_explicit"] = True
-    if session.get("doc_name"):
-        payload["doc_name"] = session["doc_name"]
     if session.get("named"):
         payload["named"] = True   # the user named the chat (panel_chats.rename): nothing renames it again
     turns = session.get("turns")
@@ -329,10 +317,6 @@ def load(session_id: str) -> dict[str, Any] | None:
     if isinstance(raw_messages, list) and raw_messages and not history:
         return None   # it holds messages and none can be read: not a chat, and never an empty one that a save could overwrite it with
     project_dir = data.get("project_dir")
-    profile_name = data.get("profile_name")
-    model = data.get("model")
-    doc_name = data.get("doc_name")
-    profile_selection_explicit = data.get("profile_selection_explicit")
     ledger = data.get("ledger")
     meta = data.get("blocks_meta")
     turns = data.get("turns")
@@ -346,10 +330,6 @@ def load(session_id: str) -> dict[str, Any] | None:
         "ledger": ledger if isinstance(ledger, dict) and ledger else None,
         "blocks_meta": meta if isinstance(meta, list) else [],
         "named": data.get("named") is True,
-        "profile_name": profile_name if isinstance(profile_name, str) else "",
-        "model": model if isinstance(model, str) else "",
-        "profile_selection_explicit": profile_selection_explicit is True,
-        "doc_name": doc_name if isinstance(doc_name, str) else "",
     }
     if isinstance(turns, int) and not isinstance(turns, bool) and turns >= 0:
         loaded["turns"] = turns   # absent from older chats: next_turn counts their prompts

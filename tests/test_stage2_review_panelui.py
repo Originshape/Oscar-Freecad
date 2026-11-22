@@ -671,14 +671,10 @@ class RealWorkerReviewTest(FlowTestCase):
         self.addCleanup(dispatch.shutdown)
         for patcher in (mock.patch.object(_params, "active_profile",
                                           return_value=Profile(name="t", provider="openai_compat", model="m")),
-                        mock.patch.object(_params, "active_profile_name", return_value="t"),
                         mock.patch("oscar.cad.get_engine", return_value=engine),
                         mock.patch.object(agent._tools, "run_tool", fake_run_tool)):
             patcher.start()
             self.addCleanup(patcher.stop)
-        for session in self.p.sessions:   # the panel pinned these to the sandbox default profile at init
-            session.pop("profile_name", None)
-            session.pop("model", None)
         self.addCleanup(self.stop_worker)
 
     def stop_worker(self):
@@ -710,8 +706,7 @@ class RealWorkerReviewTest(FlowTestCase):
 
         def factory(history, **kw):
             self.workers.append(kw)
-            kw = dict(kw)
-            return agent.AgentWorker(history, provider=provider, profile=kw.pop("profile", profile),
+            return agent.AgentWorker(history, provider=provider, profile=profile,
                                      validator=lambda doc, ctx: fake_validation(True), **kw)
 
         with mock.patch.object(panel, "AgentWorker", factory):
@@ -797,23 +792,18 @@ class RealWorkerReviewTest(FlowTestCase):
             calls(call("create_object", doc_name="D", obj_type="Part::Box")), say("Done.")])
         self.assertTrue(self.wait_until(self.in_tool.is_set))
         count = len(p.sessions)
-        # a new chat and switching are ALLOWED mid-turn now: the running turn keeps writing to its own
-        # chat (chats are independent). Only the destructive actions stay refused.
-        p._new_chat()
-        self.assertEqual(len(p.sessions), count + 1)
-        self.assertIsNot(p._current_session(), first)
-        p._on_chat_picked(next(i for i, s in enumerate(p.sessions) if s is first))   # and back to the turn's chat
-        self.assertIs(p._current_session(), first)
         with mock.patch.object(QtWidgets.QMessageBox, "question", return_value=QtWidgets.QMessageBox.Yes) as ask:
-            p._clear_chat()                                                  # refused while the turn runs
+            p._on_chat_picked(0)
+            p._new_chat()
+            p._clear_chat()
             p._delete_chat()
         ask.assert_not_called()                                              # refused before any dialog
-        self.assertEqual(len(p.sessions), count + 1)
         self.assertIs(p._current_session(), first)
-        self.assertTrue(first["history"])                                    # the running turn's chat is untouched
+        self.assertEqual(len(p.sessions), count)
+        self.assertEqual(p.chat_combo.currentIndex(), next(i for i, s in enumerate(p.sessions) if s is first))
+        self.assertTrue(first["history"])
         self.release.set()
         self.assertTrue(self.wait_until(lambda: p.worker is None))
-        self.assertTrue(any("Done." in (b.text or "") for b in first["blocks"]))   # its answer landed in IT
 
     def test_the_chat_file_is_saved_after_every_round_and_stays_readable(self):
         from support.scripted_llm import call, calls, say
@@ -895,12 +885,12 @@ class SettingsCommandRefreshTest(PanelTestCase):
     def test_the_open_panel_follows_the_saved_active_profile(self):
         from oscar import commands
 
-        self.assertIn("Alpha", self.p.profile_button.text())
+        self.assertEqual(self.p.profile_combo.currentText(), "Alpha")
         _params.set_active_profile("Gamma")                       # what the dialog's Save did
         with mock.patch.object(commands.Gui, "getMainWindow", create=True, return_value=self.window):
             self.assertTrue(commands.refresh_panel_profiles())
-        self.assertIn("Gamma", self.p.profile_button.text())
-        self.assertIn("m-gamma", self.p.model_label.text())
+        self.assertEqual(self.p.profile_combo.currentText(), "Gamma")
+        self.assertEqual(self.p.model_label.text(), "m-gamma")
 
     def test_without_a_panel_nothing_happens(self):
         from oscar import commands
@@ -944,13 +934,9 @@ class _SendHarness(FlowTestCase):
         for patcher in (mock.patch.object(panel, "AgentWorker", CapturingWorker),
                         mock.patch.object(_params, "active_profile",
                                           return_value=Profile(name="t", provider="openai_compat", model="m")),
-                        mock.patch.object(_params, "active_profile_name", return_value="t"),
                         mock.patch("oscar.cad.get_engine", return_value=engine)):
             patcher.start()
             self.addCleanup(patcher.stop)
-        for session in self.p.sessions:   # the panel pinned these to the sandbox default profile at init
-            session.pop("profile_name", None)
-            session.pop("model", None)
 
     def other_chat_and_back(self):
         """Open a second chat, then return to the first one (the first now has to be re-activated)."""

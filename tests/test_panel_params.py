@@ -292,16 +292,13 @@ class ParamsTabTest(ParamsTabCase):
         self.assertEqual(item_flag(tab.table.item(r, 0)), FLAG_MODIFIED)
         self.assertEqual(item_flag(tab.table.item(r, 1)), FLAG_MODIFIED)
         self.assertTrue(tab.table.item(r, 1).font().bold())
-        self.assertEqual(tab.table.item(r, 1).background().color().name(), "#3cc9c0")   # theme accent
-        self.assertEqual(tab.table.item(r, 1).background().color().alpha(), 38)
         self.assertEqual(tab.apply_btn.text(), "Apply (1)")
         self.assertTrue(tab.apply_btn.isVisibleTo(tab))
         self.assertEqual(tab.pending(), {"wall_t": "4 mm"})
         tab.table.item(r, 1).setText("3.0 mm")    # back to the same value
         self.assertEqual(item_flag(tab.table.item(r, 0)), "")
         self.assertEqual(tab.pending(), {})
-        self.assertTrue(tab.apply_btn.isVisibleTo(tab))
-        self.assertFalse(tab.apply_btn.isEnabled())
+        self.assertFalse(tab.apply_btn.isVisibleTo(tab))
 
     def test_discard_restores_the_last_refresh(self):
         tab = self.tab()
@@ -313,8 +310,7 @@ class ParamsTabTest(ParamsTabCase):
         self.assertEqual(tab.table.item(self.row_of(tab, "wall_t"), 1).text(), "3 mm")
         self.assertEqual(tab.table.item(self.row_of(tab, "plate_w"), 1).text(), "60 mm")
         self.assertEqual(item_flag(tab.table.item(self.row_of(tab, "wall_t"), 0)), "")
-        self.assertTrue(tab.apply_btn.isVisibleTo(tab))
-        self.assertFalse(tab.apply_btn.isEnabled())
+        self.assertFalse(tab.apply_btn.isVisibleTo(tab))
 
     def test_refresh_keeps_live_pending_edits_and_drops_dead_ones(self):
         tab = self.tab()
@@ -358,8 +354,7 @@ class ParamsTabTest(ParamsTabCase):
         r = self.row_of(tab, "wall_t")
         self.assertEqual(tab.table.item(r, 1).text(), "4 mm")
         self.assertEqual(item_flag(tab.table.item(r, 0)), FLAG_APPLIED)
-        self.assertTrue(tab.apply_btn.isVisibleTo(tab))
-        self.assertFalse(tab.apply_btn.isEnabled())
+        self.assertFalse(tab.apply_btn.isVisibleTo(tab))
         tab.apply()                                   # nothing modified anymore
         self.assertEqual(len(seen), 1, "an empty apply never calls the write path")
 

@@ -232,26 +232,12 @@ class TimelineTab(QtWidgets.QWidget):
         self._records: list[dict] = []
         self._snapshot_dir: str | None = None
         self._entries: list[dict] = []
-        self._visible_entries: list[dict] = []
         self._rows: dict = {}          # entry key -> _EntryRow
         self._thumbs: dict = {}        # snapshot path -> QPixmap
         self._pinned = True
 
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        toolbar = QtWidgets.QHBoxLayout()
-        toolbar.setContentsMargins(2, 0, 2, 4)
-        toolbar.addWidget(QtWidgets.QLabel("Activity"))
-        toolbar.addStretch(1)
-        self.status_filter = QtWidgets.QComboBox()
-        self.status_filter.setObjectName("timelineStatusFilter")
-        self.status_filter.addItem("All statuses", "all")
-        for label, status in (("Running", "running"), ("Completed", "completed"),
-                              ("Warning", "warning"), ("Failed", "failed"), ("Skipped", "skipped")):
-            self.status_filter.addItem(label, status)
-        self.status_filter.currentIndexChanged.connect(self._on_filter_changed)
-        toolbar.addWidget(self.status_filter)
-        root.addLayout(toolbar)
         self.empty = QtWidgets.QLabel("No activity recorded yet — steps appear here as Oscar works.")
         self.empty.setObjectName("timeline-empty")
         self.empty.setProperty("muted", True)
@@ -313,9 +299,6 @@ class TimelineTab(QtWidgets.QWidget):
     def entries(self) -> "list[dict]":
         return list(self._entries)
 
-    def visible_entries(self) -> "list[dict]":
-        return list(self._visible_entries)
-
     def is_pinned(self) -> bool:
         """True when the view follows the newest entry (the user has not scrolled up)."""
         return self._pinned
@@ -330,19 +313,8 @@ class TimelineTab(QtWidgets.QWidget):
         self._entries = build_timeline(self._records, self._snapshot_dir)
         self._render(scroll_bottom=scroll_bottom)
 
-    def _on_filter_changed(self, _index: int) -> None:
-        self._render(scroll_bottom=False)
-
     def _render(self, scroll_bottom: bool) -> None:
-        status = str(self.status_filter.currentData() or "all")
-        if status == "all":
-            visible_entries = list(self._entries)
-        else:
-            visible_entries = [entry for entry in self._entries if str(entry.get("status") or "") == status]
-        self._visible_entries = visible_entries
-        self.empty.setText("No activity recorded yet — steps appear here as Oscar works."
-                           if not self._entries else "No activity matches this status filter.")
-        self.empty.setVisible(not visible_entries)
+        self.empty.setVisible(not self._entries)
         # drop rows whose entry disappeared, reuse rows whose entry did not change
         wanted = {}
         for entry in self._entries:
@@ -360,36 +332,20 @@ class TimelineTab(QtWidgets.QWidget):
         self._rows = wanted
 
         # relayout: group sections in order of appearance, newest entry at the bottom
-        while self.column.count():
+        while self.column.count() > 1:   # keep the trailing stretch
             item = self.column.takeAt(0)
             widget = item.widget()
             if widget is not None:
                 self.column.removeWidget(widget)
-                if widget.objectName() in ("timeline-group-header", "timeline-turn-header"):
-                    widget.deleteLater()
         previous_group = ""
-        previous_turn = None
-        turn_number = 0
-        visible_keys = {entry_key(entry) for entry in visible_entries}
-        for key, row in self._rows.items():
-            row.setVisible(key in visible_keys)
-        for entry in visible_entries:
-            turn_id = str(entry.get("turn_id") or "")
-            if turn_id and turn_id != previous_turn:
-                turn_number += 1
-                turn_label = QtWidgets.QLabel(f"TURN {turn_number} · {_short(entry.get('timestamp'))}")
-                turn_label.setObjectName("timeline-turn-header")
-                self.column.addWidget(turn_label)
-                previous_group = ""
-            previous_turn = turn_id
+        for entry in self._entries:
             group = str(entry.get("group") or "")
             if group != previous_group:
-                header = QtWidgets.QLabel(_group_header(visible_entries, entry))
+                header = QtWidgets.QLabel(_group_header(self._entries, entry))
                 header.setObjectName("timeline-group-header")
                 self.column.addWidget(header)
                 previous_group = group
             self.column.addWidget(self._rows[entry_key(entry)])
-        self.column.addStretch(1)   # keep the spacer after the entries, so it cannot push them into each other
         self._sync_pulse()
         if scroll_bottom or self._pinned:
             QtCore.QTimer.singleShot(0, self._scroll_to_bottom)
@@ -425,11 +381,8 @@ class TimelineTab(QtWidgets.QWidget):
         self._pinned = value >= bar.maximum() - 2
 
     def _scroll_to_bottom(self) -> None:
-        try:
-            bar = self.scroll.verticalScrollBar()
-            bar.setValue(bar.maximum())
-        except RuntimeError:  # a queued scroll can outlive the dock during panel teardown
-            return
+        bar = self.scroll.verticalScrollBar()
+        bar.setValue(bar.maximum())
 
     # -- the running pulse -------------------------------------------------------------------
 

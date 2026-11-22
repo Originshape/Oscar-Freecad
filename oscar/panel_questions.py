@@ -38,10 +38,6 @@ Theme: the widget carries **objectNames only** (``oscarQuestionsBar``, ``oscarQu
 ``oscarQuestionSubmit``, ``oscarQuestionRecorded``) and no colours of its own, so the panel
 stylesheet (``panel_theme``) styles it; it renders unstyled but functional anywhere else.
 
-Height: the bar is capped (``max_height``, 200 px by default) so a long question can never
-grow the panel/dock — the body lives in an internal vertical-only QScrollArea and wraps its
-text; anything taller than the cap scrolls inside the bar (never sideways).
-
 No FreeCAD import: the module needs only PySide and is importable by the pure test suites.
 """
 
@@ -49,7 +45,6 @@ from PySide import QtCore, QtWidgets
 
 _ACCEPT = "Accept"
 _REJECT = "Reject"
-_DEFAULT_MAX_HEIGHT = 200
 
 
 class QuestionsBar(QtWidgets.QWidget):
@@ -59,11 +54,9 @@ class QuestionsBar(QtWidgets.QWidget):
     answered = QtCore.Signal(str)
     custom_answered = QtCore.Signal(str)
 
-    def __init__(self, payload=None, parent=None, max_height: int | None = None):
+    def __init__(self, payload=None, parent=None):
         super().__init__(parent)
         self.setObjectName("oscarQuestionsBar")
-        self._max_height = max(int(max_height), 1) if max_height else _DEFAULT_MAX_HEIGHT
-        self.setMaximumHeight(self._max_height)   # a question never sizes the panel/dock
         data = payload if isinstance(payload, dict) else {}
         self._text = str(data.get("text") or "").strip()
         self._approve = bool(data.get("approve"))
@@ -79,13 +72,6 @@ class QuestionsBar(QtWidgets.QWidget):
         self._root = QtWidgets.QVBoxLayout(self)
         self._root.setContentsMargins(0, 0, 0, 0)
         self._root.setSpacing(0)
-        # The body scrolls INSIDE this capped strip (vertical only): long questions wrap and
-        # scroll here instead of propagating their height into the panel's size hint.
-        self._scroll = QtWidgets.QScrollArea(self)
-        self._scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        self._scroll.setWidgetResizable(True)
-        self._scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self._root.addWidget(self._scroll)
         self._build_body()
         if payload is None:
             self.hide()
@@ -93,6 +79,7 @@ class QuestionsBar(QtWidgets.QWidget):
     def _build_body(self) -> None:
         """(Re)create the contents for the current ``_text`` / ``_options`` / flags."""
         if self._body is not None:
+            self._root.removeWidget(self._body)
             self._body.setParent(None)
             self._body.deleteLater()
         self._buttons = []
@@ -149,7 +136,7 @@ class QuestionsBar(QtWidgets.QWidget):
         self.recorded_label.setWordWrap(True)
         self.recorded_label.hide()
         outer.addWidget(self.recorded_label)
-        self._scroll.setWidget(body)
+        self._root.addWidget(body)
 
     def load(self, payload) -> None:
         """Show ``payload`` (the ``QuestionsBar`` dict shape) as a fresh, unanswered question.

@@ -11,8 +11,7 @@ import re
 from typing import Sequence
 
 __all__ = ["INTENTS", "WORK", "ENCLOSURE_RULES", "classify_intent", "extract_requirements", "needs_reference",
-           "is_continuation", "is_goahead", "answers_open_question", "clauses_of", "CONTINUE_RE", "REQUEST_FRAME",
-           "KEYWORD_RULES", "parametric_requested"]
+           "is_continuation", "is_goahead", "answers_open_question", "clauses_of", "CONTINUE_RE", "REQUEST_FRAME", "KEYWORD_RULES"]
 
 INTENTS = ("enclosure", "fixture", "bracket", "generic_part", "modify", "fem",
            "inspect", "deliver", "question", "other")
@@ -240,31 +239,6 @@ def needs_reference(text: str, intent: str, *, attachments: Sequence[str] = ()) 
     if not hint and part:
         hint = part.group(0)
     return True, hint[:60].strip()
-
-
-# -- parametric request --------------------------------------------------------------------------------
-
-# The core words of "drive this model from a spreadsheet", accents folded before matching: ``parametri`` covers
-# parametric / paramétrico / parametrisch / paramétrique (and Cyrillic параметрич…) and never the plain
-# "parameter" (stem "paramete"), which names a value, not a construction method. CJK terms carry no word
-# boundaries (same convention as the enclosure words).
-_PARAMETRIC_WORDS = re.compile(
-    r"\bparametri\w*\b"
-    r"|\b(?:parameter\s+(?:spreadsheet|table)|parameter-?driven|driven\s+by\s+parameters?|spreadsheet|hoja\s+de\s+"
-    r"calculo|tabla\s+de\s+parametros|tabela\s+de\s+parametros|planilha|parametertabelle|feuille\s+de\s+calcul)\b"
-    r"|\b(?:editable|bearbeitbar|modificable|editavel)\b"
-    r"|\bпараметрич\w*\b"
-    r"|参数化|参数驱动|电子表格")
-_ACCENT_FOLD = str.maketrans("áéíóúüñ", "aeiouun")
-
-
-def parametric_requested(text: str) -> bool:
-    """True when the typed request asks for a parametric, spreadsheet-driven, editable model.
-
-    Language-tolerant core words (English, Spanish, German, French); the ledger carries the flag and the
-    finish-time validation enforces it (a parametric request must not silently end as loose solids and cutters).
-    """
-    return bool(_PARAMETRIC_WORDS.search(_norm(text).translate(_ACCENT_FOLD)))
 
 
 # -- continuation --------------------------------------------------------------------------------------

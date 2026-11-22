@@ -33,7 +33,7 @@ import hashlib
 import os
 
 # The entry fields, in display order.
-ENTRY_FIELDS = ("timestamp", "turn_id", "op", "title", "explanation", "status", "result_text",
+ENTRY_FIELDS = ("timestamp", "op", "title", "explanation", "status", "result_text",
                 "error_text", "snapshot_path", "detail", "group")
 
 STATUSES = ("running", "completed", "failed", "warning", "skipped")
@@ -61,7 +61,6 @@ TOOL_GROUPS = {
     "reload_document": "plan",
     "set_parameters": "plan",
     "set_parameter": "plan",
-    "apply_parameter_edits": "plan",
     "bind_expression": "plan",
     "enclosure_spec": "plan",
     "record_note": "plan",
@@ -107,7 +106,6 @@ TOOL_EXPLANATIONS = {
     "add_vents": "Added vents",
     "set_parameters": "Set parameters on the sheet",
     "set_parameter": "Set a parameter on the sheet",
-    "apply_parameter_edits": "Applied parameter edits",
     "bind_expression": "Bound an expression to a parameter",
     "enclosure_spec": "Reviewed the enclosure specification",
     "record_note": "Recorded a project note",
@@ -284,7 +282,6 @@ def build_timeline(step_records, snapshot_dir=None) -> "list[dict]":
         snapshot = str(last.get("snapshot") or "")
         entries.append({
             "timestamp": str(first.get("ts") or ""),
-            "turn_id": str(first.get("turn_id") or ""),
             "op": str(first.get("tool") or ""),
             "title": title,
             "explanation": explanation,
@@ -300,8 +297,7 @@ def build_timeline(step_records, snapshot_dir=None) -> "list[dict]":
     statuses = [_status_of(rec) for rec in records]
     for pos, (rec, status) in enumerate(zip(records, statuses)):
         tool = str(rec.get("tool") or "")
-        if run and (str(run[-1][1].get("tool") or "") != tool or run[-1][2] != status
-                    or str(run[-1][1].get("turn_id") or "") != str(rec.get("turn_id") or "")):
+        if run and (str(run[-1][1].get("tool") or "") != tool or run[-1][2] != status):
             flush_run()
         run.append((pos, rec, status))
     flush_run()
@@ -345,7 +341,6 @@ def _entry_of(rec: dict, status: str, recovery: str, snapshot_dir: str | None) -
     result_head = str(rec.get("result_head") or "")
     return {
         "timestamp": str(rec.get("ts") or ""),
-        "turn_id": str(rec.get("turn_id") or ""),
         "op": tool,
         "title": str(rec.get("title") or tool),
         "explanation": explanation,

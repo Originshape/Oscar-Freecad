@@ -120,24 +120,18 @@ _LITE_SECTIONS: tuple[_Section, ...] = (
         "state assumptions.",
     )),
     ("EXECUTION CONTRACT", (
-        "A work request is finished when the geometry exists, never when a plan has been described: never end the "
-        "turn at a plan.",
-        "One named step per call; scripts under 40 lines; about 300 words of thinking per round, then act.",
-        "The app keeps the plan and phase (see the [governor] line), records steps and checks health: do not "
-        "save or screenshot to record. If a reply is cut off, act at once.",
+        "Finish only when geometry exists; never end the turn at a plan. One named step per call; scripts under 40 lines; "
+        "about 300 words per round. Follow the [governor] and health results; do not save or screenshot for records. "
+        "If cut off, act at once.",
     )),
     ("HOUSING/ENCLOSURE", (
-        "Source the part with `find_reference_part`, then `source_reference_part` (never invent a URL; one "
-        "attempt; else nominal data: say so).",
-        "Next `enclosure_spec`, then `build_enclosure` once per stage (shell, standoffs, ports, lid, vents, hooks, assembly).",
-        "Then `validate_model` and `check_fit`.",
-        "Anything else: `execute_code`, one named step per call.",
+        "Use `find_reference_part` / `source_reference_part` once; never invent URLs. If unavailable, say nominal data "
+        "is used. Enclosures: `enclosure_spec`, then `build_enclosure` for each missing stage, then "
+        "`validate_model` and `check_fit`. Other parts: `execute_code`, one named step per call.",
     )),
     ("PARAMETERS AND NAMING", (
-        "Dimensions live in the `Params` sheet (lower_snake_case); change one with `set_parameter`.",
-        "One part per object; never fuse parts. Names: `Params`, `Shell`, `Lid`, `Ref_<BOARD>`.",
-        "A parametric ask cannot always be honoured here: bind what you can; say in the report what is not "
-        "parametric.",
+        "Keep dimensions in `Params` (lower_snake_case, with units); edit with `set_parameter`. One part per object; "
+        "never fuse. Names: `Params`, `Shell`, `Lid`, `Ref_<BOARD>`.",
     )),
     ("TOOLS", (
         "Use `get_view` per finished step. On failure inspect `get_objects`, remove leftovers, and retry smaller. "
@@ -160,9 +154,8 @@ _PLAYBOOK_SECTIONS: dict[str, tuple[_Section, ...]] = {
     ),
     "structured_part": (
         ("PLAYBOOK structured_part (prismatic parts: plates, flanges, brackets, fixtures)", (
-            "Build prismatic parts with one structured plan, not a script (a request that says parametric or "
-            "editable means this path): choose the parameters first (name, value, where the number comes from), "
-            "then one feature per entry, then call `apply_feature_plan`.",
+            "Prefer one structured plan to a long script: choose the parameters first (name, value, where the "
+            "number comes from), then one feature per entry, then call `apply_feature_plan`.",
             "Use schema_version 2 with a parameter name for every dimension. Sketch (rectangle, circle, slot, several "
             "profiles), pad, pocket, hole, fillet, chamfer, thickness (shell), linear_pattern, polar_pattern, "
             "mirror, boss. Pick edges by rule (all_outer, vertical, top_outer, bottom_outer, edges_of_feature:<id>), "
@@ -175,8 +168,7 @@ _PLAYBOOK_SECTIONS: dict[str, tuple[_Section, ...]] = {
             "reshape that one feature. Only when the plan truly cannot express the shape, `execute_code` may — "
             "hide every helper cutter, leave one final solid, and say in the report the part is non-parametric.",
             "Then `validate_model`. To resize, change the parameter, not the geometry.",
-            "Only what no plan op can express goes to `execute_code`: bind its dimensions to the Params sheet and "
-            "say in the final report that this piece is not parametric.",
+            "Round shapes, sweeps or anything the plan cannot say: `execute_code` stays available.",
         )),
     ),
     "reconstruction": (

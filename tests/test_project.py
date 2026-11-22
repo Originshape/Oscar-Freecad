@@ -337,15 +337,6 @@ class StepRecordTest(unittest.TestCase):
         self.assertEqual(rec.index, 1)
         self.assertEqual(rec.script, "scripts/001_make-a-box.py")
 
-    def test_panel_parameter_action_is_recorded_in_the_project_journal(self):
-        rec = self.proj.record_panel_action(tool="apply_parameter_edits", title="Apply parameters",
-                                           args={"edits": [{"name": "wall_t", "value": 4.0}]},
-                                           text="wall_t: 3 mm → 4 mm", ok=True, doc="Flange", geometry=False)
-        self.assertEqual((rec.index, rec.tool, rec.doc, rec.ok), (1, "apply_parameter_edits", "Flange", True))
-        loaded = self.proj.read_steps()
-        self.assertEqual(len(loaded), 1)
-        self.assertEqual(loaded[0].args["edits"][0]["name"], "wall_t")
-
     def test_read_tools_are_not_recorded(self):
         self.assertIsNone(S.record(self.proj, tool="get_objects", mutating=False, geometry=False))
         self.assertFalse(os.path.exists(self.proj.root))
