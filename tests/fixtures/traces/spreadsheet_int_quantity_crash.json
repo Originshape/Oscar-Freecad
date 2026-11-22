@@ -52,7 +52,7 @@
             {
               "name": "execute_code",
               "args": {
-                "code": "import FreeCAD as App\nimport Part\nd = App.getDocument('{doc}')\nsheet = d.addObject('Spreadsheet::Sheet', 'Params')\nsheet.set('A1', '4')\nsheet.setAlias('A1', 'count_n')\nd.recompute()\nn = getattr(sheet.get('count_n'), 'Value', sheet.get('count_n'))\no = d.addObject('Part::Box', 'Plate')\no.Length = 10 * n\nd.recompute()\n",
+                "code": "import FreeCAD as App\nimport Part\nd = App.getDocument('{doc}')\nsheet = d.addObject('Spreadsheet::Sheet', 'Params')\nsheet.set('A1', '4')\nsheet.setAlias('A1', 'count_n')\nd.recompute()\nn = getattr(sheet.get('count_n'), 'Value', sheet.get('count_n'))\no = d.addObject('Part::Box', 'Plate')\no.setExpression('Length', 'Params.count_n * 10')\nd.recompute()\n",
                 "include_screenshot": false
               }
             }

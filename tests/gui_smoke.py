@@ -118,6 +118,7 @@ def main():
     _smoke_chats.chats_dir = lambda: os.path.join(
         tempfile.mkdtemp(prefix="oscar_smoke_chats_"))
     from oscar import bridge, params, panel as oscar_panel
+    from oscar.panel_activity import entry_key
 
     # The test writes a mock profile into the REAL user settings; back the
     # settings file up and restore it before exiting (bottom of file).
@@ -162,6 +163,18 @@ def main():
     content = dock.widget() if dock else None
     check("panel content is OscarPanel", isinstance(content, oscar_panel.OscarPanel))
     if content is not None:
+        check("dock is compact and resizable", dock.minimumWidth() == 340 and 340 <= dock.width() <= 420,
+              f"minimum={dock.minimumWidth()} width={dock.width()}")
+        check("supplied logo is loaded", not content.logo_label.pixmap().isNull())
+        content.input.clear()   # the isolated smoke home may restore a saved draft
+        QtWidgets.QApplication.processEvents()
+        check("composer starts compact", content.input.height() == 38,
+              f"height={content.input.height()} min={content.input.minimumHeight()} max={content.input.maximumHeight()}")
+        content.input.setPlainText("line one\nline two")
+        QtWidgets.QApplication.processEvents()
+        check("composer expands for multiline text", 38 < content.input.height() <= 76,
+              f"height={content.input.height()}")
+        content.input.clear()
         for _name in ("oscarLog", "oscarPlanStrip", "oscarArtifactsStrip", "oscarHeartbeat", "oscarStopButton",
                       "oscarActNowButton", "oscarAccountBadge"):
             check(f"widget {_name} exists", content.findChild(QtWidgets.QWidget, _name) is not None)
@@ -242,40 +255,29 @@ def main():
           f"rows={len(tool_rows)}")
     check("turn 1 outcome is validated (badge after the legacy header)",
           bool(cards) and cards[0].text.endswith("✓ validated"), f"card={cards[0].text if cards else None!r}")
-    # This lineage's panel pins the plan strip on the chat page (its own e2e pins it
-    # visible there); the Summary-tab pin below is checked as well.
-    check("plan strip pinned on the chat page", not content.plan_strip.isHidden())
-    content.tabs.setCurrentIndex(2)
-    check("plan strip pinned on the Summary tab", not content.plan_strip.isHidden()
+    check("exactly three tabs are present",
+          [content.tabs.tabText(i) for i in range(content.tabs.count())] == ["Chat", "Parameters", "Logs"])
+    check("plan strip is visible on Chat", not content.plan_strip.isHidden()
           and "Plan" in content.plan_strip.toPlainText(), content.plan_strip.toPlainText()[:80])
-    if hasattr(content, "summary_view"):
-        # the newer panel generation renders the Build Summary on the Summary tab
-        check("Build Summary rendered once (Summary tab, not Chat)",
-              content.log.toPlainText().count("Build Summary") == 0
-              and content.summary_view.summary_view.toPlainText().count("Build Summary") >= 1
-              and len([b for b in content.blocks if b.kind == oscar_panel.Block.SUMMARY]) <= 1,
-              f"chat={content.log.toPlainText().count('Build Summary')} "
-              f"tab={content.summary_view.summary_view.toPlainText().count('Build Summary')}")
-    else:
-        # this lineage's panel renders the Build Summary card in the chat itself
-        check("Build Summary rendered once in the chat",
-              content.log.toPlainText().count("Build Summary") == 1,
-              f"chat={content.log.toPlainText().count('Build Summary')}")
+    check("CAD snapshot preview appears in Chat",
+          any(b.kind == oscar_panel.Block.PREVIEW for b in content.blocks))
+    check("Build Summary rendered once in Chat",
+          content.log.toPlainText().count("Build Summary") == 1
+          and len([b for b in content.blocks if b.kind == oscar_panel.Block.SUMMARY]) <= 1,
+          f"chat={content.log.toPlainText().count('Build Summary')}")
+    content.tabs.setCurrentIndex(2)
+    check("plan strip stays with Chat when Logs opens", not content.plan_strip.isVisible())
     content.tabs.setCurrentIndex(0)
     check("turn 1 saved the chat's build state",
           bool((content._current_session() or {}).get("ledger")), "session ledger missing")
     snap_rows = [row for row in tool_rows if row.view is not None and row.view.snapshot_path]
-    if snap_rows and hasattr(content, "summary_view"):
+    if snap_rows:
         content.tabs.setCurrentIndex(2)
-        content.summary_view.log_btn.click()  # snapshot decoding is deferred until the detailed Log is opened
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline and not all(
-                content.summary_view.log_view.has_resource(row.call_id) for row in snap_rows):
-            QtWidgets.QApplication.processEvents()
-            time.sleep(0.01)
-        for _row in snap_rows:
-            check("log snapshot loads on demand", content.summary_view.log_view.has_resource(_row.call_id),
-                  _row.call_id)
+        entries = content.logs_view.entries()
+        rows = [content.logs_view.row(entry_key(entry)) for entry in entries if entry.get("snapshot_path")]
+        check("Logs shows recorded CAD snapshots with their timeline entries",
+              bool(rows) and all(row is not None and row.thumb_btn is not None for row in rows),
+              f"snapshots={len(rows)} from tool_rows={len(snap_rows)}")
     round1_results = [
         tr.content for m in content.history for tr in (m.tool_results or [])
     ]

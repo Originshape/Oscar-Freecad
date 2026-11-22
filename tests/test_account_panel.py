@@ -207,9 +207,9 @@ class BadgeTest(_PanelCase):
             with self.subTest(model=model):
                 self.use([Profile(**{**vars(params.account_profile()), "model": model}), _own()])
                 p = self.panel()
-                self.assertEqual(p.model_label.text(), shown)
-                p.profile_combo.setCurrentIndex(1)                  # your own provider: its model id as it is
-                self.assertEqual(p.model_label.text(), "m-own")
+                self.assertIn(shown, p.model_label.text())
+                p._select_chat_model("Mine", "m-own")
+                self.assertIn("m-own", p.model_label.text())
 
     def test_signed_in_it_shows_the_credits_and_the_account_menu(self):
         p = self.signed_in_panel()
@@ -343,7 +343,7 @@ class OnboardingCardTest(_PanelCase):
         self.use([_own(), params.account_profile()], active="Mine")
         p = self.panel()
         self.assertEqual(self.onboarding(p), [])
-        p.profile_combo.setCurrentIndex(p.profile_combo.findText("OriginShape"))
+        p._select_chat_model("OriginShape")
         self.assertEqual(len(self.onboarding(p)), 1)
         self.assertFalse(p.account_btn.isHidden())
 
@@ -360,6 +360,16 @@ class OnboardingCardTest(_PanelCase):
 
 
 class SendGateTest(_PanelCase):
+    def test_the_per_chat_model_is_passed_to_the_next_provider_request(self):
+        self.use([_own()])
+        p = self.panel()
+        p._select_chat_model("Mine", "m-specialist")
+        p.input.setPlainText("make a flange")
+        p._send()
+        self.assertEqual(len(RecordingWorker.instances), 1)
+        profile = RecordingWorker.instances[0].kw["profile"]
+        self.assertEqual((profile.name, profile.model), ("Mine", "m-specialist"))
+
     def test_signed_out_the_account_profile_starts_no_turn_and_keeps_the_text(self):
         p = self.panel()
         attachment = os.path.join(self.tmp, "notes.txt")
