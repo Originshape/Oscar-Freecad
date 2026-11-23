@@ -25,6 +25,14 @@
   the next save), and an older Oscar can still read and save the file.
 
 ### Fixed
+- **The source mesh no longer appears as a second model after a rebuild** (#5): when a finished turn
+  rebuilds an imported STL/OBJ into a solid body, the mesh it traced over is hidden at the end of the
+  turn (the body is the deliverable; the mesh stays in the tree as a reference and the saved model
+  carries the hidden state). Only meshes Oscar itself imported are hidden, and only in the document the
+  turn built the deliverable in — a scan imported for a fit check or measurement is never touched, a
+  capped or unverified build keeps its mesh visible, and a later turn does not hide a mesh the user
+  showed again on purpose. Reverting the turn brings the mesh back: the engine's turn snapshot now
+  records mesh visibility and the revert restores it.
 - **Chats are independent** (#2): a turn writes only to the chat that started it. Its transcript, plan,
   artifacts, project folder, attachments, undelivered images, unfinished composer text and turn record are
   kept per chat, and switching chats (the picker, New chat, Chat search) is allowed while a turn runs — a
