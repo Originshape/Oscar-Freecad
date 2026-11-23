@@ -113,6 +113,10 @@ class ChatIsolationTest(FlowTestCase):
                                           return_value=QtWidgets.QMessageBox.Yes)):
             patcher.start()
             self.addCleanup(patcher.stop)
+        # The panel resolves each chat's profile through its own profile list before it sends. In an
+        # isolated test the seeded "OriginShape" account profile is signed out, which would refuse every
+        # send and no worker would exist; a list without it lets the mocked ``active_profile`` answer.
+        self.p._profiles = [params.Profile(name="t", provider="openai_compat", model="m")]
 
     def send(self, text):
         self.p.input.setPlainText(text)
