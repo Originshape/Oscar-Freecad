@@ -132,8 +132,7 @@ _LITE_SECTIONS: tuple[_Section, ...] = (
     ("PARAMETERS AND NAMING", (
         "Keep dimensions in `Params` (lower_snake_case, with units); edit with `set_parameter`. One part per object; "
         "never fuse. Names: `Params`, `Shell`, `Lid`, `Ref_<BOARD>`.",
-        "A parametric ask cannot always be honoured here: bind what you can; say in the report what is not "
-        "parametric.",
+        "Say what is not parametric.",
     )),
     ("TOOLS", (
         "Use `get_view` per finished step. On failure inspect `get_objects`, remove leftovers, and retry smaller. "
@@ -167,12 +166,12 @@ _PLAYBOOK_SECTIONS: dict[str, tuple[_Section, ...]] = {
             "never fused.",
             "If the call fails, fix the field the error names (it suggests the spelling) and send the whole plan "
             "again; `reapply_plan_feature` repairs one feature. If the same feature fails twice, do not fall back "
-            "to loose Part primitives and booleans (not parametric, cutters left visible): fix the named field or "
-            "reshape that one feature. Only when the plan truly cannot express the shape, `execute_code` may — "
-            "hide every helper cutter, leave one final solid, and say in the report the part is non-parametric.",
+            "to loose Part primitives and booleans (non-parametric, cutters left visible): fix the named field or "
+            "reshape that one feature.",
             "Then `validate_model`. To resize, change the parameter, not the geometry.",
-            "Only what no plan op can express goes to `execute_code`: bind its dimensions to the Params sheet and "
-            "say in the final report that this piece is not parametric.",
+            "Only what no plan op can express goes to `execute_code`: hide every helper cutter, leave one final "
+            "solid, bind its dimensions to the Params sheet and say in the final report that this piece is not "
+            "parametric.",
         )),
     ),
     "reconstruction": (
