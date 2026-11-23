@@ -34,7 +34,7 @@ from . import toolpipe as _toolpipe
 from . import tools as _tools
 from .flow import visible_phases
 from . import flow_intent as _flow_intent
-from .flow_intent import is_goahead
+from .flow_intent import is_goahead, parametric_requested
 from .turnlog import log_event
 
 __all__ = ["ContextWiring", "ContextTooSmall", "default_validator", "playbooks_for", "inject_plan_line"]
@@ -65,7 +65,8 @@ def playbooks_for(intent: str, request: str, names: "set[str] | frozenset[str]",
                   mesh_intent: "str | None" = None) -> tuple[str, ...]:
     """The prompt playbooks that are ACTIVE for a turn: fem for fem, the parts
     library when the request names standard parts and the library tools are offered, structured_part for a
-    bracket / fixture / generic_part turn that is offered ``apply_feature_plan``, and reconstruction (Issue 003)
+    bracket / fixture / generic_part turn — or ANY turn whose request asks for a parametric, spreadsheet-driven
+    model (``flow_intent.parametric_requested``) — that is offered ``apply_feature_plan``, and reconstruction (Issue 003)
     when a work-intent request says rebuild/replicate/reverse-engineer/convert and the measure + compare tools
     are offered. W-1: a routed mesh intent activates the reconstruction playbook directly — the
     wording regex remains the FALLBACK router, never the primary one. Pure; no playbook otherwise."""
@@ -75,7 +76,7 @@ def playbooks_for(intent: str, request: str, names: "set[str] | frozenset[str]",
     if (intent in ("generic_part", "modify", "other") and "insert_part_from_library" in names
             and _PARTS_REQUEST.search(request or "")):
         books.append("parts_library")
-    if intent in _STRUCTURED_INTENTS and "apply_feature_plan" in names:
+    if (intent in _STRUCTURED_INTENTS or parametric_requested(request)) and "apply_feature_plan" in names:
         books.append("structured_part")
     if mesh_intent and "reconstruct_mesh" in names:
         books.append("reconstruction")

@@ -476,7 +476,7 @@ class ConnectPanelTest(FlowTestCase):
         # The panel names the task's model while the turn runs, then the active profile's again.
         self.assertEqual(labels[0], "Origin1 Super")
         self.assertEqual(labels[-1], params.model_display_name(params.active_profile()))
-        self.assertEqual(self.p.model_label.text(), labels[-1])
+        self.assertIn(labels[-1], self.p.model_label.text())
         # The request to the gateway names the task's model.
         profile = params.account_profile()
         profile.model = "origin1-super"

@@ -23,14 +23,15 @@ from typing import Any, Callable, Iterable, Sequence
 from .flow_guard import (BreakerVerdict, FailureBreaker, Watchdog, WatchdogConfig,  # noqa: F401  (re-exported)
                          WATCHDOG_REASONS)
 from .flow_intent import (INTENTS, KEYWORD_RULES, WORK, classify_intent, clauses_of,  # noqa: F401  (re-exported)
-                          extract_requirements, is_continuation, is_reconstruction_request, mesh_ambiguous,  # W-1
-                          mesh_operation, needs_reference)
+                         extract_requirements, is_continuation, is_reconstruction_request, mesh_ambiguous,  # W-1
+                         mesh_operation, needs_reference, parametric_requested)
 
 __all__ = [
     "PHASES", "INTENTS", "WORK", "OUTCOMES", "STEP_STATUSES", "TERMINAL", "NOT_REQUESTED",
     "NOT_VERIFIED_HEADER", "NOT_VERIFIED_FOOTER", "NO_CHANGES_TEXT", "ENCLOSURE_REQUIRED_PARAMS",
     "Requirement", "LedgerStep", "Ledger", "LedgerError",
-    "classify_intent", "extract_requirements", "needs_reference", "is_continuation", "seed_template",
+    "classify_intent", "extract_requirements", "needs_reference", "is_continuation", "parametric_requested",
+    "seed_template",
     "derive_phase", "phase_exit_met", "visible_phases", "TurnState", "GateVerdict", "finish_gate",
     "format_governor", "health_label", "phase_guidance", "tool_category", "AgentConfig",
     "Watchdog", "WatchdogConfig", "FailureBreaker", "BreakerVerdict",
@@ -520,6 +521,12 @@ class Ledger:
     def is_work_turn(self) -> bool:
         """``has_open_required_steps() or intent in WORK`` (state based, language independent)."""
         return self.has_open_required_steps() or self.intent in WORK
+
+    @property
+    def parametric(self) -> bool:
+        """The request asks for a parametric (spreadsheet-driven, editable) model: derived from the stored request,
+        so it survives the JSON round trip; the finish-time validation enforces it."""
+        return parametric_requested(self.request)
 
     def _app_blocked(self, step: LedgerStep) -> bool:
         return step.status == "blocked" and any(e.get("app_blocked") for e in step.evidence)

@@ -48,6 +48,7 @@ from . import project_checkpoints as ckpts
 from . import project_docs as _docs
 from . import project_gui as gui
 from . import project_validation as vrec
+from .cad.imported import MESH_EXTENSIONS   # cad.imported is FreeCAD-free at module level (constants only)
 from .project_export import export_tips, safe_stem, unique_path
 from .project_replay import ReplayResult, replay_steps, replay_summary, steps_from_literal  # noqa: F401 (public re-exports)
 from .project_rewind import RewindMixin
@@ -161,6 +162,7 @@ class Project(SummaryMixin, RewindMixin):
     TURN_CKPT_RETRIES = 3                         # transient capture failures per (turn, document) before giving up for the turn
     SNAPSHOT_TIMEOUT_S = 15.0
     PARAMS_TIMEOUT_S = 10.0
+    HIDE_SOURCE_MESH_TIMEOUT_S = 10.0
     RESTORE_TIMEOUT_S = 120.0
 
     def __init__(self, root: str, *, chat_id: str = "", title: str = "",
@@ -600,6 +602,54 @@ class Project(SummaryMixin, RewindMixin):
                               checkpoint_note="", script="", replay={"kind": "none", "why": "project error"},
                               geometry=bool(geometry))
 
+    @_lifecycle("record_panel_action")
+    def record_panel_action(self, *, tool: str, title: str, args: dict, text: str, ok: bool, doc: str,
+                            geometry: bool = False, turn_id: str = "panel") -> StepRecord | None:
+        """Record a direct panel mutation in this chat's journal using the normal project hooks.
+
+        Unlike ``on_tool_result`` this has no agent ``ToolContext`` or tool round, but successful geometry
+        actions still receive the usual autosave, checkpoint, snapshot and parameter-sheet synchronization.
+        """
+        if not tool:
+            raise ProjectError("record_panel_action needs a tool name")
+        self.ensure_dir()
+        title = _clip_title(title) or tool
+        args = args if isinstance(args, dict) else {}
+        text = text if isinstance(text, str) else str(text or "")
+        with self._lock:
+            index = self._reserve_index()
+        rec = StepRecord(index=index, ts=self._now(), turn_id=str(turn_id or "panel"), round=0,
+                         call_id=f"panel-{uuid.uuid4().hex[:12]}", tool=tool, title=title,
+                         args=_json_safe(args), ok=bool(ok), result_head=text[:_RESULT_HEAD],
+                         result_chars=len(text), dur_s=0.0, doc=str(doc or ""),
+                         delta={"added": [], "removed": [], "changed": []}, health=None,
+                         snapshot="", snapshot_note="", checkpoint="", checkpoint_note="",
+                         script="", replay={"kind": "none", "why": "direct panel action"},
+                         geometry=bool(geometry))
+        if rec.geometry:
+            budget = _Budget(self.HOOK_BUDGET_S)
+            token = _BUDGET.set(budget)
+            try:
+                self._gui_hooks(rec, text=text, delta=rec.delta, ok=rec.ok, geometry=True,
+                                should_stop=lambda: False, budget=budget)
+            finally:
+                _BUDGET.reset(token)
+        elif rec.ok:
+            rec.snapshot_note = "not a geometry tool"
+        with self._lock:
+            if rec.doc:
+                self._note_doc(rec.doc)
+            if rec.geometry and rec.ok:
+                if rec.doc and not self.manifest.get("active_doc"):
+                    self.manifest["active_doc"] = rec.doc
+                self.manifest["last_geometry_step"] = index
+            self._append_raw(rec.to_line())
+            self._max_index = max(self._max_index, index)
+            self._jcache = None
+            self._save_manifest()
+            self._regenerate_docs(rebuild=True)
+        return rec
+
     def _record(self, *, turn_id: str, round_: int, call_id: str, tool: str, title: str, args: dict, text: str,
                 ok: bool, dur_s: float, doc: str, delta: dict, health: dict | None, geometry: bool) -> StepRecord:
         self.ensure_dir()
@@ -646,6 +696,8 @@ class Project(SummaryMixin, RewindMixin):
                 if resolved and not self.manifest.get("active_doc"):
                     self.manifest["active_doc"] = resolved
                 self.manifest["last_geometry_step"] = index
+                if tool == "import_file":
+                    self._note_source_meshes(resolved, args, rec.delta.get("added") or [], index)
             self._append_raw(rec.to_line())
             self._max_index = max(self._max_index, index)
             self._save_manifest()
@@ -671,6 +723,35 @@ class Project(SummaryMixin, RewindMixin):
         docs = self.manifest.setdefault("docs", [])
         if name and name not in docs:
             docs.append(name)
+
+    def _note_source_meshes(self, doc_name: str, args: dict, added: list, step: int) -> None:
+        """Remember the objects a successful mesh-file ``import_file`` brought into ``doc_name``
+        (``manifest["source_meshes"][doc]`` → ``{name: import step}``): the meshes a later rebuild may trace
+        over and ``finalize`` then hides. A non-mesh import (STEP and friends) is not recorded — its objects
+        can never be mistaken for a source mesh. A name re-imported later keeps the NEWEST step: the mesh in
+        the document now came from that import. Caller holds the lock."""
+        if not doc_name:
+            return
+        path = str((args or {}).get("path") or "")
+        if os.path.splitext(path)[1].lower().lstrip(".") not in MESH_EXTENSIONS:
+            return
+        names = self._source_mesh_names(doc_name)
+        for name in added:
+            if name:
+                names[str(name)] = max(int(names.get(str(name), 0) or 0), int(step))
+
+    def _source_mesh_names(self, doc_name: str) -> dict:
+        """``{mesh name: import step}`` of ``doc_name`` from the manifest, normalising the list form an older
+        Oscar wrote (a bare name list becomes step 0: imported before everything recorded since)."""
+        record = self.manifest.setdefault("source_meshes", {})
+        entry = record.get(doc_name)
+        if isinstance(entry, list):
+            entry = {str(n): 0 for n in entry if n}
+            record[doc_name] = entry
+        elif not isinstance(entry, dict):
+            entry = {}
+            record[doc_name] = entry
+        return entry
 
     def _write_script(self, rec: StepRecord, tool: str, code: str) -> str:
         rel = f"scripts/{rec.index:03d}_{paths.slugify(rec.title, 40) if rec.title else 'step'}.py"
@@ -1176,6 +1257,14 @@ class Project(SummaryMixin, RewindMixin):
                                 "restored_checkpoint": str(checkpoint or ""), "via": str(via or "undo")})
             self._jcache = None
             self.manifest["last_geometry_step"] = self.last_geometry_step()
+            # the undone build's source meshes may be rebuilt: forget that they were hidden once, so the
+            # next completed reconstruction hides its source again (the hide-once rule exists for meshes
+            # the USER chose to show again, not for reverted rebuilds)
+            hidden = self.manifest.get("hidden_source_meshes") or {}
+            for doc in {s.doc for s in affected if s.doc}:
+                hidden.pop(doc, None)
+            if hidden is not self.manifest.get("hidden_source_meshes"):
+                self.manifest["hidden_source_meshes"] = hidden
             self._save_manifest()
             self._regenerate_docs(rebuild=True)
             doc_name = next((s.doc for s in affected if s.doc), "")
@@ -1443,63 +1532,6 @@ class Project(SummaryMixin, RewindMixin):
             self._regenerate_docs(rebuild=False)
         return record
 
-    def _hide_source_meshes(self, outcome: str) -> None:
-        """W-2 (re-applied from fix/5-hide-source-mesh, outcome-conditioned): after a
-        VERIFIED outcome (``verified_parametric`` / ``partially_verified_parametric``)
-        every visible source mesh of the active document is hidden once a visible solid
-        tip exists (the rebuilt body is the deliverable; the mesh stays in the tree),
-        before the autosave so the saved FCStd carries the state, with a decision note
-        per hidden mesh. An outcome that is NOT verified shows again the meshes Oscar
-        had hidden earlier. A failure is logged and never breaks ``finalize``."""
-        doc_name = self.manifest.get("active_doc") or ""
-        if not doc_name:
-            return
-        verified = str(outcome) in ("verified_parametric",
-                                    "partially_verified_parametric")
-        ctx = current_context()
-
-        def task() -> list:
-            found = gui.resolve_doc(doc_name)
-            if found is None:
-                return []
-            if verified:
-                return ["hide", *gui.hide_source_meshes(found)]
-            hidden = (self.manifest.get("hidden_source_meshes") or {}).get(doc_name) or []
-            return ["show", *gui.show_source_meshes(found, hidden)]
-
-        try:
-            result, error = gui.gui_call(task, 10.0, "project_hide_source_meshes",
-                                         ctx.should_stop)
-        except Exception as exc:  # noqa: BLE001 - never break finalize
-            log_event("project_error", where="hide_source_meshes",
-                      error=f"{type(exc).__name__}: {exc}"[:200])
-            return
-        if error:
-            log_event("project_error", where="hide_source_meshes", error=error[:200])
-            return
-        action, names = (result or [None, []])[0], (result or [None, []])[1:]
-        if action == "hide" and names:
-            self.ensure_dir()                 # a lazy project may not exist on disk yet
-            with self._lock:
-                record = self.manifest.setdefault("hidden_source_meshes", {})
-                record[doc_name] = sorted(set((record.get(doc_name) or []) + names))
-                self._save_manifest()
-            for name in names:
-                self.note("decision",
-                          f"source mesh '{name}' hidden: the verified body is the "
-                          "deliverable (the mesh stays in the tree)")
-        elif action == "show" and names:
-            self.ensure_dir()
-            with self._lock:
-                record = self.manifest.setdefault("hidden_source_meshes", {})
-                record[doc_name] = [n for n in (record.get(doc_name) or [])
-                                    if n not in set(names)]
-                self._save_manifest()
-            for name in names:
-                self.note("decision",
-                          f"source mesh '{name}' visible again: the outcome is not "
-                          "verified, so the scan must stay in view")
-
     def write_accuracy_md(self) -> "str | None":
         """V-4: write ``ACCURACY.md`` next to NOTES.md from the recorded reconstruction
         evidence (the ``analysis/<mesh>.json`` payloads of parametric runs + the stored
@@ -1571,12 +1603,20 @@ class Project(SummaryMixin, RewindMixin):
 
         ``validation`` (a ``ValidationResult`` or its dict) is stored as ``validation.json`` first (merged with a
         partial record of the same model state), so the Summary and NOTES.md agree; without one the stored record
-        is used (the Summary never claims what no check recorded). ``export=None`` means True for the ledger
-        intents enclosure / fixture / bracket / generic_part / deliver: when ``exports/`` holds no file yet, STEP +
-        STL of the visible solid tips are exported with the spec's print orientation (one file per part, the SAME
-        code as the ``export_model`` tool); a failure becomes a NOTES "Unresolved" note and never an exception. ``export=True`` forces the export, ``False`` skips it. A disk failure while writing
-        the files is logged and the Summary is still returned (the turn must not die because the dossier failed);
-        only a wrongly typed ``ledger`` / ``validation`` raises ``ProjectError``."""
+        is used (the Summary never claims what no check recorded). Before the files are written the meshes a
+        rebuild traced over are hidden (``_hide_source_meshes``: only the project's own mesh imports, only in a
+        document whose visible deliverable was built after the mesh entered it, and only for a completed turn —
+        ``validated``, or the native reconstruction's ``verified_parametric`` /
+        ``partially_verified_parametric`` — an ``answered`` turn without a validation record keeps the
+        mesh visible; each hidden name becomes a decision note and the autosave then
+        carries the hidden state).
+        ``export=None`` means True for the ledger intents enclosure / fixture / bracket / generic_part / deliver:
+        when ``exports/`` holds no file yet, STEP + STL of the visible solid tips are exported with the spec's
+        print orientation (one file per part, the SAME code as the ``export_model`` tool); a failure becomes a
+        NOTES "Unresolved" note and never an exception. ``export=True`` forces the export, ``False`` skips it.
+        A disk failure while writing the files is logged and the Summary is still returned (the turn must not
+        die because the dossier failed); only a wrongly typed ``ledger`` / ``validation`` raises
+        ``ProjectError``."""
         ledger_dict = _as_dict(ledger)
         validation_dict = _as_dict(validation)   # a wrongly typed argument is the caller's bug: raise before anything is written
         effective = validation_dict
@@ -1584,7 +1624,10 @@ class Project(SummaryMixin, RewindMixin):
             if validation_dict is not None:
                 # validation.json first: NOTES.md and the Summary then read the same (merged) record
                 effective = self._store_validation(validation_dict)
-            self._hide_source_meshes(outcome)
+            try:
+                self._hide_source_meshes(outcome)
+            except Exception as exc:  # noqa: BLE001 - the tidy-up must never cost the autosave, NOTES.md or rebuild.py
+                log_event("project_error", where="hide_source_meshes", error=f"{type(exc).__name__}: {exc}"[:200])
             self._finalize_files(ledger_dict, outcome, export)
         except (OSError, ProjectStorageError) as exc:
             log_event("project_error", where="finalize", error=f"{type(exc).__name__}: {exc}"[:200])
@@ -1619,4 +1662,82 @@ class Project(SummaryMixin, RewindMixin):
         with self._lock:
             self.manifest["finalized"] = {"turn_id": self._turn_id, "outcome": outcome, "ts": self._now()}
             self._save_manifest()
+
+    def _hide_source_meshes(self, outcome: str) -> None:
+        """Hide the meshes a rebuild traced over once its reconstruction COMPLETED and left the deliverable
+        visible (issue #5: the source STL stayed visible next to the Body it was rebuilt into). Provenance,
+        not type: only the meshes the project's ``import_file`` steps brought into a document
+        (``manifest["source_meshes"]``) are candidates. A candidate is hidden only in a document whose
+        visible solid tip was added by a successful geometry step AFTER the mesh's import step — the
+        deliverable was built over that source — so a fit-check scan imported next to an existing (or
+        earlier-built) part, and reference geometry, are never touched, while a reconstruction that
+        completes in a LATER turn than it built the Body still hides its source. Only a completed turn
+        hides: ``validated`` (the generic flow) or ``verified_parametric`` /
+        ``partially_verified_parametric`` (the native reconstruction flow's verdicts); ``answered``,
+        capped or
+        unverified outcome keeps the mesh visible, the reference it still is. A mesh is hidden once
+        (``manifest["hidden_source_meshes"]``): a mesh the user showed again stays visible on later turns,
+        until a revert (``note_reverted``) clears the record and a rebuilt reconstruction hides it again.
+        The mesh object is never deleted; each hidden name becomes a ``decision`` note. GUI work first (no
+        lock), then the notes under the lock; runs before the autosave so the saved FCStd carries the hidden
+        state; a failure is logged and never breaks ``finalize``."""
+        # State-transition rule (issue #5, Phase 5 review): the source mesh hides ONLY after a
+        # VALIDATED reconstruction — validated (the generic flow's gate passed with a validation
+        # record) or the native flow's verified_parametric / partially_verified_parametric. A
+        # plain `answered` turn finished WITHOUT validation keeps the mesh visible — it is
+        # still the reference the user checks the unvalidated result against. Failed,
+        # cancelled, capped and unverified turns never hide it; undo/revert restores the
+        # recorded pre-turn visibility (engine snapshot) and clears the hidden record.
+        if outcome not in ("validated", "verified_parametric", "partially_verified_parametric"):
+            return
+        candidates = {doc: dict(names) for doc, names in (self.manifest.get("source_meshes") or {}).items()
+                      if isinstance(names, dict) and names}   # copied: iterated in the GUI task
+        if not candidates:
+            return
+        built: dict[str, dict[str, int]] = {}   # doc -> {object name: step index that added it}
+        for step in self.read_steps():
+            if step.ok and step.geometry:
+                added = built.setdefault(step.doc or "", {})
+                for name in step.delta.get("added") or []:
+                    added[str(name)] = max(int(added.get(str(name), 0) or 0), int(step.index))
+        if not any(built.values()):
+            return
+        already_hidden = self.manifest.get("hidden_source_meshes") or {}
+        ctx = current_context()
+
+        def task() -> list[dict]:
+            out = []
+            for doc_name, names in candidates.items():
+                doc = gui.resolve_doc(doc_name)
+                if doc is None:
+                    continue
+                tips = {o.Name for o in gui.visible_tips(doc)}
+                wanted = [name for name, step in names.items()
+                          if name not in (already_hidden.get(doc.Name) or [])
+                          and any(t in built.get(doc.Name, {}) and built[doc.Name][t] > int(step)
+                                  for t in tips)]
+                if not wanted:
+                    continue   # no deliverable was built over these meshes after they entered the document
+                hidden = gui.hide_source_meshes(doc, wanted)
+                if hidden:
+                    out.append({"doc": doc.Name, "hidden": hidden})
+            return out
+
+        results, error = gui.gui_call(task, self.HIDE_SOURCE_MESH_TIMEOUT_S, "project_hide_source_meshes",
+                                      ctx.should_stop)
+        if error:
+            log_event("project_error", where="hide_source_meshes", error=error[:200])
+            return
+        for entry in results or []:
+            doc_name, names = entry.get("doc", ""), entry.get("hidden") or []
+            if not names:
+                continue
+            with self._lock:
+                record = self.manifest.setdefault("hidden_source_meshes", {})
+                record[doc_name] = sorted(set((record.get(doc_name) or []) + names))
+                self._save_manifest()
+            for name in names:
+                self.note("decision",
+                          f"source mesh '{name}' hidden: the rebuilt body is the deliverable "
+                          "(the mesh stays in the tree)")
 

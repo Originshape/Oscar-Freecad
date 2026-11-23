@@ -38,8 +38,11 @@ _HEALTH_TIMEOUT_S = 90.0
 _FIT_TIMEOUT_S = 120.0
 _FIT_BUDGET_S = 100.0
 _EDIT_TIMEOUT_S = 300.0     # wraps the adaptive editability pass (tools_verify_edit.MAX_BUDGET_S is 240 s)
+_PARAMETRIC_TIMEOUT_S = 30.0
 _ROWS_FULL_LIMIT = 60
 _PRE_PREFIX = "pre-existing (not caused by this task, not counted): "
+# Warning-severity findings a parametric turn cannot wave through (same new-or-touched rule as the errors).
+_PARAMETRIC_PROMOTED = ("NO_GEOMETRIC_CHANGE", "FRAGMENTS")
 
 
 # ---------------------------------------------------------------------------------------------- the result
@@ -157,6 +160,79 @@ def split_findings(report: HealthReport, baseline: set | None, touched: set[str]
         else:
             pre.append(f)
     return counted, pre
+
+
+# ---------------------------------------------------------------------------------------------- parametric contract
+
+
+def _parametric_wanted(ctx: ToolContext) -> bool:
+    """The bound ledger says the request asked for a parametric, spreadsheet-driven model."""
+    return bool(getattr(ctx.ledger, "parametric", False))
+
+
+def _parametric_state(ctx: ToolContext, doc: str, touched: set[str]) -> "dict | None":
+    """``{"sheet": <name or "">, "bindings": <n>}`` of ``doc`` read on the GUI thread; ``None`` when it could not be
+    read (the health gate still judges; the parametric claim is simply not widened by a guess).
+
+    With ``touched`` (the objects THIS task built or changed, from the Project's step records) bindings count only
+    on those objects — a binding the user brought with the document never satisfies the contract. Without records
+    (``touched`` empty) the whole document is judged: there is no evidence to discriminate with."""
+    from .plan.builder import PLAN_MARK
+
+    def task() -> "dict | None":
+        d = _open_doc(doc)
+        if d is None:
+            return None
+        sheet = next((o for o in d.Objects if o.isDerivedFrom("Spreadsheet::Sheet")
+                      and (o.Name in ("Params", "Parameters") or o.Label in ("Params", "Parameters")
+                           or getattr(o, "Label2", "") == PLAN_MARK)), None)
+        eligible = set(touched) or None
+        bindings = 0
+        if sheet is not None:
+            prefixes = (f"{sheet.Name}.", f"{sheet.Label}.")
+            for o in d.Objects:
+                if o is sheet or (eligible is not None and o.Name not in eligible):
+                    continue
+                engine = getattr(o, "ExpressionEngine", None) or ()
+                if any(str(expr).startswith(prefixes) for _prop, expr in engine):
+                    bindings += 1
+        return {"sheet": sheet.Name if sheet is not None else "", "bindings": bindings}
+
+    result, error = _gui(ctx, task, _PARAMETRIC_TIMEOUT_S, "parametric")
+    if error or not isinstance(result, dict):
+        log_event("health_error", op="parametric", doc=doc, error=str(error)[:200])
+        return None
+    return result
+
+
+def _parametric_gate_errors(ctx: ToolContext, doc: str, touched: set[str]) -> list[dict]:
+    """``PARAMETRIC_UNMET`` gate errors: the request asked for a parametric model and the document is not one
+    (no spreadsheet, or a spreadsheet nothing this task built or changed is bound to)."""
+    state = _parametric_state(ctx, doc, touched)
+    if state is None:
+        return []
+    how = ("build it with `apply_feature_plan`, or write the sheet with `set_parameters` and bind the dimensions "
+           "by expression; if this model profile does not offer the plan tool, say plainly in the report that a "
+           "fully parametric model was not achieved")
+    if not state["sheet"]:
+        return [{"severity": "error", "code": "PARAMETRIC_UNMET", "object": "",
+                 "message": f"the request asks for a parametric model but document '{doc}' has no Params / "
+                            f"Parameters spreadsheet; {how}"}]
+    if not state["bindings"]:
+        return [{"severity": "error", "code": "PARAMETRIC_UNMET", "object": state["sheet"],
+                 "message": f"the Params spreadsheet '{state['sheet']}' exists but nothing this task built or "
+                            f"changed is bound to it: no feature follows any parameter; {how}"}]
+    return []
+
+
+def _promoted_findings(report: HealthReport, baseline: set | None, touched: set[str]) -> list[Finding]:
+    """The warning findings a parametric turn cannot wave through (a cut that removed nothing, loose fragments),
+    promoted to errors under the same new-or-touched rule as ``split_findings``. Pure."""
+    return [replace(f, severity="error",
+                    message=f"{f.message} (counted: every operation of a parametric build must change the model)")
+            for f in report.findings
+            if f.severity != "error" and f.code in _PARAMETRIC_PROMOTED
+            and (baseline is None or f.key() not in baseline or (f.object and f.object in touched))]
 
 
 # ---------------------------------------------------------------------------------------------- GUI plumbing
@@ -380,7 +456,10 @@ def run_validation(doc_name: str | None, *, ctx: "ToolContext | None" = None, de
     ``doc_name=None`` means the document of the turn's last geometry step (``ctx.state["last_doc"]``), else the
     active document. ``fit=None`` runs the fit checks iff the intent needs them (``enclosure`` / ``fixture``) or a
     ``spec.json`` exists; ``deep=True`` adds the +-10% editability rebuild (a break becomes a gate error with the code
-    ``EDITABILITY``) and the exhaustive ``isValid`` pass. The sections that ran are persisted through
+    ``EDITABILITY``) and the exhaustive ``isValid`` pass. When the bound ledger says the request asked for a
+    parametric, spreadsheet-driven model (``Ledger.parametric``), ``deep`` is forced on and the document must hold a
+    ``Params`` / ``Parameters`` (or plan-stamped) spreadsheet with at least one expression-bound feature — otherwise
+    a ``PARAMETRIC_UNMET`` gate error says the contract is unmet. The sections that ran are persisted through
     ``ctx.project.record_validation`` when a project is bound (the Project merges them with the stored record of the
     same document and geometry step, so a ``check_fit`` the model ran earlier is not lost).
 
@@ -394,13 +473,20 @@ def run_validation(doc_name: str | None, *, ctx: "ToolContext | None" = None, de
 
 def _run_validation(ctx: ToolContext, doc_name: str | None, deep: bool, fit: bool | None) -> "ValidationResult | None":
     started = time.monotonic()
+    parametric = _parametric_wanted(ctx)
+    if parametric and not deep:
+        deep = True                    # a parametric request owes the +-10% editability proof at finish
     report = _health_report(ctx, doc_name, deep)
     if report is None:
         log_event("validation_run", ok=None, error="no health report (no document, timeout or Stop)")
         return None
     doc = report.doc
-    counted, pre = split_findings(report, _baseline_keys(ctx, doc), _touched_names(ctx, doc))
+    baseline, touched = _baseline_keys(ctx, doc), _touched_names(ctx, doc)
+    counted, pre = split_findings(report, baseline, touched)
     gate = [_gate_entry(f) for f in counted]
+    if parametric:
+        gate.extend(_parametric_gate_errors(ctx, doc, touched))
+        gate.extend(_gate_entry(f) for f in _promoted_findings(report, baseline, touched))
     gate.extend(_cutter_gate_errors(ctx, doc))
     gate.extend(_params_unbound_gate_errors(ctx, doc))
     gate.extend(_non_parametric_gate_errors(ctx, doc))

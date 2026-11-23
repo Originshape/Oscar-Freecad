@@ -132,6 +132,8 @@ _LITE_SECTIONS: tuple[_Section, ...] = (
     ("PARAMETERS AND NAMING", (
         "Keep dimensions in `Params` (lower_snake_case, with units); edit with `set_parameter`. One part per object; "
         "never fuse. Names: `Params`, `Shell`, `Lid`, `Ref_<BOARD>`.",
+        "A parametric ask cannot always be honoured here: bind what you can; say in the report what is not "
+        "parametric.",
     )),
     ("TOOLS", (
         "Use `get_view` per finished step. On failure inspect `get_objects`, remove leftovers, and retry smaller. "
@@ -154,8 +156,9 @@ _PLAYBOOK_SECTIONS: dict[str, tuple[_Section, ...]] = {
     ),
     "structured_part": (
         ("PLAYBOOK structured_part (prismatic parts: plates, flanges, brackets, fixtures)", (
-            "Prefer one structured plan to a long script: choose the parameters first (name, value, where the "
-            "number comes from), then one feature per entry, then call `apply_feature_plan`.",
+            "Build prismatic parts with one structured plan, not a script (a request that says parametric or "
+            "editable means this path): choose the parameters first (name, value, where the number comes from), "
+            "then one feature per entry, then call `apply_feature_plan`.",
             "Use schema_version 2 with a parameter name for every dimension. Sketch (rectangle, circle, slot, several "
             "profiles), pad, pocket, hole, fillet, chamfer, thickness (shell), linear_pattern, polar_pattern, "
             "mirror, boss. Pick edges by rule (all_outer, vertical, top_outer, bottom_outer, edges_of_feature:<id>), "
@@ -168,7 +171,8 @@ _PLAYBOOK_SECTIONS: dict[str, tuple[_Section, ...]] = {
             "reshape that one feature. Only when the plan truly cannot express the shape, `execute_code` may — "
             "hide every helper cutter, leave one final solid, and say in the report the part is non-parametric.",
             "Then `validate_model`. To resize, change the parameter, not the geometry.",
-            "Round shapes, sweeps or anything the plan cannot say: `execute_code` stays available.",
+            "Only what no plan op can express goes to `execute_code`: bind its dimensions to the Params sheet and "
+            "say in the final report that this piece is not parametric.",
         )),
     ),
     "reconstruction": (

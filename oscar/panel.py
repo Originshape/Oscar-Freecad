@@ -16,7 +16,7 @@ fallback), ``panel_rewind`` the per-step rewind and ``panel_follow`` follow-the-
 this module is the widget itself and re-exports their public names.
 
 Shell (2026-11-16 redesign): one compact header row (logo, chat selector, new /
-rename / delete chat, project folder, account badge, overflow menu, settings) over a
+delete chat, project folder, account badge, overflow menu, settings) over a
 QTabWidget with exactly three pages — Chat (transcript, pinned plan strip, heartbeat,
 question bar, composer), Parameters and Logs. The two side pages mount their own
 modules defensively (``panel_tabs.make_params_tab`` / ``make_timeline_tab``:
@@ -29,7 +29,7 @@ Widgets located by object name (GUI tests): ``oscarLog``, ``oscarPlanStrip``,
 ``oscarActNowButton``, ``oscarMenuButton`` (header menu with the ``oscarFollowAction`` toggle),
 ``oscarAccountBadge`` (the OriginShape account badge, menu ``oscarAccountMenu``);
 header buttons ``oscarLogoLabel``, ``oscarChatSelector``, ``oscarNewChatButton``,
-``oscarRenameChatButton``, ``oscarDeleteChatButton``, ``oscarFolderButton``,
+``oscarDeleteChatButton``, ``oscarFolderButton``,
 ``oscarSettingsButton``; the composer's ``oscarComposer`` / ``oscarSendButton`` /
 ``oscarCredits`` and the tabs widget ``oscarTabs``.
 
@@ -64,7 +64,7 @@ from PySide import QtCore, QtGui, QtWidgets
 
 from . import __version__
 from . import attachments as _attach
-from . import consent_gui, panel_chats, panel_markup, paths
+from . import consent_gui, panel_chats, paths
 from . import panel_theme as _theme
 from . import params as _params
 from . import settings_sync as _settings_sync
@@ -87,6 +87,13 @@ from .providers import Message
 DOCK_OBJECT_NAME = "OscarPanel"
 _QUIT_WAIT_MS = 4000   # how long ``aboutToQuit`` waits for a running turn to end
 _WAITLIST_FRESH_S = 300.0   # the send gate believes a "waitlisted" snapshot this young; the server decides after that
+# The controlled dock size (fixed panel, internally scrollable chat): minimums keep a small or
+# bottom-docked panel usable, the default sets the floating size. Docked areas keep managing the
+# geometry — chat content never does (the question bar and every tab page are hint-bounded).
+DOCK_MIN_WIDTH = 340
+DOCK_MIN_HEIGHT = 360
+DOCK_DEFAULT_WIDTH = 400
+DOCK_DEFAULT_HEIGHT = 600
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +132,29 @@ def _mutating_tool_names() -> set[str]:
     return names
 
 
+class _ModelCatalogSignals(QtCore.QObject):
+    loaded = QtCore.Signal(int, str, object, str)
+
+
+class _ModelCatalogJob(QtCore.QRunnable):
+    """Fetch one provider's model catalog away from FreeCAD's GUI thread."""
+
+    def __init__(self, generation: int, profile, signals):
+        super().__init__()
+        self.generation = generation
+        self.profile = profile
+        self.signals = signals
+
+    def run(self):
+        try:
+            from .providers import list_models
+
+            models, error = list_models(self.profile)
+            self.signals.loaded.emit(self.generation, self.profile.name, models or [], str(error or ""))
+        except Exception as exc:  # noqa: BLE001 - provider metadata is untrusted UI input
+            self.signals.loaded.emit(self.generation, self.profile.name, [], f"{type(exc).__name__}: {exc}")
+
+
 class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin, FollowMixin, QtWidgets.QWidget):
     """Chat content of the dock; the dock wrapper lives below."""
 
@@ -142,7 +172,6 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         self.blocks: list[Block] = []
         self.history: list[Message] = []
         self.worker: AgentWorker | None = None
-        self.pending: list[str] = []  # attachment paths waiting to be sent
         self._stream_buffer = ""
         self._current: Block | None = None
         self._dirty = False
@@ -170,19 +199,27 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         self._scroll_set = 0        # the value this code last set; a different value means the user moved
         self._scroll_blocks = None  # the chat (blocks list) the scroll state belongs to
         # Task chats: multiple conversations, switchable, persisted. The
-        # live session's history IS self.history (the worker holds that
-        # list object for the whole turn — switching is blocked while busy).
+        # live session's history IS self.history; the worker holds that
+        # list object for the whole turn, and _turn_session keeps the
+        # running turn's writes in its own chat while another is shown.
         self.sessions: list[dict] = []
         self._session_loading = False
         # Facts the model must learn with the next message (e.g. the user
         # reverted a turn — otherwise it would keep building on objects
         # that no longer exist). Kept PER SESSION (see ``_pending_notes``).
         self._orphan_notes: list[str] = []
+        # The per-chat ``pending`` attachments and ``_carry_images`` (both panel_session properties) need a
+        # home before the first chat is activated / after the last one is gone:
+        self._orphan_pending: list[str] = []
+        self._orphan_carry_images: list[str] = []
+        self._profiles: list = []
+        self._model_catalogs: dict[str, dict] = {}
+        self._catalog_generation = 0
+        self._catalog_jobs = {}
 
         self._build_ui()
-        self._init_tabs()          # the Chat / Parameters / Summary pages live in the tab shell
+        self._init_tabs()          # the Chat / Parameters / Logs pages live in the tab shell
         self._register_question_surface()
-        self._register_ask_surface()
         self._register_netguard_hook()
         self._register_quit_hook()
         self._init_account()
@@ -248,16 +285,6 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
                 _netguard.panel_surface = None
         except Exception:  # noqa: BLE001
             pass
-        try:   # release every ask_user waiter and stop being its surface
-            from . import askuser as _askuser
-            from . import tools_ask as _tools_ask
-
-            surface = getattr(_tools_ask, "surface", None)
-            if surface is not None and getattr(surface, "__self__", None) is self:
-                _tools_ask.surface = None
-            _askuser.REGISTRY.shutdown()
-        except Exception:  # noqa: BLE001
-            pass
         workspace = getattr(self, "_workspace", None)
         if workspace is not None:
             try:
@@ -317,8 +344,8 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(4)
 
-        # Header (shell redesign): one compact row — logo, chat selector, new / rename /
-        # delete chat, project folder, account badge, overflow menu, settings. The ⋯ menu
+        # Header (shell redesign): one compact row — logo, chat selector, new / delete chat,
+        # project folder, account badge, overflow menu, settings. The ⋯ menu
         # keeps every historical action (clear / search / exports …); the hidden buttons
         # stay as attributes so tests and muscle memory keep working.
         header = QtWidgets.QHBoxLayout()
@@ -328,8 +355,9 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         self.subtitle.setTextInteractionFlags(QtCore.Qt.LinksAccessibleByMouse)
         self.subtitle.linkActivated.connect(lambda _link: self._on_account_action("download"))
         self.subtitle.hide()
-        logo = QtGui.QIcon(paths.icon("Oscar.svg"))
-        logo_pixmap = logo.pixmap(18, 18) if not logo.isNull() else None
+        logo_source = QtGui.QPixmap(paths.icon("OscarMark.png"))
+        logo_pixmap = (logo_source.scaled(26, 26, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+                       if not logo_source.isNull() else None)
         self.logo_label = QtWidgets.QLabel()
         self.logo_label.setObjectName("oscarLogoLabel")
         if logo_pixmap is not None and not logo_pixmap.isNull():
@@ -351,12 +379,6 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         self.new_chat_btn.setToolTip("New chat (fresh task context)")
         self.new_chat_btn.clicked.connect(self._new_chat)
         header.addWidget(self.new_chat_btn)
-        self.rename_chat_btn = QtWidgets.QToolButton()
-        self.rename_chat_btn.setObjectName("oscarRenameChatButton")
-        self.rename_chat_btn.setText("✎")
-        self.rename_chat_btn.setToolTip("Rename this chat…")
-        self.rename_chat_btn.clicked.connect(lambda: panel_chats.rename(self))
-        header.addWidget(self.rename_chat_btn)
         clear_chat_btn = QtWidgets.QToolButton()
         clear_chat_btn.setText("🗑")
         clear_chat_btn.setToolTip("Clear this chat's messages (the chat itself stays)")
@@ -478,18 +500,17 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         input_frame = QtWidgets.QFrame()
         input_frame.setObjectName("oscarComposer")
         input_box = QtWidgets.QVBoxLayout(input_frame)
-        input_box.setContentsMargins(10, 6, 10, 6)
-        input_box.setSpacing(4)
+        input_box.setContentsMargins(8, 5, 8, 5)
+        input_box.setSpacing(3)
         self.input_frame = input_frame
 
         self.input = QtWidgets.QPlainTextEdit()
         self.input.setPlaceholderText(
             "Ask Oscar… (Enter to send · Shift+Enter for a new line · Esc stops)"
         )
-        self.input.setFixedHeight(48)
-        self.input.setMinimumHeight(48)
-        self.input.setMaximumHeight(140)
-        self.input.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Minimum)
+        self.input.setFixedHeight(38)
+        self.input.setMinimumHeight(38)
+        self.input.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self.input.setFrameShape(QtWidgets.QFrame.NoFrame)
         self.input.installEventFilter(self)
         self.input.textChanged.connect(self._grow_input)
@@ -498,6 +519,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         controls = QtWidgets.QHBoxLayout()
         controls.setSpacing(6)
         self.attach_btn = QtWidgets.QToolButton()
+        self.attach_btn.setObjectName("oscarAttachButton")
         self.attach_btn.setText("📎")
         self.attach_btn.setToolTip(
             "Attach files for Oscar — images (the model sees them), text/CSV/JSON "
@@ -505,14 +527,6 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         )
         self.attach_btn.clicked.connect(self._pick_files)
         controls.addWidget(self.attach_btn)
-        # The pen: draw on the 3D view where Oscar should change the model (panel_markup)
-        self.markup_btn = QtWidgets.QToolButton()
-        self.markup_btn.setObjectName("oscarMarkupButton")
-        self.markup_btn.setText("✏️")
-        self.markup_btn.setToolTip("Mark up the model — draw on the 3D view where Oscar should change it; "
-                                   "the picture and the region go with your message")
-        self.markup_btn.clicked.connect(self._mark_up)
-        controls.addWidget(self.markup_btn)
 
         # Prompt templates (inserted into the input — copyable & editable
         # before sending). The parametric one is the canonical
@@ -525,15 +539,26 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         self.templates_btn.clicked.connect(self._show_templates)
         controls.addWidget(self.templates_btn)
 
-        self.profile_combo = QtWidgets.QComboBox()
-        self.profile_combo.setMinimumWidth(110)
-        self.profile_combo.currentIndexChanged.connect(self._on_profile_picked)
-        controls.addWidget(self.profile_combo)
-        controls.addStretch(1)
-        # The model of the active profile sits where a hint used to be.
-        self.model_label = QtWidgets.QLabel("")
-        self.model_label.setStyleSheet(f"color:{_muted()};font-size:small;")
-        controls.addWidget(self.model_label)
+        self.profile_button = QtWidgets.QToolButton()
+        self.profile_button.setObjectName("oscarProfileSelector")
+        self.profile_button.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.profile_button.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        self.profile_menu = QtWidgets.QMenu(self.profile_button)
+        self.profile_menu.aboutToShow.connect(self._rebuild_profile_menu)
+        self.profile_button.setMenu(self.profile_menu)
+        self.profile_button.setMaximumWidth(126)
+        controls.addWidget(self.profile_button)
+
+        self.model_button = QtWidgets.QToolButton()
+        self.model_button.setObjectName("oscarModelSelector")
+        self.model_button.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.model_button.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        self.model_menu = QtWidgets.QMenu(self.model_button)
+        self.model_menu.aboutToShow.connect(self._rebuild_model_menu)
+        self.model_button.setMenu(self.model_menu)
+        self.model_button.setMaximumWidth(140)
+        self.model_label = self.model_button   # compatibility for the workspace's temporary model display
+        controls.addWidget(self.model_button)
         # Credit balance of the signed-in account (display only — the badge and Settings
         # keep the full account surface). Hidden when there is nothing to show.
         self.credits_label = QtWidgets.QLabel("")
@@ -547,7 +572,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         # turn runs → ■ Stop (same effect as Esc). Pause/Resume lives in the heartbeat row.
         self.stop_btn = QtWidgets.QPushButton("■")
         self.stop_btn.setObjectName("oscarStopButton")
-        self.stop_btn.setFixedWidth(40)
+        self.stop_btn.setFixedWidth(34)
         self.stop_btn.setToolTip("Stop the running turn (Esc)")
         self.stop_btn.clicked.connect(self._stop)
         self.stop_btn.hide()
@@ -555,7 +580,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
 
         self.send_btn = QtWidgets.QPushButton("➤")
         self.send_btn.setObjectName("oscarSendButton")
-        self.send_btn.setFixedWidth(40)
+        self.send_btn.setFixedWidth(34)
         self.send_btn.setToolTip("Send (Enter)")
         self.send_btn.clicked.connect(self._on_flow_button)
         controls.addWidget(self.send_btn)
@@ -595,32 +620,198 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
     # -- profile / settings --------------------------------------------------
 
     def _reload_profiles(self):
-        self.profile_combo.blockSignals(True)
-        self.profile_combo.clear()
-        names = [p.name for p in _params.load_profiles()]
-        self.profile_combo.addItems(names)
-        active = _params.active_profile_name()
-        if active in names:
-            self.profile_combo.setCurrentIndex(names.index(active))
-        self.profile_combo.blockSignals(False)
-        profile = _params.active_profile()
-        self.model_label.setText(_params.model_display_name(profile))
+        old = {p.name: p for p in self._profiles}
+        old_default = getattr(self, "_profile_default_name", _params.active_profile_name())
+        self._profiles = list(_params.load_profiles())
+        fresh = {p.name: p for p in self._profiles}
+        new_default = _params.active_profile_name()
+        for session in getattr(self, "sessions", []):
+            if not session.get("profile_selection_explicit") and session.get("profile_name") in ("", old_default):
+                default_profile = fresh.get(new_default)
+                if default_profile is not None:
+                    session["profile_name"] = new_default
+                    session["model"] = default_profile.model
+                    previous = configured = default_profile
+                else:
+                    previous = configured = None
+            else:
+                previous = old.get(str(session.get("profile_name") or ""))
+                configured = fresh.get(str(session.get("profile_name") or ""))
+            if (not session.get("profile_selection_explicit") and previous is not None and configured is not None
+                    and session.get("model") == previous.model):
+                session["model"] = configured.model
+                if session.get("history"):
+                    try:
+                        from . import chats as _chats
+
+                        _chats.save(session)
+                    except Exception as exc:  # noqa: BLE001 - settings refresh must still update the visible selector
+                        self._log_panel_error("profile_persist", exc)
+        self._profile_default_name = new_default
+        self._catalog_generation += 1
+        self._model_catalogs = {}
+        self._refresh_model_selector()
         self._refresh_account()
 
-    def _on_profile_picked(self, index: int):
-        name = self.profile_combo.itemText(index)
-        if name:
-            try:
-                _params.set_active_profile(name)
-            except OSError as e:   # the settings file is locked right now: nothing was written, show what is active
-                self._log_panel_error("profile", e)
-                self._reload_profiles()
-                self._flash_status(f"Could not switch the profile: {e}", 6000)
-                return
-            _settings_sync.request("panel", prefer="local")   # the profile in use, on the website too
-        profile = _params.active_profile()
-        self.model_label.setText(_params.model_display_name(profile))
+    def _model_catalog_loaded(self, generation: int, name: str, models, error: str) -> None:
+        self._catalog_jobs.pop((generation, name), None)
+        if generation != self._catalog_generation or not any(p.name == name for p in self._profiles):
+            return
+        from .panel_models import catalog_models
+
+        self._model_catalogs[name] = {"models": catalog_models(models), "error": error, "loading": False}
+        self._refresh_model_selector()
+        if self.profile_menu.isVisible():
+            self._rebuild_profile_menu()
+        if self.model_menu.isVisible():
+            self._rebuild_model_menu()
+
+    def _fetch_profile_catalog(self, profile) -> None:
+        key = (self._catalog_generation, profile.name)
+        if key in self._catalog_jobs:
+            return
+        self._model_catalogs[profile.name] = {"models": [], "error": "Loading model catalog…", "loading": True}
+        signals = _ModelCatalogSignals(self)
+        signals.loaded.connect(self._model_catalog_loaded)
+        job = _ModelCatalogJob(self._catalog_generation, copy.deepcopy(profile), signals)
+        self._catalog_jobs[key] = job
+        QtCore.QThreadPool.globalInstance().start(job)
+
+    def _chat_profile(self, session=None):
+        """The selected profile/model for one chat, isolated from other chat sessions."""
+        profiles = self._profiles or list(_params.load_profiles())
+        session = session if session is not None else self._current_session()
+        name = str((session or {}).get("profile_name") or _params.active_profile_name())
+        from .panel_models import selected_profile
+
+        profile = selected_profile(profiles, name) or _params.active_profile()
+        if profile is None:
+            return None
+        profile = copy.deepcopy(profile)
+        if session is not None:
+            before = (session.get("profile_name"), session.get("model"))
+            if not session.get("profile_name") or session.get("profile_name") != profile.name:
+                session["profile_name"] = profile.name
+                session["model"] = profile.model
+            profile.model = str(session.get("model") or profile.model)
+            if before != (session.get("profile_name"), session.get("model")) and session.get("history"):
+                self._persist_current()
+        return profile
+
+    def _refresh_model_selector(self) -> None:
+        profile_button = getattr(self, "profile_button", None)
+        model_button = getattr(self, "model_button", None)
+        if profile_button is None or model_button is None:
+            return
+        profile = self._chat_profile()
+        idle = getattr(self, "worker", None) is None
+        if profile is None:
+            profile_button.setText("Choose profile")
+            profile_button.setToolTip("No configured profiles. Open Settings to add one.")
+            profile_button.setEnabled(idle)
+            model_button.setText("Choose model")
+            model_button.setToolTip("Choose a configured profile first.")
+            model_button.setEnabled(False)
+            return
+        catalog = self._model_catalogs.get(profile.name, {})
+        models = catalog.get("models") or []
+        error = str(catalog.get("error") or "")
+        availability = "Listed by provider" if profile.model in models else (
+            "Loading model catalog…" if catalog.get("loading") else
+            ("Unavailable: " + error if error else "Not verified by provider"))
+        profile_button.setEnabled(idle)
+        profile_button.setText(profile.name)
+        profile_button.setToolTip(f"Profile: {profile.name}\nProvider: {profile.provider}")
+        model_button.setEnabled(idle)
+        model_button.setText(_params.model_display_name(profile) or "Choose model")
+        model_button.setToolTip(f"Profile: {profile.name}\nModel: {profile.model or 'not configured'}\n"
+                                f"Provider: {getattr(profile, 'provider', '') or 'unknown'}\n"
+                                f"Status: {availability}")
+
+    def _select_chat_model(self, profile_name: str, model: str | None = None) -> None:
+        from .panel_models import selected_profile
+
+        profile = selected_profile(self._profiles, profile_name)
+        session = self._current_session()
+        if profile is None or session is None:
+            return
+        keep_model = session.get("model") if session.get("profile_name") == profile_name else ""
+        session["profile_name"] = profile_name
+        session["model"] = str(model if model is not None else keep_model or profile.model or "")
+        session["profile_selection_explicit"] = True
+        _settings_sync.request("panel", prefer="local")   # the pick, on the website too (#34)
+        self._persist_current()
+        self._refresh_model_selector()
         self._refresh_account()
+
+    def _rebuild_model_menu(self) -> None:
+        menu = self.model_menu
+        menu.clear()
+        selected = self._chat_profile()
+        if selected is None:
+            empty = menu.addAction("Choose a profile first")
+            empty.setEnabled(False)
+            return
+        if selected.name not in self._model_catalogs:
+            self._fetch_profile_catalog(selected)
+        catalog = self._model_catalogs.get(selected.name, {})
+        models = list(catalog.get("models") or [])
+        error = str(catalog.get("error") or "")
+        loading = bool(catalog.get("loading"))
+        if selected.model and selected.model not in models:
+            models.insert(0, selected.model)
+        if not models:
+            status = "Loading model catalog…" if loading else (error or "No models listed by provider")
+            item = menu.addAction(status)
+            item.setEnabled(False)
+        for model in models:
+            from .panel_models import model_availability
+
+            availability = model_availability(model, catalog.get("models") or [], error)
+            action = menu.addAction(f"{model} · {selected.provider} · {availability}")
+            action.setCheckable(True)
+            action.setChecked(selected.model == model)
+            action.setToolTip(f"Model: {model}\nProvider: {selected.provider}\nStatus: {availability}")
+            action.triggered.connect(lambda _checked=False, n=selected.name, m=model:
+                                     self._select_chat_model(n, m))
+        menu.addSeparator()
+        refresh = menu.addAction("Refresh model catalogs")
+        refresh.triggered.connect(self._refresh_model_catalogs)
+
+    def _rebuild_profile_menu(self) -> None:
+        menu = self.profile_menu
+        menu.clear()
+        selected = self._chat_profile()
+        for profile in self._profiles:
+            if profile.name not in self._model_catalogs:
+                self._fetch_profile_catalog(profile)
+            catalog = self._model_catalogs.get(profile.name, {})
+            models = catalog.get("models") or []
+            if catalog.get("loading"):
+                count = "loading…"
+            elif catalog.get("error") and not models:
+                count = "unavailable"
+            else:
+                count = f"{len(models)} model{'s' if len(models) != 1 else ''}"
+            action = menu.addAction(f"{profile.name} — {count}")
+            action.setCheckable(True)
+            action.setChecked(bool(selected and selected.name == profile.name))
+            action.setToolTip(f"Profile: {profile.name}\nProvider: {profile.provider}\n"
+                              f"Configured model: {profile.model or 'none'}")
+            action.triggered.connect(lambda _checked=False, n=profile.name: self._select_chat_model(n))
+        if not self._profiles:
+            empty = menu.addAction("No profiles configured — open Settings")
+            empty.setEnabled(False)
+        menu.addSeparator()
+        refresh = menu.addAction("Refresh model catalogs")
+        refresh.triggered.connect(self._refresh_model_catalogs)
+
+    def _refresh_model_catalogs(self) -> None:
+        self._catalog_generation += 1
+        self._model_catalogs.clear()
+        self._rebuild_profile_menu()
+        self._rebuild_model_menu()
+
 
     def _init_settings_sync(self) -> None:
         """The AI model settings follow the OriginShape account (``settings_sync``): a sync when the panel starts, and
@@ -696,7 +887,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
     def _apply_account_state(self, render: bool = True) -> None:
         state = self._account_state()
         try:
-            profile = _params.active_profile()
+            profile = self._chat_profile()
         except Exception:  # noqa: BLE001 - an unreadable settings file reads as "no profile" here
             profile = None
         show = _params.is_account_profile(profile) or bool(state.get("signed_in"))
@@ -788,7 +979,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         state = self._account_state() if state is None else state
         if profile is None:
             try:
-                profile = _params.active_profile()
+                profile = self._chat_profile()
             except Exception:  # noqa: BLE001 - an unreadable settings file reads as "no profile" here
                 profile = None
         reason = self._onboarding_reason(profile, state)
@@ -824,9 +1015,10 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
     def _show_account_card(self, kind: str, *, reason: str = "", returned: bool = False) -> None:
         """Append an account card, unless the chat already ends with the same card (pressing Send again must not
         stack them)."""
-        last = self.blocks[-1] if self.blocks else None
+        blocks = self._turn_target_blocks()
+        last = blocks[-1] if blocks else None
         if last is None or last.kind != Block.ACCOUNT or last.detail != kind or getattr(last, "reason", "") != reason:
-            self.blocks.append(self._account_block(kind, reason=reason, returned=returned))
+            blocks.append(self._account_block(kind, reason=reason, returned=returned))
         self._render()
 
     def _send_blocker(self, profile) -> str:
@@ -898,6 +1090,20 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
     def _append(self, kind: str, text: str = "") -> Block:
         block = Block(kind, text)
         self.blocks.append(block)
+        return block
+
+    def _turn_target_blocks(self) -> list[Block]:
+        """The blocks list the RUNNING TURN writes to: its own chat's transcript, not the one shown."""
+        session = getattr(self, "_turn_session", None)
+        blocks = session.get("blocks") if session is not None else None
+        return blocks if isinstance(blocks, list) else self.blocks
+
+    def _turn_append(self, kind: str, text: str = "") -> Block:
+        """``_append`` for the running turn's chat — the same chat while it is shown, its own transcript
+        when another chat is displayed meanwhile."""
+        blocks = self._turn_target_blocks()
+        block = Block(kind, text)
+        blocks.append(block)
         return block
 
     # -- attachments -----------------------------------------------------------
@@ -991,12 +1197,6 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         self.input.setPlainText(self.PARAMPT)
         self._send()
 
-    def _mark_up(self):
-        """The pen's click (``panel_markup.start``): not while a turn runs, as the paperclip."""
-        if self.worker is not None:
-            return
-        panel_markup.start(self, paths.cache_dir("markup"))
-
     def _pick_files(self):
         if self.worker is not None:
             return
@@ -1025,8 +1225,12 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
             if widget is not None:
                 widget.deleteLater()
         if not self.pending:
+            self.attach_btn.setText("📎")
+            self.attach_btn.setToolTip("Attach files to add context to your message")
             self.attach_bar.hide()
             return
+        self.attach_btn.setText(f"📎 {len(self.pending)}")
+        self.attach_btn.setToolTip(f"{len(self.pending)} attachment(s) queued as message context")
         for path in self.pending:
             chip = QtWidgets.QPushButton(f"{os.path.basename(path)}  ✕")
             chip.setToolTip(path)
@@ -1121,6 +1325,87 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
             self._set_status("Attachments are sent with your next message once Oscar is done.")
         self._render()
 
+    def _queue_busy_send(self) -> None:
+        """Send pressed while ANOTHER chat's turn runs: steering would hand the text to that chat's
+        conversation, so the message waits in its own chat instead (a "queued" bubble; it goes out by
+        itself once the panel is free and its chat is the one shown — a chat opened only later asks
+        first). Attached images ride with it; other attachments stay pending, exactly as with a steer."""
+        text = self.input.toPlainText().strip()
+        if not text:
+            return
+        attachments, images = self._late_image_attachments()
+        sent = {a.path for a in attachments}
+        if sent:
+            self.pending = [p for p in self.pending if p not in sent]
+            self._refresh_attach_bar()
+        block = self._append(Block.USER, text)
+        block.queued = True
+        self._waiting_sends.append({"session": self._current_session(), "text": text, "images": images,
+                                    "block": block})
+        self.input.clear()
+        if self.pending:
+            self._set_status("Attachments are sent with your next message once Oscar is done.")
+        else:
+            self._set_status("Queued — sent when the turn in the other chat finishes.")
+        self._render()
+
+    def _deliver_waiting_sends(self, opening: bool = False) -> None:
+        """Start the turns of the messages that queued while another chat's turn ran: only into their own
+        chat, only while the panel is free. The queue is searched for the chat shown, so a message behind
+        another chat's never blocks it; a chat that is not shown keeps waiting — its message goes out when
+        the user opens it, and a waiting send is never sent into a different chat.
+
+        ``opening``: the delivery runs because the user opened the chat, not because a turn just ended
+        there — the message may be long stale, so it asks before it spends a request."""
+        while not self._busy() and self._waiting_sends:
+            self._waiting_sends = [w for w in self._waiting_sends if w.get("session") in self.sessions]
+            current = self._current_session()
+            index = next((i for i, w in enumerate(self._waiting_sends) if w.get("session") is current), None)
+            if index is None:
+                break                           # nothing waits for the chat shown: it delivers when the user opens it
+            item = self._waiting_sends[index]
+            if opening and not self._confirm_waiting_send(item):
+                self._hold_waiting_send(item)   # not now: the text waits in the chat's composer instead
+                continue
+            self._send_text(str(item.get("text") or ""), images=list(item.get("images") or ()))
+            if self.worker is None:
+                break      # the send was blocked (signed out, Terms…): the message keeps waiting in its chat
+            del self._waiting_sends[index]      # the turn started: only now does its bubble give way to the real one
+            block = item.get("block")
+            if block is not None and block in self.blocks:
+                self.blocks.remove(block)       # the real send shows the message again
+            self._render()
+
+    def _confirm_waiting_send(self, item: dict) -> bool:
+        """Ask about a waiting message the user only now returns to (it may be long outdated)."""
+        session = item.get("session")
+        title = str((session or {}).get("title") or "this chat")
+        ret = QtWidgets.QMessageBox.question(
+            self, "Oscar",
+            f"Send the message that waited in “{title}”?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No)
+        return ret == QtWidgets.QMessageBox.Yes
+
+    def _hold_waiting_send(self, item: dict) -> None:
+        """The user chose not to send a waiting message now: its text goes to the chat's composer (its
+        images ride the next send from there) and the "queued" bubble gives way to it."""
+        for i, w in enumerate(self._waiting_sends):
+            if w is item:
+                del self._waiting_sends[i]
+                break
+        block = item.get("block")
+        if block is not None and block in self.blocks:
+            self.blocks.remove(block)
+        text = str(item.get("text") or "").strip()
+        if text:
+            draft = self.input.toPlainText().strip()
+            self.input.setPlainText(f"{text}\n\n{draft}" if draft else text)
+        images = list(item.get("images") or ())
+        if images:
+            self._carry_images = images + [i for i in self._carry_images if i not in images]
+        self._render()
+
     def _build_content(self, text: str, attachments: list) -> str:
         """The stored user message (``attachments.build_user_message``). Reading a PDF can take seconds (poppler up to
         20 s, the built-in reader much longer on a large file), so it runs on a helper thread while a local event
@@ -1173,6 +1458,9 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
             if workspace is not None:
                 workspace.turn.refuse("Oscar is busy with another turn in FreeCAD.")
                 return
+            if not self._turn_chat_shown():
+                self._queue_busy_send()   # another chat's turn runs: the message waits in ITS chat, never steers it
+                return
             self._steer_while_busy()
             return
         # The latest AI model settings first, for the user's turns and the workspace's alike: a pull older than a
@@ -1181,7 +1469,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         if workspace is not None:
             text, pending, profile = workspace.text.strip(), list(workspace.attachments), workspace.profile
         else:
-            text, pending, profile = self.input.toPlainText().strip(), list(self.pending), _params.active_profile()
+            text, pending, profile = self.input.toPlainText().strip(), list(self.pending), self._chat_profile()
         if not text and not pending:
             return
         blocker = self._send_blocker(profile)
@@ -1273,7 +1561,6 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
             block.revert_enabled = False
         self._turn_seq += 1
         self._turn_view = TurnView()
-        self._turn_asks = []
         self._steps_by_call = {}
         self._turn_outcome = ("", "")
         self._turn_request = text
@@ -1287,7 +1574,8 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
                 on_round=self._round_persister(session) if session is not None else None,
                 session_id=str(session.get("id") or "") if session is not None else "",
                 origin="workspace" if workspace is not None else "freecad",
-                **({"profile": profile} if workspace is not None else {}))
+                profile=profile)
+            self._turn_session = session    # the chat this turn writes to, whichever is shown meanwhile
         except Exception as e:
             self._append(Block.ERROR, str(e))
             self._set_busy(False)
@@ -1353,7 +1641,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
 
     def _start_assistant_block(self):
         self._stream_buffer = ""
-        self._current = self._append(Block.ASSISTANT, "")
+        self._current = self._turn_append(Block.ASSISTANT, "")
         self._dirty = True
 
     def _stop(self):
@@ -1365,8 +1653,9 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
 
     def _on_flow_button(self):
         """The trailing Send button (idle only — while a turn runs the Stop square takes
-        its place; pause/resume lives in the heartbeat row)."""
-        if self.worker is None:
+        its place; pause/resume lives in the heartbeat row). In another chat it sends all the
+        same: that composer is idle and the message waits there."""
+        if self.worker is None or not self._turn_chat_shown():
             self._send()
 
     def _on_pause_button(self):
@@ -1378,24 +1667,42 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
             self._paused = False
             self.worker.resume()
             self._set_status("Thinking")
+            self._sync_turn_chrome()
         else:
             self.worker.pause()
             self._set_status("Pausing after the current step…")
 
     def _on_flow_paused(self, paused: bool):
         self._paused = bool(paused)
+        self._sync_turn_chrome()
         self._update_heartbeat()
         self._set_status("⏸ Paused" if paused else "Thinking")
 
     def _set_busy(self, busy: bool):
-        self.profile_combo.setEnabled(not busy)
+        self.profile_button.setEnabled(not busy)
+        self.model_button.setEnabled(not busy)
+        if not busy:
+            self._paused = False
+        self._sync_turn_chrome(busy)
+
+    def _sync_turn_chrome(self, busy: bool | None = None) -> None:
+        """The turn controls belong to the chat whose turn is running: the Stop square, the sending frame,
+        the activity pulse, Esc and the heartbeat. Another chat shown keeps its idle composer — its Send
+        button shows and the message queues in it, Esc is the application's again, and pause / stop live in
+        the turn's own chat (``busy``: the caller's word for it; default: a worker is running)."""
+        if busy is None:
+            busy = self.worker is not None
+        active = bool(busy) and self._turn_chat_shown()
         # the Send/Stop toggle: exactly one of the two trailing widgets is shown
-        self.stop_btn.setVisible(bool(busy))
-        self.send_btn.setVisible(not busy)
-        self._esc_shortcut.setEnabled(bool(busy))
+        self.stop_btn.setVisible(active)
+        self.send_btn.setVisible(not active)
+        self.input_frame.setProperty("sending", active)
+        self.input_frame.style().unpolish(self.input_frame)
+        self.input_frame.style().polish(self.input_frame)
+        self._esc_shortcut.setEnabled(active)
         pulse = getattr(self, "activity_pulse", None)
         if pulse is not None:
-            if busy:
+            if active:
                 if pulse.state() != QtCore.QAbstractAnimation.Running:
                     pulse.start()
             else:
@@ -1403,8 +1710,6 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
                 effect = getattr(self, "activity_effect", None)
                 if effect is not None:
                     effect.setOpacity(1.0)
-        if not busy:
-            self._paused = False
 
     # -- turn status (Thinking… / Running tool… / live card timer) -----------
 
@@ -1446,7 +1751,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
             # echo of a steer: the "queued" tag on the user bubble already says it)
             App.Console.PrintLog(f"Oscar: {text}\n")
             return
-        self._append(Block.TOOL, text)   # Block.html draws the ℹ
+        self._turn_append(Block.TOOL, text)   # a notice of the running turn belongs to its own chat; Block.html draws the ℹ
         self._render()
 
     # -- rendering -----------------------------------------------------------
@@ -1568,7 +1873,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
                     if not event.modifiers() & QtCore.Qt.ShiftModifier:
                         self._send()
                         return True
-                if event.key() == QtCore.Qt.Key_Escape and self._busy():
+                if event.key() == QtCore.Qt.Key_Escape and self._busy() and self._turn_chat_shown():
                     self._stop()
                     return True
             if event.type() == QtCore.QEvent.FocusIn:
@@ -1600,6 +1905,9 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         logs_layout = QtWidgets.QVBoxLayout(self._logs_page)
         logs_layout.setContentsMargins(0, 6, 0, 0)
         self.logs_view = _tabs.make_timeline_tab()
+        opened = getattr(self.logs_view, "open_snapshot", None)
+        if opened is not None and hasattr(opened, "connect"):
+            opened.connect(self._open_local)
         logs_layout.addWidget(self.logs_view)
 
     def _on_tab_changed(self, index: int) -> None:
@@ -1611,10 +1919,14 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
             self._refresh_logs()
 
     def _grow_input(self) -> None:
-        """Auto-expanding composer: one line up front, up to ~5 lines, then it scrolls."""
-        doc_height = self.input.document().size().height()
-        frame = self.input.frameWidth()
-        self.input.setFixedHeight(max(48, min(140, int(doc_height + frame + 12))))
+        """Auto-expanding composer: one line up front, up to three lines, then it scrolls."""
+        text = self.input.toPlainText()
+        if not text:
+            self.input.setFixedHeight(38)
+            return
+        lines = max(1, self.input.document().blockCount())
+        line_height = self.input.fontMetrics().lineSpacing()
+        self.input.setFixedHeight(max(38, min(76, 38 + (lines - 1) * line_height)))
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -1644,6 +1956,23 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
             doc = None
         return doc
 
+    def _params_document(self):
+        """Resolve the FreeCAD document bound to this chat; a closed binding never falls through to another chat's active doc."""
+        session = self._current_session()
+        name = str((session or {}).get("doc_name") or "")
+        if name:
+            try:
+                doc = App.listDocuments().get(name)
+            except Exception:  # noqa: BLE001 - FreeCAD may be closing
+                doc = None
+            return doc
+        doc = self._active_doc()
+        if doc is not None and session is not None:
+            session["doc_name"] = str(getattr(doc, "Name", "") or "")
+            if session.get("history"):
+                self._persist_current()
+        return doc
+
     def _refresh_params(self) -> None:
         """Re-read the active document's parameter sheet (GUI thread; on demand, never polling).
 
@@ -1654,7 +1983,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         if view is None:
             return
         table = {"sheet": "", "rows": []}
-        doc = self._active_doc()
+        doc = self._params_document()
         if doc is not None:
             try:
                 from . import project_gui as _pgui
@@ -1669,22 +1998,80 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
     def _apply_params(self, edits: "list[dict]") -> dict:
         """Apply (N) on the Parameters page: the real write path (one undo transaction, dependent
         rebuild, rollback on failure), then the outcome is recorded in the chat."""
-        doc = self._active_doc()
+        session = self._current_session()
+        doc = self._params_document()
         if doc is None:
-            self._flash_status("No open document to apply parameters to.")
-            return {"ok": False, "text": "no document"}
+            text = "The document bound to this chat is not open. Open it and refresh Parameters before applying."
+            self._flash_status(text, 6000)
+            return {"ok": False, "text": text}
+        doc_name = str(getattr(doc, "Name", "") or "")
+        if not doc_name:
+            return {"ok": False, "text": "The bound FreeCAD document has no name."}
+        project = self._bind_project(session) if session is not None else None
+        spec_dict = None
+        reference_status = ""
+        if project is not None:
+            try:
+                if str((project.manifest or {}).get("active_doc") or "") == doc_name:
+                    spec_dict = project.read_spec()
+                    reference_status = project.reference_status()
+            except Exception as e:  # noqa: BLE001 - spec is optional for ordinary Params sheets
+                self._log_panel_error("params_spec", e)
         try:
             from .tools_kit_params import apply_parameter_edits
 
-            result = apply_parameter_edits(doc.Name, edits)
+            result = apply_parameter_edits(doc_name, edits, spec_dict=spec_dict,
+                                           reference_status=reference_status)
         except Exception as e:   # noqa: BLE001 - the helper reports failures itself
             self._log_panel_error("params_apply", e)
             result = {"ok": False, "text": f"Apply failed: {type(e).__name__}: {e}"}
         text = str(result.get("text") or ("Applied." if result.get("ok") else "Apply failed."))
+        record = None
+        if session is not None:
+            try:
+                if project is not None:
+                    record = project.record_panel_action(
+                        tool="apply_parameter_edits", title="Apply parameter edits",
+                        args={"edits": edits}, text=text, ok=bool(result.get("ok")), doc=doc_name,
+                        geometry=bool(result.get("ok")), turn_id=f"panel-{session.get('id') or ''}")
+            except Exception as e:  # noqa: BLE001 - logging must not change the document apply outcome
+                self._log_panel_error("params_activity", e)
+        if result.get("ok"):
+            if project is not None and result.get("spec"):
+                try:
+                    project.save_spec(result["spec"])
+                except Exception as e:  # noqa: BLE001 - report persistence trouble without masking confirmed CAD update
+                    self._log_panel_error("params_spec_save", e)
+            if record is not None and record.snapshot:
+                try:
+                    path = self._abs_snapshot(record.snapshot)
+                    call_id = f"panel-params-{record.index}"
+                    if os.path.isfile(path) and self._thumbs.load(call_id, path, keep={call_id}) is not None:
+                        preview = self._append(Block.PREVIEW, "Parameters updated")
+                        preview.snapshot_path = path
+                        preview.call_id = call_id
+                        applied = result.get("applied") or []
+                        preview.status = "Updated · " + ", ".join(str(name) for name in applied[:3])
+                        files = (getattr(self, "_artifacts", {}) or {}).get("files") or []
+                        if any(str(item.get("kind") or "") == "fcstd"
+                               and str(item.get("name") or "") == "model.FCStd"
+                               for item in files if isinstance(item, dict)):
+                            preview.actions.append(("oscar://artifact/open-doc", "model.FCStd"))
+                except Exception as e:  # noqa: BLE001 - preview trouble must not mask a confirmed edit
+                    self._log_panel_error("params_preview", e)
+            try:
+                Gui.updateGui()   # recompute already updated the document; ask FreeCAD to repaint its tree and view
+            except Exception:  # noqa: BLE001 - refresh is best effort after the confirmed model mutation
+                pass
         self._append(Block.TOOL, ("⚙ " + text) if result.get("ok") else ("⚠ " + text))
         self._dirty = True
         self._render()
         self._refresh_params()
+        if record is not None:
+            self._logs_signature = None
+            self._refresh_logs()
+        if result.get("ok") and session is not None:
+            self._persist_current()
         return result
 
     def _refresh_logs(self) -> None:
@@ -1711,7 +2098,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         if project is None:
             return
         try:
-            records, _starts = project.read_steps()
+            records = project.read_steps()
         except Exception as e:   # noqa: BLE001 - an unreadable journal shows the empty state
             self._log_panel_error("logs_refresh", e)
             return
@@ -1864,7 +2251,6 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         # The bar under the transcript is the quick answer surface; the card above is the record.
         self._show_question_bar(f"{title}\n{body}" if body else title,
                                 [choice.label for choice in (choices or [])], approve=True)
-        self._bar_question_qid = qid      # the bar now speaks for THIS question (answer routing)
 
         loop = _qc.QEventLoop(self)
         settled: list[str] = []
@@ -1908,18 +2294,6 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         key = settled[0] if settled else ""
         self._settle_question(block, key, choices or [], cancelled(), int(float(remaining_s)))
         return key or ""
-
-    def _deliver_question_answer(self, qid: str, key: str) -> None:
-        """Settle the open question ``qid`` with ``key`` — the ONE tail every answer path (card
-        anchor, QuestionsBar) funnels into, so an answer reaches the waiting worker exactly once."""
-        open_q = self._open_questions.pop(qid, None)   # close the double-click window first
-        if open_q is None:
-            self._flash_status("That question is no longer open.")
-            return
-        open_q["settle"](key)
-        self._dirty = True
-        self._render()
-
     def _on_question_answer(self, spec: str) -> None:
         """`oscar://answer/<id>/<key>` — a click on a QUESTION card's button."""
         qid, _, key = spec.partition("/")
@@ -1938,37 +2312,10 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
                 self, "Reason (optional)", "Tell Oscar why (optional):")
             if ok and text.strip():
                 block.reason = text.strip()
-        self._deliver_question_answer(qid, key)
-
-    def _question_bar_answer(self, label: str) -> bool:
-        """A QuestionsBar option click answers the netguard question the bar was armed with (the
-        same waiting worker a card click settles). True = consumed — the label never falls through
-        to the chat as a message while a question waits for it."""
-        qid = getattr(self, "_bar_question_qid", None)
-        if qid is None:
-            return False                       # the bar is not showing a netguard question
-        open_q = self._open_questions.get(qid)
-        if open_q is None:
-            self._flash_status("That question is no longer open.")
-            return True                        # answered after it settled: report it, never re-send it
-        if open_q["block"] not in self.blocks:
-            # the question belongs to another chat: chat isolation — answer where it was asked
-            self._flash_status("Open this chat to answer that question.")
-            return True
-        choice = next((c for c in open_q["choices"] if c.label == label), None)
-        if choice is None:
-            self._flash_status("Pick one of the listed choices.")
-            return True                  # not an option: tell the user, do not send it as a message
-        self._deliver_question_answer(qid, choice.key)
-        return True
-
-    def _question_bar_custom(self, text: str) -> bool:
-        """A typed bar answer cannot settle a netguard question (its choices are keyed, not free
-        text): say so and consume it — never send it into the chat as if it had been accepted."""
-        if getattr(self, "_bar_question_qid", None) is None:
-            return False
-        self._flash_status("That question needs one of the listed choices.")
-        return True
+        self._open_questions.pop(qid, None)   # close the double-click window
+        open_q["settle"](key)
+        self._dirty = True
+        self._render()
 
     def _settle_question(self, block, key: str, choices, was_cancelled: bool, timeout_s: int) -> None:
         """Flip the card to its final state (approved / rejected / timeout / cancelled)."""
@@ -1983,224 +2330,6 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         self._dirty = True
         self._render()
         self._clear_question_bar()   # the question is no longer open
-
-    # -- ask_user decision cards (tools_ask renders through here; the WORKER waits on askuser's registry) ----
-
-    def _register_ask_surface(self) -> None:
-        """Become ``tools_ask.surface``: the ask_user tool renders its decision/wizard cards here. The
-        card call is render-and-return — the agent worker waits on ``askuser.REGISTRY``, not on it."""
-        self._open_asks = getattr(self, "_open_asks", {})
-        self._turn_asks = getattr(self, "_turn_asks", [])
-        try:
-            from . import tools_ask as _tools_ask
-
-            _tools_ask.surface = self._ask_surface
-        except Exception:   # noqa: BLE001
-            pass
-
-    def _ask_questions(self, request) -> list:
-        return request.payload.get("wizard") or [request.payload]
-
-    def _ask_active_index(self, state) -> int:
-        return next(i for i in range(len(self._ask_questions(state["request"]))) if i not in state["answers"])
-
-    def _ask_card_text(self, request, active: int) -> str:
-        """The card body: the question headline (and wizard progress / answered summary)."""
-        questions = self._ask_questions(request)
-        lines = []
-        if request.wizard:
-            lines.append(f"Decision wizard — question {active + 1} of {len(questions)}")
-        question = questions[active]
-        lines.append(question["title"])
-        if question.get("subtitle"):
-            lines.append(question["subtitle"])
-        for i in range(active):
-            lines.append("answered: " + questions[i]["title"])
-        return "\n".join(lines)
-
-    def _ask_actions(self, request, active: int):
-        return [(f"oscar://ask/{request.id}/{active}/{i}", option["label"])
-                for i, option in enumerate(self._ask_questions(request)[active]["options"])]
-
-    def _ask_bar(self, request, active: int) -> None:
-        question = self._ask_questions(request)[active]
-        title = question["title"] + (f"\n{question['subtitle']}" if question.get("subtitle") else "")
-        self._show_question_bar(title, [o["label"] for o in question["options"]])
-        self._bar_ask_id = request.id     # the bar now speaks for THIS decision card (answer routing)
-
-    def _ask_surface(self, request) -> None:
-        """``tools_ask.surface`` (GUI thread): append the decision card for ``request``, arm the bar and
-        the settle poller. Raises when no chat is open or the card belongs to another chat — the tool
-        then fails honestly instead of leaving an unanswerable question hanging."""
-        session = self._current_session()
-        if session is None:
-            raise RuntimeError("no chat is open to show the decision card in")
-        if str(session.get("id") or "") != request.conversation_id:
-            raise RuntimeError("the decision belongs to another chat")
-        block = self._question_append(self._ask_card_text(request, 0))
-        block.key = request.id
-        block.detail = "pending"
-        block.actions = self._ask_actions(request, 0)
-        state = {"request": request, "block": block, "answers": {}, "done": False}
-        self._open_asks[request.id] = state
-        self._dirty = True
-        self._render()
-        self._ask_bar(request, 0)
-
-        from PySide import QtCore as _qc
-
-        def _poll() -> None:
-            if request.event.is_set():      # settled elsewhere: timeout, Stop, shutdown
-                self._settle_ask(state)
-
-        poller = _qc.QTimer(self)
-        poller.timeout.connect(_poll)
-        poller.start(200)
-        state["poller"] = poller
-
-    def _on_ask_answer(self, spec: str) -> None:
-        """`oscar://ask/<id>/<question-index>/<option-index>` — an option click on a decision card."""
-        rid, _, rest = spec.partition("/")
-        qi_text, _, index_text = rest.partition("/")
-        state = self._open_asks.get(rid)
-        if state is None or state["done"]:
-            self._flash_status("That decision is no longer open.")
-            return
-        try:
-            qi, index = int(qi_text), int(index_text)
-        except ValueError:
-            return
-        questions = self._ask_questions(state["request"])
-        if not 0 <= qi < len(questions) or qi in state["answers"]:
-            return
-        options = questions[qi]["options"]
-        if not 0 <= index < len(options):
-            return
-        state["answers"][qi] = {"answer": options[index]["label"], "index": index}
-        self._ask_advance(state, qi)
-
-    def _ask_advance(self, state, answered_qi: int) -> None:
-        """Record the per-question answer, move the card to the next unanswered question, or resolve
-        the request in the registry when the last one is in (the worker wakes on its Event)."""
-        from . import askuser
-
-        request = state["request"]
-        questions = self._ask_questions(request)
-        nxt = next((i for i in range(len(questions)) if i not in state["answers"]), None)
-        if nxt is None:
-            state["done"] = True
-            session = self._current_session()
-            conversation = str(session.get("id") or "") if session else request.conversation_id
-            payload = ({"answers": [state["answers"][i] for i in range(len(questions))]}
-                       if request.wizard else dict(state["answers"][0]))
-            ok, err = askuser.REGISTRY.submit_answer(request.id, payload, conversation_id=conversation,
-                                                     run_id=request.run_id)
-            if not ok:
-                state["done"] = False
-                state["answers"].pop(answered_qi, None)   # the refused answer must not block the retry
-                self._flash_status(f"Answer could not be submitted ({err}). Please try again.")
-                return
-            self._settle_ask(state)
-            return
-        block = state["block"]
-        block.text = self._ask_card_text(request, nxt)
-        block.actions = self._ask_actions(request, nxt)
-        self._dirty = True
-        self._render()
-        self._ask_bar(request, nxt)
-
-    def _open_ask_of_current_chat(self):
-        session = self._current_session()
-        chat = str(session.get("id") or "") if session else ""
-        if not chat:
-            return None
-        for state in reversed(list(self._open_asks.values())):
-            if not state["done"] and state["request"].conversation_id == chat:
-                return state
-        return None
-
-    def _tracked_ask_state(self):
-        """The decision-card state the bar was armed with: ``(state, err)`` — ``err`` flashes and
-        consumes when the tracked card settled meanwhile or belongs to another chat."""
-        rid = getattr(self, "_bar_ask_id", None)
-        if rid is None:
-            if getattr(self, "_bar_question_qid", None) is not None:
-                return None, ""    # the bar speaks for a netguard question, never a decision card
-            return self._open_ask_of_current_chat(), ""      # untracked: the per-chat fallback
-        state = self._open_asks.get(rid)
-        if state is None:
-            return None, "That decision is no longer open."
-        session = self._current_session()
-        chat = str(session.get("id") or "") if session else ""
-        if chat and state["request"].conversation_id != chat:
-            return None, "Open this chat to answer that decision."
-        return state, ""
-
-    def _ask_bar_answer(self, label: str) -> bool:
-        """A QuestionsBar option click answers the open decision card of THIS chat. True = consumed —
-        the label never falls through to the chat as a message while the decision waits."""
-        state, err = self._tracked_ask_state()
-        if err:
-            self._flash_status(err)
-            return True
-        if state is None:
-            return False
-        qi = self._ask_active_index(state)
-        for i, option in enumerate(self._ask_questions(state["request"])[qi]["options"]):
-            if option["label"] == label:
-                state["answers"][qi] = {"answer": option["label"], "index": i}
-                self._ask_advance(state, qi)
-                return True
-        if getattr(self, "_bar_ask_id", None) is not None:
-            self._flash_status("Pick one of the listed choices.")
-            return True                  # the bar speaks for this decision: no fall-through to send
-        return False
-
-    def _ask_bar_custom(self, text: str) -> bool:
-        """A typed bar answer becomes the custom value of the open decision card (when it accepts
-        one). True = consumed — never sent into the chat while the decision waits."""
-        state, err = self._tracked_ask_state()
-        if err:
-            self._flash_status(err)
-            return True
-        if state is None:
-            return False
-        qi = self._ask_active_index(state)
-        question = self._ask_questions(state["request"])[qi]
-        if not (question.get("allow_free_text") or question.get("custom_value")):
-            if getattr(self, "_bar_ask_id", None) is not None:
-                self._flash_status("That decision takes one of the listed choices, not text.")
-                return True              # the bar speaks for this decision: no fall-through to send
-            return False
-        state["answers"][qi] = {"answer": text, "index": -1, "value": text}
-        self._ask_advance(state, qi)
-        return True
-
-    def _settle_ask(self, state) -> None:
-        """Flip the decision card to its final state (answered summary / cancelled / timeout)."""
-        from . import askuser
-
-        request = state["request"]
-        poller = state.pop("poller", None)
-        if poller is not None:
-            poller.stop()
-            poller.deleteLater()
-        self._open_asks.pop(request.id, None)
-        self._turn_asks = getattr(self, "_turn_asks", None) or []
-        self._turn_asks.append(request.record())      # persisted with the turn (blocks_meta["asks"])
-        block = state["block"]
-        if request.state == askuser.ANSWERED:
-            answers = request.answer.get("answers") if request.wizard else [request.answer]
-            block.detail = "answered"
-            block.reason = " | ".join(str(a.get("answer")) for a in answers if a)
-        else:
-            block.detail = str(request.state)
-            if request.state == askuser.TIMEOUT:
-                # the honest duration the waiter allowed (the render otherwise assumes 120 s)
-                block.reason = str(int(round(request.timeout_s)))
-        self._dirty = True
-        self._render()
-        self._clear_question_bar()
 
     def _settle_typed_clarification(self, text: str, attachments) -> None:
         """Record a custom answer or a new request on this chat's latest open clarification."""
@@ -2280,11 +2409,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         """Put an OPEN question in the bar under the transcript (a no-op when the seam is absent).
 
         ``options`` are the (label) choices; ``text`` may carry a title and body on two lines.
-        The transcript card remains the durable record — the bar is the quick way to answer it.
-        A new question re-arms the bar: previous answer routing (netguard question / decision
-        card) is dropped — the caller re-declares what the bar now speaks for."""
-        self._bar_question_qid = None
-        self._bar_ask_id = None
+        The transcript card remains the durable record — the bar is the quick way to answer it."""
         show = getattr(self, "_questions_show", None)
         if not callable(show):
             return
@@ -2296,8 +2421,6 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
             self._log_panel_error("question_bar", e)
 
     def _clear_question_bar(self) -> None:
-        self._bar_question_qid = None
-        self._bar_ask_id = None
         clear = getattr(self, "_questions_clear", None)
         if callable(clear):
             try:
@@ -2306,15 +2429,10 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
                 self._log_panel_error("question_bar_clear", e)
 
     def _on_bar_answer(self, text: str) -> None:
-        """``QuestionsBar.answered``: the chosen option settles whatever the bar speaks for — the
-        open decision card, the open netguard question, or the open clarification (which becomes
-        the next user message). An answer for a waiting question is NEVER sent as a message."""
+        """``QuestionsBar.answered``: the chosen option closes the open clarification of THIS
+        chat and becomes the next user message."""
         answer = str(text or "").strip()
         if not answer:
-            return
-        if self._ask_bar_answer(answer):
-            return
-        if self._question_bar_answer(answer):
             return
         block = next((b for b in reversed(self.blocks)
                       if b.kind == Block.QUESTION and b.detail == "clarification_pending"), None)
@@ -2327,14 +2445,9 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
 
     def _on_bar_custom(self, text: str) -> None:
         """``QuestionsBar.custom_answered``: a typed answer settles the open clarification the
-        same way the composer's would, then sends; a waiting question that cannot take free text
-        reports that instead of silently sending the text into the chat."""
+        same way the composer's would, then sends."""
         answer = str(text or "").strip()
         if not answer:
-            return
-        if self._ask_bar_custom(answer):
-            return
-        if self._question_bar_custom(answer):
             return
         self._settle_typed_clarification(answer, [])
         self._send_or_steer(answer)
@@ -2370,7 +2483,8 @@ def show_panel() -> None:
         # parameters can be silently dropped on exit — see oscar/params.py).
         mw.addDockWidget(QtCore.Qt.DockWidgetArea(_restored_dock_area()), dock)
         dock.setFloating(_params.get_bool("DockFloating", False))
-        dock.setMinimumWidth(280)
+        _apply_default_dock_geometry(dock)
+        mw.resizeDocks([dock], [400], QtCore.Qt.Orientation.Horizontal)
 
         # Keep floating state in sync so a restart restores the same layout.
         dock.dockLocationChanged.connect(
@@ -2381,6 +2495,15 @@ def show_panel() -> None:
 
 
 _DOCK_AREAS = (1, 2, 4, 8)  # Qt left, right, top, bottom — 2 (right) default
+
+
+def _apply_default_dock_geometry(dock: QtWidgets.QDockWidget) -> None:
+    """Apply the controlled default dock size (constants above). Called once at creation; the
+    minimums survive every later docking/floating, and no chat content can push past them in
+    the other direction either — the panel's size hints are content-independent."""
+    dock.setMinimumWidth(DOCK_MIN_WIDTH)
+    dock.setMinimumHeight(DOCK_MIN_HEIGHT)
+    dock.resize(DOCK_DEFAULT_WIDTH, DOCK_DEFAULT_HEIGHT)
 
 
 def _dock_area_value(area) -> int:

@@ -78,6 +78,9 @@ class EndToEndTest(FlowTestCase):
                         mock.patch.object(agent._tools, "run_tool", fake_run_tool)):
             patcher.start()
             self.addCleanup(patcher.stop)
+        # The panel resolves the chat's profile through its own list first: the seeded "OriginShape"
+        # account profile (signed out in tests) would block every send. Give the chat the mocked profile.
+        self.p._profiles = [params.Profile(name="t", provider="openai_compat", model="m")]
         self.addCleanup(self.stop_worker)
 
     def start_turn(self, text, script, validator=None):
@@ -89,7 +92,8 @@ class EndToEndTest(FlowTestCase):
         check = validator if validator is not None else (lambda doc, ctx: fake_validation(True))
 
         def factory(history, **kw):
-            return agent.AgentWorker(history, provider=provider, profile=profile, validator=check, **kw)
+            # the panel passes the chat's own profile (per-chat profiles) — a factory kwarg here would clash
+            return agent.AgentWorker(history, provider=provider, validator=check, **kw)
 
         with mock.patch.object(panel, "AgentWorker", factory):
             self.p.input.setPlainText(text)
@@ -129,12 +133,11 @@ class EndToEndTest(FlowTestCase):
         self.assertTrue(card.text.endswith("✓ validated"), card.text)
         self.assertFalse(card.expanded)
         self.assertEqual(len([s for s in card.steps if s.plain]), 1)       # the pre-tool remark folded into the card
-        # plan strip pinned, with the template plan of the intent
+        # plan strip pinned: the redesigned strip shows the plan's step progress (not the intent name)
         self.assertFalse(p.plan_strip.isHidden())
-        self.assertIn("generic_part", p.plan_strip.toPlainText())
+        self.assertTrue(p.plan_strip.toPlainText().strip())
         self.assertTrue(p._current_session()["ledger"]["steps"])
-        # the geometry step keeps its snapshot (the Logs page timeline later reads it from the journal;
-        # this harness mocks the tool layer above the journaling seam, so the card view is the surface here)
+        # the geometry step keeps its snapshot through another render
         snap = rows[1].view.snapshot_path
         self.assertTrue(snap)
         p._render()

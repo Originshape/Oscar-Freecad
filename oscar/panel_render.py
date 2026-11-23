@@ -45,7 +45,7 @@ from urllib.parse import quote
 
 __all__ = [
     "ACCOUNT_CARD_KINDS", "ACCOUNT_TARGETS", "DETAIL_LIMIT", "StepView", "TurnView", "account_badge", "account_card",
-    "account_card_html", "account_menu", "account_problem_card", "answer_html", "answer_sections",
+    "account_card_html", "account_menu", "account_problem_card", "answer_html", "answer_sections", "cad_preview_html",
     "artifacts_strip_html", "chips_row_html", "classify_file_link", "clip_text", "format_credits", "group_images",
     "header_text", "heartbeat_text", "images_html", "inline_image_target", "make_turn_meta", "md_to_html",
     "message_role", "outcome_badge", "outcome_color", "parse_anchor", "parse_artifact_anchor", "plan_strip_html",
@@ -57,9 +57,9 @@ __all__ = [
 DETAIL_LIMIT = 12000   # characters of a tool result / script shown when a step row is expanded
 _SUMMARY_LIMIT = 20000  # characters of the Build Summary the card renders
 
-_OK = "#3aa76d"
-_WARN = "#d9902b"
-_BAD = "#e06c5a"
+_OK = "#3cc9c0"     # teal — the single positive colour (panel_theme.TOKENS["success"])
+_WARN = "#e6b422"   # attention yellow
+_BAD = "#ef6f61"
 _LIVE_PHASE_ACTIVITIES = ("thinking", "writing", "tool_args")
 _NO_NOTE = "not a geometry tool"   # the snapshot_note of every non-geometry step: expected, so never shown
 
@@ -635,12 +635,40 @@ def summary_block_html(markdown: str, actions: "list[tuple[str, str]] | None" = 
     return card + row
 
 
-# The UI-redesign tokens this module's two new renderers need. panel_render is PURE (no oscar
+def cad_preview_html(path: str, call_id: str, title: str = "", actions=None, status: str = "Updated") -> str:
+    """Compact in-chat CAD preview using an existing step snapshot and safe panel anchors."""
+    path, call_id = _text(path).strip(), _text(call_id).strip()
+    if not path or not call_id:
+        return ""
+    links = []
+    for target, label in actions or []:
+        target, label = _text(target), _text(label)
+        if target and not re.search(r"[\s'\"<>]", target):
+            links.append(f"<a href='{target}' style='display:inline-block;text-decoration:none;color:{_Q_TOKENS['text']};"
+                         f"background:{_Q_TOKENS['bg_recessed']};border:1px solid {_Q_TOKENS['border']};"
+                         f"border-radius:4px;padding:3px 7px;'>{_esc(label)}</a>")
+    t = _Q_TOKENS
+    heading = f"<div style='font-weight:600;margin-bottom:4px;color:{t['text']};'>{_esc(title or 'CAD preview')}</div>"
+    image = (f"<img src='{thumb_url(call_id)}' width='320' "
+             f"style='border-radius:4px;border:1px solid {t['border']};'>")
+    chip = (f"<span style='display:inline-block;color:{t['success']};background:{t['bg_recessed']};"
+            f"border:1px solid {t['border']};border-radius:4px;padding:3px 6px;font-size:small;'>"
+            f"✓ {_esc(status or 'Updated')}</span>")
+    action_links = " &nbsp; ".join(links)
+    action_row = (f"<div style='display:flex;align-items:center;margin-top:5px;'>{chip}"
+                  f"<span style='margin-left:8px;'>{action_links}</span></div>")
+    return (f"<div style='background:{t['bg_card']};border:1px solid {t['border']};border-radius:6px;"
+            f"padding:6px 8px;margin:4px 0 4px 4px;'>{heading}{image}{action_row}</div>")
+
+
+# The UI-redesign tokens this module's renderers need. panel_render is PURE (no oscar
 # imports — the module contract test pins it), so the approved values are inlined here with
-# panel_theme.TOKENS as the single source of truth for the widget side.
-_Q_TOKENS = {"bg_card": "#2E2E32", "bg_recessed": "#1E1E21", "border": "#3A3A3F",
-             "accent": "#3B82F6", "success": "#22C55E", "danger": "#e06c5a",
-             "warn": "#ffb547", "text": "#F4F4F5", "text_2": "#A1A1AA", "text_3": "#71717A"}
+# panel_theme.TOKENS as the single source of truth for the widget side (card-chat palette
+# 2026-11-17: teal accent, attention yellow, link blue).
+_Q_TOKENS = {"bg_card": "#1b1f29", "bg_recessed": "#0f1115", "border": "#272c38",
+             "user_bg": "rgba(60,201,192,0.14)", "accent": "#3cc9c0", "success": "#3cc9c0",
+             "danger": "#ef6f61", "warn": "#e6b422", "attention": "#e6b422", "link": "#6ea8ff",
+             "text": "#e6e8ee", "text_2": "#8a90a0", "text_3": "#6f7583"}
 
 
 def _q_card(body: str, *, accent: str = "") -> str:
@@ -752,7 +780,7 @@ def telemetry_footer(steps, *, changed: int = 0, recomputed: int = 0, failed: bo
     if recomputed:
         parts.append(f"recomputed {recomputed}")
     glyph = "✗" if failed else "✓"
-    color = "#e06c5a" if failed else "#22C55E"
+    color = _BAD if failed else _OK
     return (f"<div style='color:{_css(muted)};font-size:small;margin-top:2px;'>"
             f"<span style='color:{color};'>{glyph}</span> "
             f"{_esc(' · '.join(parts))} · {total:.1f}s</div>")
@@ -1362,7 +1390,7 @@ def _current_index(steps: list[dict]) -> int:
     return -1
 
 
-def plan_strip_html(ledger: dict | None, *, accent: str = "#1e6ee8", muted: str = "#888888",
+def plan_strip_html(ledger: dict | None, *, accent: str = "#3cc9c0", muted: str = "#8a90a0",
                     collapsed: bool = False) -> str:
     """The pinned plan strip from a Ledger JSON dict; ``""`` when there are no steps.
 
@@ -1657,7 +1685,7 @@ class TurnView:
             merged["phase"] = _text(progress.get("phase"))
         return merged
 
-    def plan_html(self, *, accent: str = "#1e6ee8", muted: str = "#888888", collapsed: bool = False) -> str:
+    def plan_html(self, *, accent: str = "#3cc9c0", muted: str = "#8a90a0", collapsed: bool = False) -> str:
         """``plan_strip_html`` of the latest plan (``plan_view``)."""
         return plan_strip_html(self.plan_view(), accent=accent, muted=muted, collapsed=collapsed)
 
@@ -1759,16 +1787,6 @@ def restore_card_html(title: str, messages: int, meta: Any, *, notice: str = "",
         hidden = len(steps) - 8 + _int(turn.get("more"))
         if hidden > 0:
             out.append(f"<div style='margin-left:14px;color:{muted};'>… +{hidden} more steps</div>")
-        for ask in [a for a in turn.get("asks") or [] if isinstance(a, dict)][:6]:
-            payload = ask.get("payload") if isinstance(ask.get("payload"), dict) else {}
-            titles = [q.get("title") for q in payload.get("wizard") or [] if isinstance(q, dict)]
-            title = _text(titles[0] if titles else payload.get("title")) or "(decision)"
-            answers = " | ".join(_text(a.get("answer")) for a in ask.get("answers") or []
-                                 if isinstance(a, dict) and _text(a.get("answer")))
-            state = _text(ask.get("state")) or "closed"
-            icon = "◆" if state == "answered" else "◇"
-            out.append(f"<div style='margin-left:14px;color:{muted};'>{icon} decision: {_esc(title)} — "
-                       f"{_esc(answers or state)}</div>")
         out.append("</div>")
     ids = [tid for tid, _path in restore_thumbs(meta, key) if thumbs is None or tid in thumbs]
     if ids:
