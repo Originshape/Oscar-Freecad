@@ -320,15 +320,26 @@ def _run_process(argv: list[str], timeout: float, env: dict | None = None, code:
                 pass
         raise
     rc = proc.returncode
+    # A launcher shell reports signal termination as 128 + signal instead of preserving
+    # subprocess' usual negative return code. Keep the public result consistent.
+    if os.name != "nt" and 128 < rc < 256:
+        rc -= 128
     stderr, info = _split_error(stderr)
+    output = (_clean(stdout) + "\n" + _clean(stderr)).strip()
+    # The engine's own crash handler (Linux AppImage freecadcmd) prints 'Program received signal SIG…'
+    # with a backtrace and then exits 1 instead of dying by the signal — the returncode alone says
+    # "clean non-zero exit" there, so the printed report is the crash evidence.
+    handler_signal = _handler_reported_crash(output) if rc != 0 else 0
     out: dict[str, Any] = {
         "success": rc == 0,
         "returncode": rc,
-        "crashed": _is_crash(rc),
-        "output": (_clean(stdout) + "\n" + _clean(stderr)).strip(),
+        "crashed": _is_crash(rc) or handler_signal > 0,
+        "output": output,
     }
     if rc != 0:
         out["error"] = _failure_text(code, rc, info, bool(out["output"]))
+        if handler_signal and not _is_crash(rc):
+            out["error"] = _failure_text(code, -handler_signal, None, bool(out["output"]))
     return out
 
 
@@ -342,13 +353,25 @@ def _remove(path: str) -> None:
 
 def _is_crash(returncode: int) -> bool:
     """A native crash: a negative return code (killed by a signal, POSIX) or an NTSTATUS error code (Windows,
-    ``0xC0000005`` = access violation)."""
-    return returncode < 0 or returncode >= 0xC0000000
+    ``0xC0000005`` = access violation), including POSIX shell status ``128 + signal``."""
+    return returncode < 0 or (os.name != "nt" and 128 < returncode < 256) or returncode >= 0xC0000000
+
+
+_CRASH_REPORT = re.compile(r"Program received signal (SIG\w+)", re.MULTILINE)
+
+
+def _handler_reported_crash(output: str) -> int:
+    """The signal NUMBER the engine's crash handler reported (``Program received signal SIGSEGV`` + backtrace,
+    then exit 1 — the AppImage freecadcmd converts the fault instead of dying by it), ``0`` when absent."""
+    m = _CRASH_REPORT.search(output)
+    if m is None:
+        return 0
+    return int(getattr(signal, m.group(1), 0) or 0)   # group(1) is the full name, SIGSEGV
 
 
 def _signal_text(returncode: int) -> str:
-    if returncode < 0:
-        number = -returncode
+    if returncode < 0 or (os.name != "nt" and 128 < returncode < 256):
+        number = -returncode if returncode < 0 else returncode - 128
         try:
             return f"signal {number} ({signal.Signals(number).name})"
         except ValueError:

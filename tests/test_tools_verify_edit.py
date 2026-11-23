@@ -242,6 +242,25 @@ class PerturbationTest(unittest.TestCase):
         self.assertEqual(E._content(1 / 3, "mm"), "=0.3333333333 mm")
 
 
+class AdaptiveBudgetTest(unittest.TestCase):
+    """The cap follows the MEASURED per-side cost so a loaded runner keeps the whole parameter tail (CI test_42)."""
+
+    def test_a_fast_machine_keeps_the_floor(self):
+        self.assertEqual(E.adaptive_budget(0.2, 8), E.BUDGET_S)
+        self.assertEqual(E.adaptive_budget(0.0, 8), E.BUDGET_S)          # nothing measured yet: the floor
+        self.assertEqual(E.adaptive_budget(0.5, 4), E.BUDGET_S)
+
+    def test_the_cap_grows_with_the_measured_pace(self):
+        # 8 parameters need 2 sides each, plus one side of margin so the last minus is not cut off
+        self.assertAlmostEqual(E.adaptive_budget(2.0, 8), 2.0 * (2 * 8 + 1))
+        self.assertGreater(E.adaptive_budget(3.0, 8), E.BUDGET_S)
+
+    def test_the_hard_cap_is_never_exceeded(self):
+        self.assertEqual(E.adaptive_budget(3600.0, 8), E.MAX_BUDGET_S)
+        self.assertEqual(E.adaptive_budget(20.0, 8), E.MAX_BUDGET_S)         # 20 x 17 = 340 > cap
+        self.assertEqual(E.MAX_BUDGET_S, 240.0)                             # inside tools_verify._EDIT_TIMEOUT_S (300 s)
+
+
 # ---------------------------------------------------------------------------------------------- the rebuild (real documents)
 
 
@@ -381,6 +400,26 @@ class EditabilityTest(RebuildCase):
         self.assertEqual((result["checked"], result["parameters"]), (0, []))
         self.assertEqual(result["not_checked"], ["hei", "len", "slot", "wid"])
         self.assertEqual(self.cells(doc), before)
+
+    def test_a_slow_machine_still_checks_every_parameter(self):
+        # Regression for CI test_42: the flat 20 s cap expired after 4 of 8 parameters on loaded runners, so the
+        # golden editability block lost its tail. Each side costs 6 s here (accrued inside the health scan, as a
+        # real recompute+health pass would); the adaptive cap must still reach all 4 fixture parameters.
+        doc = self.parametric(slot=8.0)
+        state = {"t": 0.0}
+        real = health_eval.model_health
+
+        def slow_health(*args, **kwargs):
+            state["t"] += 6.0
+            return real(*args, **kwargs)
+
+        with mock.patch.object(health_eval, "model_health", slow_health):
+            result = E.editability_test(doc, self.table(doc), clock=lambda: state["t"])
+        self.assertEqual(result["checked"], 8, result["not_checked"])        # 4 parameters x 2 sides
+        self.assertEqual(result["not_checked"], [])
+        self.assertGreater(result["budget_s"], E.BUDGET_S)                    # scaled up from the measured pace
+        self.assertLessEqual(result["budget_s"], E.MAX_BUDGET_S)
+        self.assertTrue(result["restored"])
 
     def test_stop_is_honoured_before_every_edit(self):
         doc = self.parametric(slot=8.0)

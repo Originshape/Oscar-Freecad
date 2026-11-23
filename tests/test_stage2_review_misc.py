@@ -86,13 +86,17 @@ class ProjectsDirTildeTest(unittest.TestCase):
         from oscar import paths
 
         with mock.patch.dict(os.environ, {"OSCAR_PROJECTS_DIR": "~/oscar-projects-x"}):
-            self.assertEqual(paths.projects_dir(probe=False), os.path.join(os.path.expanduser("~"), "oscar-projects-x"))
+            # the override returns expanduser() verbatim, which keeps the '/' of '~/...' on Windows — same path
+            self.assertEqual(os.path.normpath(paths.projects_dir(probe=False)),
+                             os.path.normpath(os.path.join(os.path.expanduser("~"), "oscar-projects-x")))
 
     def test_an_absolute_override_is_returned_as_given(self):
         from oscar import paths
 
         with mock.patch.dict(os.environ, {"OSCAR_PROJECTS_DIR": "/tmp/some/projects"}):
-            self.assertEqual(paths.projects_dir(probe=False), "/tmp/some/projects")
+            # this lineage normalizes the override (same location, native separators)
+            self.assertEqual(os.path.normpath(paths.projects_dir(probe=False)),
+                             os.path.normpath("/tmp/some/projects"))
 
 
 class AttachmentFenceTest(unittest.TestCase):
