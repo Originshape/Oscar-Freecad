@@ -97,7 +97,7 @@ _REPAIR_WORDS = re.compile(r"\b(?:repair|fix|heal|clean)\b", re.IGNORECASE)
 _DEFECT_WORDS = re.compile(r"\b(?:duplicat\w+ (?:vertices|points|facets|faces|triangles)|"
                            r"non-?manifold|self-?intersect\w*|degenerate (?:triangles|faces|facets)|"
                            r"holes in)\b", re.IGNORECASE)
-_PARAMETRIC_WORDS = re.compile(r"\b(?:parametric|editable|sketch\w*|feature[s]? tree|native (?:free)?cad|"
+_MESH_PARAMETRIC_WORDS = re.compile(r"\b(?:parametric|editable|sketch\w*|feature[s]? tree|native (?:free)?cad|"
                                r"change dimensions?|reconstruct\w*|recreat\w*|replicat\w*|remodel\w*)\b",
                                re.IGNORECASE)
 _MESH_WORDS = re.compile(r"\b(?:mesh|stl|obj|ply|3mf|scan|triangle model)\b", re.IGNORECASE)
@@ -117,7 +117,7 @@ def mesh_operation(text: str) -> "str | None":
     if _DELIVER_START.match(t):
         return None
     mesh_context = bool(_MESH_WORDS.search(t))
-    if _PARAMETRIC_WORDS.search(t):
+    if _MESH_PARAMETRIC_WORDS.search(t):
         return "parametric"
     if _BREP_WORDS.search(t):
         return "brep"
@@ -147,7 +147,7 @@ def mesh_ambiguous(text: str) -> bool:
     if not t or not _MESH_WORDS.search(t):
         return False
     hits = 0
-    if _PARAMETRIC_WORDS.search(t):
+    if _MESH_PARAMETRIC_WORDS.search(t):
         hits += 1
     if _BREP_WORDS.search(t):
         hits += 1
