@@ -85,6 +85,10 @@ class SendWiringTest(FlowTestCase):
                         mock.patch("oscar.cad.get_engine", return_value=self.engine)):
             patcher.start()
             self.addCleanup(patcher.stop)
+        # The panel resolves the chat's profile through its own profile list (the session already says
+        # "OriginShape", the account profile seeded on first run and signed out in tests, which would block
+        # every send). Give the chat the mocked plain profile instead.
+        self.p._profiles = [params.Profile(name="t", provider="openai_compat", model="m")]
 
     def send(self, text):
         self.p.input.setPlainText(text)
@@ -386,6 +390,7 @@ class SteerImagesTest(FlowTestCase):
                 mock.patch.object(params, "active_profile",
                                   return_value=params.Profile(name="t", provider="openai_compat", model="m")), \
                 mock.patch("oscar.cad.get_engine", return_value=mock.Mock(begin_turn_snapshot=lambda: dict(GOOD_SNAPSHOT))):
+            p._profiles = [params.Profile(name="t", provider="openai_compat", model="m")]
             p._send()
         self.assertEqual(p.history[-1].images, ["B64IMG"])
         self.assertEqual(p._carry_images, [])

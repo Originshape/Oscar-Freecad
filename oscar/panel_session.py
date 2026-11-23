@@ -127,6 +127,9 @@ class SessionMixin:
             pass
         self.sessions.insert(0, session)
         self._rebuild_chat_combo()
+        refresh_model = getattr(self, "_refresh_model_selector", None)
+        if callable(refresh_model):
+            refresh_model()
         self._refresh_session_widgets()
         self._render()
         if switched:
