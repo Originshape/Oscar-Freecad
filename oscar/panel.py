@@ -172,7 +172,6 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         self.blocks: list[Block] = []
         self.history: list[Message] = []
         self.worker: AgentWorker | None = None
-        self.pending: list[str] = []  # attachment paths waiting to be sent
         self._stream_buffer = ""
         self._current: Block | None = None
         self._dirty = False
@@ -200,14 +199,19 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         self._scroll_set = 0        # the value this code last set; a different value means the user moved
         self._scroll_blocks = None  # the chat (blocks list) the scroll state belongs to
         # Task chats: multiple conversations, switchable, persisted. The
-        # live session's history IS self.history (the worker holds that
-        # list object for the whole turn — switching is blocked while busy).
+        # live session's history IS self.history; the worker holds that
+        # list object for the whole turn, and _turn_session keeps the
+        # running turn's writes in its own chat while another is shown.
         self.sessions: list[dict] = []
         self._session_loading = False
         # Facts the model must learn with the next message (e.g. the user
         # reverted a turn — otherwise it would keep building on objects
         # that no longer exist). Kept PER SESSION (see ``_pending_notes``).
         self._orphan_notes: list[str] = []
+        # The per-chat ``pending`` attachments and ``_carry_images`` (both panel_session properties) need a
+        # home before the first chat is activated / after the last one is gone:
+        self._orphan_pending: list[str] = []
+        self._orphan_carry_images: list[str] = []
         self._profiles: list = []
         self._model_catalogs: dict[str, dict] = {}
         self._catalog_generation = 0
@@ -1011,9 +1015,10 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
     def _show_account_card(self, kind: str, *, reason: str = "", returned: bool = False) -> None:
         """Append an account card, unless the chat already ends with the same card (pressing Send again must not
         stack them)."""
-        last = self.blocks[-1] if self.blocks else None
+        blocks = self._turn_target_blocks()
+        last = blocks[-1] if blocks else None
         if last is None or last.kind != Block.ACCOUNT or last.detail != kind or getattr(last, "reason", "") != reason:
-            self.blocks.append(self._account_block(kind, reason=reason, returned=returned))
+            blocks.append(self._account_block(kind, reason=reason, returned=returned))
         self._render()
 
     def _send_blocker(self, profile) -> str:
@@ -1085,6 +1090,20 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
     def _append(self, kind: str, text: str = "") -> Block:
         block = Block(kind, text)
         self.blocks.append(block)
+        return block
+
+    def _turn_target_blocks(self) -> list[Block]:
+        """The blocks list the RUNNING TURN writes to: its own chat's transcript, not the one shown."""
+        session = getattr(self, "_turn_session", None)
+        blocks = session.get("blocks") if session is not None else None
+        return blocks if isinstance(blocks, list) else self.blocks
+
+    def _turn_append(self, kind: str, text: str = "") -> Block:
+        """``_append`` for the running turn's chat — the same chat while it is shown, its own transcript
+        when another chat is displayed meanwhile."""
+        blocks = self._turn_target_blocks()
+        block = Block(kind, text)
+        blocks.append(block)
         return block
 
     # -- attachments -----------------------------------------------------------
@@ -1306,6 +1325,87 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
             self._set_status("Attachments are sent with your next message once Oscar is done.")
         self._render()
 
+    def _queue_busy_send(self) -> None:
+        """Send pressed while ANOTHER chat's turn runs: steering would hand the text to that chat's
+        conversation, so the message waits in its own chat instead (a "queued" bubble; it goes out by
+        itself once the panel is free and its chat is the one shown — a chat opened only later asks
+        first). Attached images ride with it; other attachments stay pending, exactly as with a steer."""
+        text = self.input.toPlainText().strip()
+        if not text:
+            return
+        attachments, images = self._late_image_attachments()
+        sent = {a.path for a in attachments}
+        if sent:
+            self.pending = [p for p in self.pending if p not in sent]
+            self._refresh_attach_bar()
+        block = self._append(Block.USER, text)
+        block.queued = True
+        self._waiting_sends.append({"session": self._current_session(), "text": text, "images": images,
+                                    "block": block})
+        self.input.clear()
+        if self.pending:
+            self._set_status("Attachments are sent with your next message once Oscar is done.")
+        else:
+            self._set_status("Queued — sent when the turn in the other chat finishes.")
+        self._render()
+
+    def _deliver_waiting_sends(self, opening: bool = False) -> None:
+        """Start the turns of the messages that queued while another chat's turn ran: only into their own
+        chat, only while the panel is free. The queue is searched for the chat shown, so a message behind
+        another chat's never blocks it; a chat that is not shown keeps waiting — its message goes out when
+        the user opens it, and a waiting send is never sent into a different chat.
+
+        ``opening``: the delivery runs because the user opened the chat, not because a turn just ended
+        there — the message may be long stale, so it asks before it spends a request."""
+        while not self._busy() and self._waiting_sends:
+            self._waiting_sends = [w for w in self._waiting_sends if w.get("session") in self.sessions]
+            current = self._current_session()
+            index = next((i for i, w in enumerate(self._waiting_sends) if w.get("session") is current), None)
+            if index is None:
+                break                           # nothing waits for the chat shown: it delivers when the user opens it
+            item = self._waiting_sends[index]
+            if opening and not self._confirm_waiting_send(item):
+                self._hold_waiting_send(item)   # not now: the text waits in the chat's composer instead
+                continue
+            self._send_text(str(item.get("text") or ""), images=list(item.get("images") or ()))
+            if self.worker is None:
+                break      # the send was blocked (signed out, Terms…): the message keeps waiting in its chat
+            del self._waiting_sends[index]      # the turn started: only now does its bubble give way to the real one
+            block = item.get("block")
+            if block is not None and block in self.blocks:
+                self.blocks.remove(block)       # the real send shows the message again
+            self._render()
+
+    def _confirm_waiting_send(self, item: dict) -> bool:
+        """Ask about a waiting message the user only now returns to (it may be long outdated)."""
+        session = item.get("session")
+        title = str((session or {}).get("title") or "this chat")
+        ret = QtWidgets.QMessageBox.question(
+            self, "Oscar",
+            f"Send the message that waited in “{title}”?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No)
+        return ret == QtWidgets.QMessageBox.Yes
+
+    def _hold_waiting_send(self, item: dict) -> None:
+        """The user chose not to send a waiting message now: its text goes to the chat's composer (its
+        images ride the next send from there) and the "queued" bubble gives way to it."""
+        for i, w in enumerate(self._waiting_sends):
+            if w is item:
+                del self._waiting_sends[i]
+                break
+        block = item.get("block")
+        if block is not None and block in self.blocks:
+            self.blocks.remove(block)
+        text = str(item.get("text") or "").strip()
+        if text:
+            draft = self.input.toPlainText().strip()
+            self.input.setPlainText(f"{text}\n\n{draft}" if draft else text)
+        images = list(item.get("images") or ())
+        if images:
+            self._carry_images = images + [i for i in self._carry_images if i not in images]
+        self._render()
+
     def _build_content(self, text: str, attachments: list) -> str:
         """The stored user message (``attachments.build_user_message``). Reading a PDF can take seconds (poppler up to
         20 s, the built-in reader much longer on a large file), so it runs on a helper thread while a local event
@@ -1357,6 +1457,9 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
         if self.worker is not None:
             if workspace is not None:
                 workspace.turn.refuse("Oscar is busy with another turn in FreeCAD.")
+                return
+            if not self._turn_chat_shown():
+                self._queue_busy_send()   # another chat's turn runs: the message waits in ITS chat, never steers it
                 return
             self._steer_while_busy()
             return
@@ -1472,6 +1575,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
                 session_id=str(session.get("id") or "") if session is not None else "",
                 origin="workspace" if workspace is not None else "freecad",
                 profile=profile)
+            self._turn_session = session    # the chat this turn writes to, whichever is shown meanwhile
         except Exception as e:
             self._append(Block.ERROR, str(e))
             self._set_busy(False)
@@ -1537,7 +1641,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
 
     def _start_assistant_block(self):
         self._stream_buffer = ""
-        self._current = self._append(Block.ASSISTANT, "")
+        self._current = self._turn_append(Block.ASSISTANT, "")
         self._dirty = True
 
     def _stop(self):
@@ -1549,8 +1653,9 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
 
     def _on_flow_button(self):
         """The trailing Send button (idle only — while a turn runs the Stop square takes
-        its place; pause/resume lives in the heartbeat row)."""
-        if self.worker is None:
+        its place; pause/resume lives in the heartbeat row). In another chat it sends all the
+        same: that composer is idle and the message waits there."""
+        if self.worker is None or not self._turn_chat_shown():
             self._send()
 
     def _on_pause_button(self):
@@ -1562,28 +1667,42 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
             self._paused = False
             self.worker.resume()
             self._set_status("Thinking")
+            self._sync_turn_chrome()
         else:
             self.worker.pause()
             self._set_status("Pausing after the current step…")
 
     def _on_flow_paused(self, paused: bool):
         self._paused = bool(paused)
+        self._sync_turn_chrome()
         self._update_heartbeat()
         self._set_status("⏸ Paused" if paused else "Thinking")
 
     def _set_busy(self, busy: bool):
         self.profile_button.setEnabled(not busy)
         self.model_button.setEnabled(not busy)
+        if not busy:
+            self._paused = False
+        self._sync_turn_chrome(busy)
+
+    def _sync_turn_chrome(self, busy: bool | None = None) -> None:
+        """The turn controls belong to the chat whose turn is running: the Stop square, the sending frame,
+        the activity pulse, Esc and the heartbeat. Another chat shown keeps its idle composer — its Send
+        button shows and the message queues in it, Esc is the application's again, and pause / stop live in
+        the turn's own chat (``busy``: the caller's word for it; default: a worker is running)."""
+        if busy is None:
+            busy = self.worker is not None
+        active = bool(busy) and self._turn_chat_shown()
         # the Send/Stop toggle: exactly one of the two trailing widgets is shown
-        self.stop_btn.setVisible(bool(busy))
-        self.send_btn.setVisible(not busy)
-        self.input_frame.setProperty("sending", bool(busy))
+        self.stop_btn.setVisible(active)
+        self.send_btn.setVisible(not active)
+        self.input_frame.setProperty("sending", active)
         self.input_frame.style().unpolish(self.input_frame)
         self.input_frame.style().polish(self.input_frame)
-        self._esc_shortcut.setEnabled(bool(busy))
+        self._esc_shortcut.setEnabled(active)
         pulse = getattr(self, "activity_pulse", None)
         if pulse is not None:
-            if busy:
+            if active:
                 if pulse.state() != QtCore.QAbstractAnimation.Running:
                     pulse.start()
             else:
@@ -1591,8 +1710,6 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
                 effect = getattr(self, "activity_effect", None)
                 if effect is not None:
                     effect.setOpacity(1.0)
-        if not busy:
-            self._paused = False
 
     # -- turn status (Thinking… / Running tool… / live card timer) -----------
 
@@ -1634,7 +1751,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
             # echo of a steer: the "queued" tag on the user bubble already says it)
             App.Console.PrintLog(f"Oscar: {text}\n")
             return
-        self._append(Block.TOOL, text)   # Block.html draws the ℹ
+        self._turn_append(Block.TOOL, text)   # a notice of the running turn belongs to its own chat; Block.html draws the ℹ
         self._render()
 
     # -- rendering -----------------------------------------------------------
@@ -1756,7 +1873,7 @@ class OscarPanel(SessionMixin, TurnMixin, AnchorMixin, RevertMixin, RewindMixin,
                     if not event.modifiers() & QtCore.Qt.ShiftModifier:
                         self._send()
                         return True
-                if event.key() == QtCore.Qt.Key_Escape and self._busy():
+                if event.key() == QtCore.Qt.Key_Escape and self._busy() and self._turn_chat_shown():
                     self._stop()
                     return True
             if event.type() == QtCore.QEvent.FocusIn:

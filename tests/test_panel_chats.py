@@ -103,22 +103,31 @@ class SearchTest(_Case):
         dialog.field.returnPressed.emit()
         self.assertIs(self.p.sessions[dialog.chosen], self.bracket)
 
-    def test_choosing_a_result_opens_that_chat_unless_a_turn_runs(self):
-        target = self.p.sessions.index(self.bracket)
+    def test_choosing_a_result_opens_that_chat_like_the_picker(self):
+        """Search follows the picker's switching rule: allowed while a turn runs (the turn keeps writing to
+        its own chat); only a file still being read refuses."""
+        holder = {"index": None}
 
         class Choosing:
             def __init__(self, data, parent):
-                self.chosen = target
+                self.chosen = holder["index"]
 
             def exec(self):
                 return QtWidgets.QDialog.Accepted
 
         with mock.patch.object(panel_chats, "ChatSearchDialog", Choosing):
-            self.p.worker = FakeWorker()
+            holder["index"] = self.p.sessions.index(self.bracket)
+            self.p._building = True
             panel_chats.search(self.p)
-            self.assertIsNot(self.p._current_session(), self.bracket)
+            self.assertIsNot(self.p._current_session(), self.bracket)   # refused while a file is still read
+            self.p._building = False
+            holder["index"] = self.p.sessions.index(self.bracket)
+            self.p.worker = FakeWorker()                                # a turn runs: allowed, as with the picker
+            panel_chats.search(self.p)
+            self.assertIs(self.p._current_session(), self.bracket)
             self.p.worker = None
-            self.action("oscarSearchChatsAction").trigger()
+            holder["index"] = self.p.sessions.index(self.bracket)
+            self.action("oscarSearchChatsAction").trigger()             # choosing the chat shown changes nothing
         self.assertIs(self.p._current_session(), self.bracket)
 
 
