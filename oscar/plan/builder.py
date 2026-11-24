@@ -80,6 +80,8 @@ from . import _dressbuild, _featurebuild, _partbuild, _sketchbuild, schema  # no
 from ._dressbuild import refresh_edge_rules
 from ._buildcore import (STAGE_BUILD, STAGE_BUILT, STAGE_DOCUMENT,  # noqa: F401
                          STAGE_PARAMETERS, STAGE_VALIDATION, BuildError, Ctx,
+                         CAUSE_DEPENDENTS_EXIST, CAUSE_RECOMPUTE_FAILED,
+                         RECOVERY_ALTERNATIVES,
                          body_metrics, check_postconditions, doc_errors,
                          failure, find_feature_object,
                          format_build_failure, success, tag_object, tag_of,
@@ -417,7 +419,8 @@ def _build_one(doc, body, plan: dict, ctx: Ctx, feat: dict, built: dict,
             made = [o.Name for o in doc.Objects if o.Name not in before_names]
             state = doc_errors(doc, made)
             if state:
-                raise BuildError(fid, f"recompute failed: {state}")
+                raise BuildError(fid, f"recompute failed: {state}",
+                                 cause=CAUSE_RECOMPUTE_FAILED)
             info = dict(info or {})
             if before is not None:
                 info["metrics"] = check_postconditions(
@@ -496,9 +499,14 @@ def _run_features(doc, body, plan: dict, ctx: Ctx, features: list, built: dict,
 
 def _failed(err: BuildError, completed: list[str], **extra) -> dict:
     """The failure result of a BuildError (``completed`` = features built
-    before it)."""
+    before it). A BuildError with a cause code adds it and its recovery
+    alternatives to the result."""
     if err.metrics:
         extra["metrics"] = err.metrics
+    if err.cause:
+        extra["cause"] = err.cause
+    if err.alternatives:
+        extra["alternatives"] = list(err.alternatives)
     return failure(err.stage, err.message, feature_id=err.feature_id or None,
                    completed=completed, **extra)
 
@@ -879,8 +887,10 @@ def _replay(doc, plan: dict, feature_id: str, body_name, sheet_name, prefix,
     later = [o.Name for fid in ids[pos + 1:] if (o := existing(fid)) is not None]
     if later and not rebuild_later:
         return failure(STAGE_BUILD, f"later features exist ({', '.join(later)}) "
-                       f"— re-apply the whole plan instead",
-                       feature_id=feature_id)
+                       f"— re-apply the whole plan, or pass rebuild_later=true "
+                       f"to rebuild this feature and every later one in place",
+                       feature_id=feature_id, cause=CAUSE_DEPENDENTS_EXIST,
+                       alternatives=RECOVERY_ALTERNATIVES[CAUSE_DEPENDENTS_EXIST])
     todo = ids[pos:] if rebuild_later else [feature_id]
     # every check that can reject the call comes before anything is written
     for fid in todo:

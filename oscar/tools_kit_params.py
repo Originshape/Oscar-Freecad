@@ -154,6 +154,30 @@ def _invalid_names(doc: Any) -> "set[str]":
     return {o.Name for o in doc.Objects if "Invalid" in (getattr(o, "State", None) or [])}
 
 
+def _broke_after_recompute(doc: Any, invalid_before: "set[str]") -> "tuple[list[str], list[str]]":
+    """``(newly invalid names, repaired dressing names)`` after a parameter recompute.
+
+    A recompute can stale the edge link of a plan-built fillet / chamfer (FreeCAD marks the
+    feature Invalid); ``builder.refresh_edge_rules`` re-selects its edges from the rule stored
+    on the object — exactly what that repair function exists for — so a repairable stale link
+    no longer refuses (or survives) the parameter change. The repair runs inside the caller's
+    transaction and never raises; a feature that cannot be repaired stays Invalid and is
+    reported as newly broken."""
+    repaired: "list[str]" = []
+    try:
+        from .plan import builder
+
+        repaired = list(builder.refresh_edge_rules(doc) or [])
+    except Exception:  # noqa: BLE001 - best-effort; the refusal path still reports
+        repaired = []
+    if repaired:
+        try:
+            doc.recompute()
+        except Exception:  # noqa: BLE001
+            pass
+    return sorted(_invalid_names(doc) - invalid_before), repaired
+
+
 def _changed_text(doc: Any, before: "dict[str, tuple]", after: "dict[str, tuple]", kit_id: str) -> "tuple[str, list[str]]":
     """``("changed: Shell, Lid", [names])``: the kit tips by label when the kit is built, else the object names (at most 6)."""
     names = [n for n in after if before.get(n) != after[n]] + [n for n in before if n not in after]
@@ -419,7 +443,7 @@ def _set_parameters(doc_name: str, params: list, sheet: str = _params.SHEET_NAME
                     errs = _effective_errors(doc, spec_here)
                     if errs:
                         raise _Refused("the values break the enclosure spec rules:\n" + "\n".join(f"- {e}" for e in errs[:6]))
-                broke = sorted(_invalid_names(doc) - invalid_before)
+                broke, _repaired = _broke_after_recompute(doc, invalid_before)
                 if broke:
                     raise _Refused(f"the values leave {', '.join(broke[:4])} invalid (" + "; ".join(
                         f"{n}: {doc.getObject(n).getStatusString()}" for n in broke[:2]) + "); choose values that rebuild")
@@ -577,7 +601,7 @@ def _bind_expression(doc_name: str, object: str, property: str, expression: str)
             with build.atomic(doc, "Oscar bind_expression"):
                 table.bind(obj, prop, expr)
                 doc.recompute()
-                broke = sorted(_invalid_names(doc) - invalid_before)
+                broke, _repaired = _broke_after_recompute(doc, invalid_before)
                 if broke:
                     detail = doc.getObject(broke[0]).getStatusString()
                     raise _Refused(f"the recompute failed on {', '.join(broke[:3])} ({detail})")
@@ -667,6 +691,7 @@ def _set_parameter(doc_name: str, name: str, value: Any, recompute: bool = True,
         invalid_before = _invalid_names(doc)
         was_current = _stages_current(doc, spec_here)
         recomputed = 0
+        repaired_links: list = []
         try:
             with build.atomic(doc, f"Oscar set_parameter {param}"):
                 table.set(param, new_value, source="user_requirement", note=old["note"])
@@ -676,7 +701,7 @@ def _set_parameter(doc_name: str, name: str, value: Any, recompute: bool = True,
                         errs = _effective_errors(doc, spec_here)
                         if errs:
                             raise _Refused("the value breaks the enclosure spec rules:\n" + "\n".join(f"- {e}" for e in errs[:5]))
-                    broke = sorted(_invalid_names(doc) - invalid_before)
+                    broke, repaired_links = _broke_after_recompute(doc, invalid_before)
                     if broke:
                         raise _Refused(f"the value leaves {', '.join(broke[:4])} invalid ({doc.getObject(broke[0]).getStatusString()})")
         except _Refused as exc:
@@ -707,7 +732,8 @@ def _set_parameter(doc_name: str, name: str, value: Any, recompute: bool = True,
         changed, _names = _changed_text(doc, before_state, after_state, kit_id)
         new_spec = _sync_spec(doc, spec_here, [param], was_current) if do_recompute else None
         out = {"old": old, "new": new_row, "spec": new_spec, "recomputed": recomputed, "changed": changed, "rebuilt": [r.stage for r in results],
-               "skip": skip_note, "sizes": _tip_sizes(doc, kit_id), "names": table.names(), "recomputed_flag": do_recompute}
+               "skip": skip_note, "sizes": _tip_sizes(doc, kit_id), "names": table.names(), "recomputed_flag": do_recompute,
+               "repaired": repaired_links}
         if do_recheck and do_recompute:
             out["fit"] = _fit_summary(doc, spec_here, ref_status)
         return out
@@ -722,6 +748,8 @@ def _set_parameter(doc_name: str, name: str, value: Any, recompute: bool = True,
     lines = [f"{param}: {_value_text(old['value'], old['unit'])} -> {_value_text(new['value'], new['unit'])} (source: {new['source'] or 'user_requirement'})."]
     if out["recomputed_flag"]:
         lines[0] += f" Recomputed {out['recomputed']} object{'s' if out['recomputed'] != 1 else ''}; {out['changed']}."
+        if out.get("repaired"):
+            lines.append(f"Repaired the stale edge link of {', '.join(out['repaired'])} from its stored rule.")
         if out["rebuilt"]:
             why = ("count parameters are not expression-bound" if param in _params.STAGE_OF_PARAM
                    else "this value decides which openings, notches and hook numbers exist, so the model is rebuilt, not only recomputed")
@@ -806,7 +834,7 @@ def apply_parameter_edits(doc_name: str, edits: "list[dict]", *, spec_dict: "dic
                     errors = _effective_errors(doc, spec_here)
                     if errors:
                         raise _Refused("the edited values break the enclosure spec rules: " + "; ".join(errors[:5]))
-                broke = sorted(_invalid_names(doc) - invalid_before)
+                broke, _repaired = _broke_after_recompute(doc, invalid_before)
                 if broke:
                     raise _Refused(f"the edit leaves {', '.join(broke[:4])} invalid")
         except (_Refused, _params.ParamsError) as exc:

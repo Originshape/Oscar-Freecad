@@ -1392,3 +1392,46 @@ ALL_FEATURE_OPS = FEATURE_OPS + FEATURE_OPS_V2
 
 _register_v1_ops()
 from . import _schema_v2  # noqa: E402,F401  (registers the v2 ops; see its docstring)
+
+
+# ---------------------------------------------------------------------------
+# the generated capability reference: what the model may plan, straight from
+# the registry (the apply_feature_plan hint and the structured_part playbook
+# embed this text, so neither can drift from what ``validate`` enforces)
+
+
+def op_reference() -> str:
+    """The op vocabulary as one deterministic, prompt-sized summary: every
+    registered op with its required fields, the profile shapes, the edge /
+    face / direction vocabularies and the ordering rules. Generated from
+    ``OPS`` and the vocabulary constants — a registered op or a new required
+    field cannot stay unlisted."""
+    def entry(name: str) -> str:
+        spec = OPS[name]
+        req = ", ".join(fld for fld in spec.required if fld not in ("id", "op"))
+        hint = {"sketch": " (profiles: " + " | ".join(SKETCH_SHAPES)
+                          + ", or several 'profiles')",
+                "pocket": " {depth | through}", "hole": " {position}"}.get(name, "")
+        return name + (f" {{{req}}}" if req else "") + hint
+
+    # straight from the registry (registration order = v1 ops, then v2), so an
+    # op registered later cannot stay unlisted
+    v1 = ", ".join(entry(n) for n, spec in OPS.items() if spec.since <= SCHEMA_VERSION)
+    v2 = ", ".join(entry(n) for n, spec in OPS.items()
+                   if SCHEMA_VERSION < spec.since <= SCHEMA_VERSION_V2)
+    return (
+        f"v1 ops: {v1}.\n"
+        f"v2 adds: {v2}; a hole also takes counterbore / countersink "
+        f"(cb_diameter/cb_depth or cs_diameter/cs_angle).\n"
+        f"edges (fillet/chamfer): {' | '.join(_schema_v2.EDGE_RULES)} | "
+        f"edges_of_feature:<id>; thickness open_faces: "
+        f"{' | '.join(_schema_v2.OPEN_FACE_RULES)}; boss faces: "
+        f"{' | '.join(_schema_v2.FACE_RULES)}; pattern directions: "
+        f"{' | '.join(_schema_v2.PATTERN_DIRECTIONS)}; polar axis: "
+        f"{' | '.join(_schema_v2.AXIS_NAMES)}; mirror planes: "
+        f"{' | '.join(_schema_v2.MIRROR_PLANES)}.\n"
+        "ordering: a sketch precedes the pad/pocket/revolution that uses it; "
+        "'of' (patterns, mirror) and edges_of_feature:<id> name an earlier "
+        "feature in the same part; every dimension is a parameter name "
+        "(a string), never a literal number."
+    )
