@@ -1,0 +1,169 @@
+"""Tests of ``oscar.refparts.mesh_survey``: the bounded face-surface survey of a sewn mesh solid.
+
+Real FreeCAD documents under ``freecadcmd``: synthetic parts tessellated at a coarse, scan-like deviation,
+so every recovered dimension carries the chord error of the mesh, and the assertions use honest tolerances.
+The open-mesh cases prove the survey reports nothing rather than inventing it.
+"""
+
+import os
+import sys
+import unittest
+import uuid
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))   # oscar
+sys.path.insert(0, os.path.dirname(__file__))                        # tests/support
+from support import isolation  # noqa: E402
+
+isolation.isolate_process()   # temp settings / projects / logs / cache / downloads BEFORE importing oscar
+
+import FreeCAD as App  # noqa: E402
+import Mesh  # noqa: E402
+import Part  # noqa: E402
+
+from oscar.refparts import mesh_survey  # noqa: E402
+
+V = App.Vector
+TESS = 0.3          # mm: the coarse source-mesh deviation every tolerance below accounts for
+CYL_TOL = 0.65      # mm: chord error of a cylinder at TESS plus the sew tolerance
+
+
+def mesh_of(shape, deviation=TESS):
+    verts, tris = shape.tessellate(deviation)
+    return Mesh.Mesh([list(verts[i]) + list(verts[j]) + list(verts[k]) for i, j, k in tris])
+
+
+def plate_with_holes(length=100.0, width=60.0, thickness=8.0, hole_d=10.0,
+                     centers=((30, 15), (-30, 15), (30, -15), (-30, -15))):
+    base = Part.makeBox(length, width, thickness, V(-length / 2, -width / 2, 0))
+    for x, y in centers:
+        base = base.cut(Part.makeCylinder(hole_d / 2, thickness + 2, V(x, y, -1)))
+    return base
+
+
+class SurveyCase(unittest.TestCase):
+    def setUp(self):
+        self.doc = App.newDocument(f"MS{uuid.uuid4().hex[:6]}")
+        self.addCleanup(App.closeDocument, self.doc.Name)
+
+    def survey(self, shape, deviation=TESS):
+        return mesh_survey.survey_mesh(mesh_of(shape, deviation))
+
+    def cylinders(self, survey, *, concave=None):
+        out = survey["cylinders"] if "cylinders" in survey else survey["surface"]["cylinders"]
+        if concave is not None:
+            out = [c for c in out if c["concave"] == concave]
+        return out
+
+
+class BoxSurveyTest(SurveyCase):
+    def test_a_closed_box_mesh_surveys_into_three_plane_pairs_and_no_cylinders(self):
+        s = self.survey(Part.makeBox(30, 20, 10))
+        self.assertTrue(s["closed"])
+        self.assertEqual(s["surface"]["face_count"], 6)
+        planes = s["surface"]["planes"]
+        normals = {tuple(round(abs(c), 2) for c in p["normal"]) for p in planes}
+        self.assertEqual(normals, {(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)})
+        self.assertEqual(s["surface"]["cylinders"], [])
+        by_normal = {tuple(round(abs(c), 2) for c in p["normal"]): p for p in planes}
+        self.assertAlmostEqual(by_normal[(1.0, 0.0, 0.0)]["area"], 20 * 10, delta=1.0)
+        self.assertAlmostEqual(by_normal[(0.0, 0.0, 1.0)]["area"], 30 * 20, delta=1.0)
+
+    def test_the_bbox_volume_and_facet_facts_come_along(self):
+        s = self.survey(Part.makeBox(30, 20, 10))
+        self.assertEqual([round(v, 2) for v in s["bbox"]["size"]], [30.0, 20.0, 10.0])
+        self.assertAlmostEqual(s["volume"], 6000.0, delta=15.0)
+        self.assertGreater(s["facets"], 10)
+
+
+class HoleSurveyTest(SurveyCase):
+    def test_four_through_holes_are_found_concave_with_diameter_position_and_depth(self):
+        s = self.survey(plate_with_holes())
+        holes = self.cylinders(s, concave=True)
+        self.assertEqual(len(holes), 4)
+        for h in holes:
+            self.assertAlmostEqual(h["diameter"], 10.0, delta=CYL_TOL)
+            axis = [round(abs(c), 3) for c in h["axis"]]
+            self.assertEqual(axis, [0.0, 0.0, 1.0])
+            self.assertAlmostEqual(h["depth"], 8.0, delta=0.35)
+        centers = sorted(tuple(round(c, 1) for c in h["center"]) for h in holes)
+        self.assertEqual(centers, [(-30.0, -15.0, 4.0), (-30.0, 15.0, 4.0),
+                                   (30.0, -15.0, 4.0), (30.0, 15.0, 4.0)])
+
+    def test_a_smaller_hole_diameter_is_told_apart_from_a_larger_one(self):
+        s = self.survey(plate_with_holes(hole_d=6.0, centers=((20, 10),)))
+        holes = self.cylinders(s, concave=True)
+        self.assertEqual(len(holes), 1)
+        self.assertAlmostEqual(holes[0]["diameter"], 6.0, delta=CYL_TOL)
+
+    def test_coarser_tessellation_stays_within_its_declared_chord_error(self):
+        s = self.survey(plate_with_holes(), deviation=0.8)
+        holes = self.cylinders(s, concave=True)
+        self.assertEqual(len(holes), 4)
+        for h in holes:
+            self.assertAlmostEqual(h["diameter"], 10.0, delta=1.6)
+
+
+class ConvexSurveyTest(SurveyCase):
+    def test_a_solid_cylinder_is_convex_with_diameter_and_depth(self):
+        s = self.survey(Part.makeCylinder(6.0, 20.0))
+        pins = self.cylinders(s, concave=False)
+        self.assertEqual(len(pins), 1)
+        self.assertAlmostEqual(pins[0]["diameter"], 12.0, delta=CYL_TOL)
+        self.assertAlmostEqual(pins[0]["depth"], 20.0, delta=0.35)
+        self.assertFalse(pins[0]["concave"])
+
+    def test_coaxial_steps_of_different_radius_are_separate_cylinders(self):
+        shape = Part.makeCylinder(10.0, 40.0).fuse(Part.makeCylinder(6.0, 30.0, V(0, 0, 40)))
+        shape = shape.removeSplitter()
+        s = self.survey(shape)
+        pins = sorted(self.cylinders(s, concave=False), key=lambda c: -c["diameter"])
+        self.assertEqual([round(p["diameter"], 1) for p in pins], [20.0, 12.0])
+        self.assertAlmostEqual(pins[0]["depth"], 40.0, delta=0.35)
+        self.assertAlmostEqual(pins[1]["depth"], 30.0, delta=0.35)
+
+
+class HonestyTest(SurveyCase):
+    def test_an_open_mesh_reports_itself_and_withholds_what_it_cannot_know(self):
+        mesh = mesh_of(Part.makeBox(30, 20, 10))
+        facets = [f.Points for f in mesh.Facets]
+        open_mesh = Mesh.Mesh([list(p[0]) + list(p[1]) + list(p[2]) for p in facets[:-2]])
+        s = mesh_survey.survey_mesh(open_mesh)
+        self.assertFalse(s["closed"])
+        self.assertIsNone(s["volume"])
+        self.assertTrue(any("not closed" in w for w in s["warnings"]))
+        # the facets are still there: the box's planes are recognized, only the volume is withheld
+        self.assertGreaterEqual(len(s["surface"]["planes"]), 3)
+        self.assertTrue(all(c["concave"] is None for c in s["surface"]["cylinders"]))
+        # the bbox facts are still exact: the mesh is measurable even when it is not solid
+        self.assertEqual([round(v, 2) for v in s["bbox"]["size"]], [30.0, 20.0, 10.0])
+
+    def test_a_mesh_with_no_triangles_is_rejected_without_raising(self):
+        s = mesh_survey.survey_mesh(Mesh.Mesh())
+        self.assertFalse(s["closed"])
+        self.assertEqual(s["surface"]["cylinders"], [])
+
+    def test_the_survey_of_a_shape_with_many_faces_stays_bounded(self):
+        sphere = Part.makeSphere(12.0)
+        s = self.survey(sphere, deviation=1.2)
+        self.assertTrue(s["closed"])
+        kinds = s["surface"]["surface_kinds"]
+        self.assertGreater(kinds.get("plane", 0) + kinds.get("sphere", 0), 0)
+        self.assertLessEqual(len(s["surface"]["planes"]), 16)
+
+
+class SolidSurveyTest(SurveyCase):
+    def test_survey_solid_works_on_a_b_rep_shape_directly(self):
+        s = mesh_survey.survey_solid(plate_with_holes())
+        holes = [c for c in s["cylinders"] if c["concave"]]
+        self.assertEqual(len(holes), 4)
+        for h in holes:
+            self.assertAlmostEqual(h["diameter"], 10.0, delta=1e-6)
+
+    def test_an_invalid_shape_reports_itself_without_raising(self):
+        s = mesh_survey.survey_solid(Part.Shape())
+        self.assertFalse(s["valid"])
+        self.assertEqual(s["cylinders"], [])
+
+
+if __name__ == "__main__":  # pragma: no cover
+    unittest.main()

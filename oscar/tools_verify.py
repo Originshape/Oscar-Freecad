@@ -658,3 +658,102 @@ def _check_fit(doc_name: str, parts: list | None = None, reference: str | None =
         raise ToolError(text + f"\nFAIL rows ({ids_text}) are defects: fix the geometry or the parameter "
                                "(set_parameter), then run check_fit again.")
     return text, None
+
+
+# ---------------------------------------------------------------------------------------------- compare to reference
+
+
+def _compare_task(doc_name: str, reference: str | None, built: str | None) -> dict:
+    """GUI thread: resolve the reference mesh and the built body, run the deviation rows."""
+    from .cad import health_eval
+    from .refparts import compare
+
+    doc = _open_doc(doc_name)
+    if doc is None:
+        return {"error": f"document '{doc_name}' is not open"}
+
+    def find_mesh(obj):
+        if obj.TypeId == "Mesh::Feature":
+            return obj.Mesh
+        mesh = None
+        for child in getattr(obj, "Group", None) or []:
+            mesh = find_mesh(child) or mesh
+        return mesh
+
+    if reference:
+        node = doc.getObject(reference)
+        if node is None:
+            try:
+                hits = doc.getObjectsByLabel(reference)
+                node = hits[0] if len(hits) == 1 else None
+            except Exception:  # noqa: BLE001
+                node = None
+        if node is None:
+            return {"error": f"reference '{reference}' is not an object of document '{doc_name}'"}
+        ref_mesh = find_mesh(node)
+    else:
+        ref_mesh = None
+        for obj in doc.Objects:
+            if _fit.is_reference(obj):
+                ref_mesh = find_mesh(obj) or ref_mesh
+    if ref_mesh is None:
+        return {"error": "no reference mesh found (pass reference=<name> of the Mesh object, or "
+                         "import one with import_file / import_reference_part first)"}
+
+    if built:
+        body = doc.getObject(built)
+        if body is None:
+            try:
+                hits = doc.getObjectsByLabel(built)
+                body = hits[0] if len(hits) == 1 else None
+            except Exception:  # noqa: BLE001
+                body = None
+        if body is None or not hasattr(body, "Shape"):
+            return {"error": f"built '{built}' is not a shape-bearing object of document '{doc_name}'"}
+    else:
+        bodies = [o for o in doc.Objects
+                  if o.TypeId == "PartDesign::Body" and hasattr(o, "Shape")
+                  and o.Shape is not None and not o.Shape.isNull() and not _fit.is_reference(o)
+                  and _fit._visible(o)]
+        if not bodies:
+            return {"error": "no PartDesign Body to compare (pass built=<name>)"}
+        body = max(bodies, key=lambda o: o.Shape.Volume)
+    shape = health_eval.global_shape(body)
+    rows = compare.deviation_rows(shape, ref_mesh, a=body.Label or body.Name, b="reference")
+    text = compare.render_rows(rows, built=body.Label or body.Name, reference="reference")
+    return {"rows": rows, "text": text, "body": body.Name}
+
+
+@tool(
+    "compare_to_reference",
+    "Measure how far the built model deviates from the imported source mesh: per-axis size deltas, centre "
+    "offset, volume share, sampled surface distance and the exact intersection-over-union. Returns PASS / "
+    "WARN / SKIP rows (they inform the correction loop, they never fail the turn). After a mesh-driven "
+    "reconstruction run it, fix the dimensions a WARN names (edit the Parameters cell, recompute), and run "
+    "it again; a SKIP says what could not be measured - never report accuracy you did not measure.",
+    {"type": "object", "properties": {
+        "doc_name": _DOC,
+        "reference": {"type": "string",
+                      "description": "Name of the reference mesh (Mesh::Feature or its Ref_ container). "
+                                     "Default: the reference mesh of the document."},
+        "built": {"type": "string",
+                  "description": "Name of the built Body to judge. Default: the largest visible "
+                                     "non-reference PartDesign Body."},
+     },
+     "required": ["doc_name"]},
+    category="verify", phases=_PHASES,
+    title=lambda a: "Compare to reference",
+)
+def _compare_to_reference(doc_name: str, reference: str | None = None, built: str | None = None):
+    ctx = current_context()
+    actual = _require_document(doc_name)
+
+    def task():
+        return _compare_task(actual, reference, built)
+
+    result, error = _gui(ctx, task, 180.0, "compare_to_reference")
+    if error or not isinstance(result, dict):
+        raise ToolError(f"compare_to_reference: {error or 'no answer from the GUI thread'}; call it again")
+    if result.get("error"):
+        raise ToolError(f"compare_to_reference: {result['error']}")
+    return result["text"], None

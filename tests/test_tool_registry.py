@@ -68,6 +68,7 @@ MATRIX = {
     "set_parameter": ("params", True, True, "----XXX"),
     "validate_model": ("verify", False, False, "----XXX"),
     "check_fit": ("verify", False, False, "----XXX"),
+    "compare_to_reference": ("verify", False, False, "----XXX"),
     "save_document": ("deliver", True, False, "----XXX"),
     "export_model": ("deliver", True, False, "-----XX"),
     "export_rebuild_script": ("deliver", True, False, "-----XX"),
@@ -93,8 +94,8 @@ def _mask(phases) -> str:
 
 
 class MatrixTest(unittest.TestCase):
-    def test_matrix_has_the_43_documented_tools(self):
-        self.assertEqual(len(MATRIX), 43)
+    def test_matrix_has_the_44_documented_tools(self):
+        self.assertEqual(len(MATRIX), 44)
         self.assertEqual(len(EXPECTED_V1 - set(MATRIX)), 0)
 
     def test_every_registered_tool_follows_the_matrix(self):

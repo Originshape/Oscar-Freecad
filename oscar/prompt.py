@@ -18,6 +18,7 @@ Exports: ``CORE``, ``LITE``, ``PLAYBOOKS``, ``PHASE_GUIDANCE``, ``TEMPLATES``, `
 import re
 from functools import lru_cache
 from typing import Iterable
+from .plan import schema as _plan_schema  # pure (no FreeCAD import)
 
 # Every tool Oscar knows: the registry plus the optional net tools. A backticked identifier
 # in this set makes its sentence conditional on the tool being offered.
@@ -29,7 +30,7 @@ KNOWN_TOOLS = frozenset({
     "feature_tree_status", "run_fem_analysis", "find_reference_part", "source_reference_part",
     "import_reference_part", "measure_reference_part", "enclosure_spec", "build_enclosure", "add_cutout",
     "add_vents", "set_parameters", "get_parameters", "bind_expression", "set_parameter", "validate_model",
-    "check_fit", "save_document", "export_model", "export_rebuild_script", "web_search", "fetch_url",
+    "check_fit", "compare_to_reference", "save_document", "export_model", "export_rebuild_script", "web_search", "fetch_url",
 })
 
 __all__ = ["CORE", "LITE", "PLAYBOOKS", "PHASE_GUIDANCE", "TEMPLATES", "FINAL_REPORT_TEMPLATE", "KNOWN_TOOLS",
@@ -160,20 +161,23 @@ _PLAYBOOK_SECTIONS: dict[str, tuple[_Section, ...]] = {
     ),
     "structured_part": (
         ("PLAYBOOK structured_part (prismatic parts: plates, flanges, brackets, fixtures)", (
-            "Build prismatic parts with one structured plan, not a script (a request that says parametric or "
-            "editable means this path): choose the parameters first (name, value, where the number comes from), "
-            "then one feature per entry, then call `apply_feature_plan`.",
-            "Use schema_version 2 with a parameter name for every dimension. Sketch (rectangle, circle, slot, several "
-            "profiles), pad, pocket, hole, fillet, chamfer, thickness (shell), linear_pattern, polar_pattern, "
-            "mirror, boss. Pick edges by rule (all_outer, vertical, top_outer, bottom_outer, edges_of_feature:<id>), "
-            "never by index.",
-            "Several parts (a base and a lid): one entry in parts each, with its own placement parameters; parts are "
-            "never fused.",
-            "If the call fails, fix the field the error names (it suggests the spelling) and send the whole plan "
-            "again; `reapply_plan_feature` repairs one feature.",
-            "Then `validate_model`. To resize, change the parameter, not the geometry.",
-            "Only what no plan op can express goes to `execute_code`: bind its dimensions to the Params sheet and "
-            "say in the final report that this piece is not parametric.",
+            "Build prismatic parts with a structured plan, not a script (parametric or editable means this path): "
+            "parameters first (name, value, where the number comes from), one feature per entry, then "
+            "`apply_feature_plan`.",
+            "From a mesh: `measure_reference_part` first - its survey reports hole / boss diameters and positions; "
+            "bind plan parameters to those (source step_measurement), never guesses.",
+            "Then `compare_to_reference`: fix what a WARN row names (edit the cell, recompute), compare again; no "
+            "accuracy claim while a row is SKIP.",
+            "Use schema_version 2 with a parameter name per dimension. Ops: "
+            + ", ".join(_plan_schema.OPS)
+            + "; the tool description holds the full vocabulary. Edges by rule (all_outer, vertical, top_outer, "
+            "bottom_outer, edges_of_feature:<id>), never by index.",
+            "Several parts: one entry in parts each with its own placement parameters; never fused.",
+            "On failure fix the named field; at most two attempts per cause, then follow the alternative or stop. "
+            "`reapply_plan_feature` repairs one feature; later features re-apply the whole plan.",
+            "Then `validate_model`. Resize by parameter, not geometry.",
+            "Only what no plan op can express goes to `execute_code`; say in the final report that this piece is "
+            "not parametric.",
         )),
     ),
     "parts_library": (

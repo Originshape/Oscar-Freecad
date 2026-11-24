@@ -393,7 +393,7 @@ class AnalyzeFixtureTest(unittest.TestCase):
     def test_to_dict_is_json_safe_and_complete(self):
         data = json.loads(json.dumps(self.m.to_dict()))
         self.assertEqual(sorted(data), ["bbox", "bottom_z", "connectors", "frame", "holes", "identity", "kind", "mesh", "mounting", "object", "pcb",
-                                        "solid_count", "solids", "tall", "tallest_z", "units", "warnings"])
+                                        "solid_count", "solids", "survey", "tall", "tallest_z", "units", "warnings"])
         self.assertEqual(data["object"], "Ref_RPI4B")
 
     def test_without_a_board_connectors_have_no_match(self):
@@ -827,6 +827,26 @@ class ImportRefTest(unittest.TestCase):
         self.assertIn("mesh reference", s["frame"]["description"])
         self.assertTrue(any("cannot be measured exactly" in w for w in s["warnings"]))
         self.assertFalse(part.Group[0].Visibility)
+
+    def test_measuring_an_imported_mesh_reports_the_feature_survey(self):
+        import Mesh
+
+        plate = Part.makeBox(60, 40, 5)
+        for x, y in ((15, 10), (45, 10), (15, 30), (45, 30)):
+            plate = plate.cut(Part.makeCylinder(2.5, 7, App.Vector(x, y, -1)))
+        path = os.path.join(isolation.fresh_dir("stl_"), "holed.stl")
+        Mesh.Mesh(plate.tessellate(0.3)).write(path)
+        self.do_import(path, ref_id="holed", board=None, name="Ref_HOLED")
+        m = measure_mesh.analyze_mesh(self.doc.getObject("Ref_HOLED"))
+        self.assertTrue(m.survey["closed"])
+        holes = [c for c in m.survey["surface"]["cylinders"] if c["concave"]]
+        self.assertEqual(len(holes), 4)
+        for h in holes:
+            self.assertAlmostEqual(h["diameter"], 5.0, delta=0.65)
+        text = measure_mesh.render_text(m)
+        self.assertIn("Feature survey of the source mesh", text)
+        self.assertIn("hole: diameter", text)
+        self.assertIn("step_measurement", text)
 
 
 

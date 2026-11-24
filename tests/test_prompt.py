@@ -14,7 +14,7 @@ isolation.isolate_process()   # temp settings / projects / logs / cache / downlo
 
 from oscar import context, flow, models, prompt  # noqa: E402
 
-# The tool matrix (41 required + the two optional net tools). Kept here on purpose: the prompt's own
+# The tool matrix (42 required + the two optional net tools). Kept here on purpose: the prompt's own
 # KNOWN_TOOLS must equal it, so an edit on one side without the other fails.
 CONTRACT_TOOLS = frozenset("""
 list_documents get_objects get_object get_view plan_set plan_update record_note create_document reload_document
@@ -22,7 +22,7 @@ import_file download_file get_parts_list insert_part_from_library create_object 
 execute_code_async execute_code_headless get_async_status
 apply_feature_plan reapply_plan_feature feature_tree_status run_fem_analysis find_reference_part source_reference_part
 import_reference_part measure_reference_part enclosure_spec build_enclosure add_cutout add_vents set_parameters
-get_parameters bind_expression set_parameter validate_model check_fit save_document export_model
+get_parameters bind_expression set_parameter validate_model check_fit compare_to_reference save_document export_model
 export_rebuild_script web_search fetch_url
 """.split())
 OPTIONAL_TOOLS = frozenset({"web_search", "fetch_url"})
@@ -106,7 +106,7 @@ class LintTest(unittest.TestCase):
 
     def test_known_tools_match_the_contract_matrix(self):
         self.assertEqual(prompt.KNOWN_TOOLS, CONTRACT_TOOLS)
-        self.assertEqual(len(CONTRACT_TOOLS), 43)
+        self.assertEqual(len(CONTRACT_TOOLS), 44)
 
     def test_tool_names_exist(self):
         referenced = set()
@@ -333,7 +333,8 @@ class StructuredPartPlaybookTest(unittest.TestCase):
         self.assertTrue(self.TEXT.startswith("PLAYBOOK structured_part"))
         self.assertLessEqual(context.estimate_tokens_text(self.TEXT), 400)
         self.assertEqual(referenced_tools(self.TEXT), {"apply_feature_plan", "reapply_plan_feature", "validate_model",
-                                                      "execute_code"})
+                                                      "execute_code", "measure_reference_part",
+                                                      "compare_to_reference"})
 
     def test_it_says_the_things_the_model_needs(self):
         for needle in ("parameters first", "one feature per entry", "schema_version 2", "never by index",

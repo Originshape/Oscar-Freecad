@@ -552,6 +552,83 @@ class CheckFitTest(VerifyCase):
         self.assertIn("is not solid geometry", text)
 
 
+# ---------------------------------------------------------------------------------------------- compare_to_reference
+
+
+class CompareToReferenceTest(VerifyCase):
+    """The reconstruction deviation tool: a plan-built Body judged against a Ref_ mesh."""
+
+    PLATE = {
+        "schema_version": 1, "id": "plate", "part_class": "plate", "units": "mm",
+        "parameters": {
+            "length": {"value": 60.0, "evidence": {"op": "user_request", "detail": "60 mm long"}},
+            "width": {"value": 40.0, "evidence": {"op": "user_request", "detail": "40 mm wide"}},
+            "thick": {"value": 6.0, "evidence": {"op": "user_request", "detail": "6 mm thick"}}},
+        "features": [
+            {"id": "sk", "op": "sketch", "plane": {"normal": [0, 0, 1]},
+             "profile": {"shape": "rectangle", "width": "length", "height": "width"}},
+            {"id": "pad", "op": "pad", "sketch": "sk", "length": "thick"}],
+    }
+
+    def rebuilt(self, name="Cmp"):
+        """A document with the plan-built plate and its own tessellation as the Ref_ mesh."""
+        import Mesh
+
+        from oscar.plan import builder
+
+        doc = self.new_doc(name)
+        result = builder.apply_plan(doc, self.PLATE)
+        self.assertTrue(result["success"], result["error"])
+        body = doc.getObject(result["body"])
+        verts, tris = body.Shape.tessellate(0.3)
+        mesh_obj = doc.addObject("Mesh::Feature", "Scan")
+        mesh_obj.Mesh = Mesh.Mesh([list(verts[i]) + list(verts[j]) + list(verts[k]) for i, j, k in tris])
+        ref = doc.addObject("App::Part", "Ref_TEST")
+        ref.addObject(mesh_obj)
+        doc.recompute()
+        return doc, body, mesh_obj
+
+    def test_a_faithful_rebuild_reports_pass_rows_and_is_not_an_error(self):
+        doc, body, _mesh = self.rebuilt()
+        text, image, is_error = self.run_tool("compare_to_reference", doc_name=doc.Name)
+        self.assertFalse(is_error, text)
+        self.assertIsNone(image)
+        self.assertTrue(text.startswith(f"DEVIATION of '{body.Label}'"), text)
+        self.assertIn("deviation.bbox_axis", text)
+        self.assertIn("PASS", text)
+        self.assertIn("never gate the turn", text)
+
+    def test_a_wrong_dimension_warns_and_the_sheet_fix_recovers_it(self):
+        doc, _body, _mesh = self.rebuilt()
+        sheet = doc.getObject("Parameters")
+        sheet.set(sheet.getCellFromAlias("width"), "=45.0")     # 5 mm too wide
+        doc.recompute()
+        text, _, is_error = self.run_tool("compare_to_reference", doc_name=doc.Name)
+        self.assertFalse(is_error, text)                        # WARN informs, it never fails the turn
+        self.assertIn("WARN", text)
+        sheet.set(sheet.getCellFromAlias("width"), "=40.0")
+        doc.recompute()
+        text, _, is_error = self.run_tool("compare_to_reference", doc_name=doc.Name)
+        self.assertFalse(is_error, text)
+        self.assertNotIn("WARN deviation.bbox_axis", text)
+
+    def test_explicit_names_resolve_and_unknown_ones_are_named(self):
+        doc, body, mesh_obj = self.rebuilt()
+        text, _, is_error = self.run_tool("compare_to_reference", doc_name=doc.Name,
+                                          reference=mesh_obj.Name, built=body.Name)
+        self.assertFalse(is_error, text)
+        text, _, is_error = self.run_tool("compare_to_reference", doc_name=doc.Name, reference="Ghost")
+        self.assertTrue(is_error)
+        self.assertIn("'Ghost' is not an object", text)
+
+    def test_a_document_without_a_reference_mesh_says_so(self):
+        doc = self.new_doc("NoRef")
+        doc.addObject("PartDesign::Body", "Body")
+        text, _, is_error = self.run_tool("compare_to_reference", doc_name=doc.Name)
+        self.assertTrue(is_error)
+        self.assertIn("no reference mesh found", text)
+
+
 # ---------------------------------------------------------------------------------------------- run_validation
 
 

@@ -50,27 +50,28 @@ class ToolSchemaTest(unittest.TestCase):
         "insert_part_from_library", "import_file", "run_fem_analysis",
         "apply_feature_plan", "feature_tree_status", "reapply_plan_feature", "download_file",
     }
-    # The 22 tools of the build flow, two of them optional (OPTIONAL_TOOL_NAMES).
+    # The 23 tools of the build flow, two of them optional (OPTIONAL_TOOL_NAMES).
     NEW_TOOL_NAMES = {
         "plan_set", "plan_update", "record_note", "save_document", "export_model",
         "export_rebuild_script", "validate_model", "check_fit", "find_reference_part",
         "source_reference_part", "import_reference_part", "measure_reference_part",
         "enclosure_spec", "build_enclosure", "add_cutout", "add_vents", "set_parameters",
         "get_parameters", "bind_expression", "set_parameter", "web_search", "fetch_url",
+        "compare_to_reference",
     }
 
     OPTIONAL_TOOL_NAMES = {"web_search", "fetch_url"}   # always registered (tools_web); web_search says how to configure its backend
 
     def test_expected_tool_set(self):
-        """Strict equality: exactly 43 tools, ``web_search`` / ``fetch_url`` included."""
+        """Strict equality: exactly 44 tools, ``web_search`` / ``fetch_url`` included."""
         names = {t.name for t in tools.get_tools()}
         self.assertEqual(len(self.EXPECTED_V1), 21)
-        self.assertEqual(len(self.NEW_TOOL_NAMES), 22)
+        self.assertEqual(len(self.NEW_TOOL_NAMES), 23)
         self.assertLessEqual(self.EXPECTED_V1, names, "an original tool disappeared")
         self.assertLessEqual(self.OPTIONAL_TOOL_NAMES, names, "web_search and fetch_url are part of the surface")
         expected = self.EXPECTED_V1 | self.NEW_TOOL_NAMES
         self.assertEqual(names, expected, f"missing: {sorted(expected - names)}; unknown: {sorted(names - expected)}")
-        self.assertEqual(len(names), 43)
+        self.assertEqual(len(names), 44)
         self.assertEqual(len(tools.get_tools()), len(names), "a tool name is registered twice")
 
     def test_unknown_tool_is_error(self):
