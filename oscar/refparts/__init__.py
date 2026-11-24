@@ -13,9 +13,11 @@ Pi, an Arduino, a motor...) lives here, with a recorded source and confidence:
   ``OSCAR_REFPART_LOCAL_DIR`` mirror) -> verification -> import-ready file, and
   the per-turn attempt rules. PURE of FreeCAD and Qt (network through netguard).
 * ``pdftext``  - best-effort PDF text for datasheet attachments. PURE.
+* ``synthesize`` - plan fragments from a measurement (boss emission): PURE
+  dict work, no FreeCAD.
 * ``importref``, ``measure``, ``measure_params``, ``measure_mesh`` - the FreeCAD
   side, GUI-thread only: the hidden ``Ref_<ID>`` ``App::Part`` and its frame
-  normalization, the exact B-rep measurements (PCB, holes, connector
+  normalization, the exact B-rep measurements (PCB, holes, bosses, connector
   candidates), the ``Params`` rows and the STL path.
 
 The sub-modules are imported explicitly (``from oscar.refparts import catalog``);

@@ -16,9 +16,9 @@ What it finds, in this order:
    positive direction of the long axis is kept. The transform is a rigid motion, so it is exactly reversible and applying it
    twice changes nothing: ``fit_frame`` of an already normalized reference is the identity;
 3. in that frame: the PCB size and thickness, the mounting holes (cylindrical faces parallel to the board normal whose axis
-   lies in empty space: a boss or a rounded corner has its axis inside the material), the corner radius, the connector
-   candidates (solids that reach the PCB edge: side, offset along the wall, width, height, overhang) and the
-   tallest / lowest z of everything;
+   lies in empty space: a boss or a rounded corner has its axis inside the material), the corner radius, the bosses (convex
+   cylinders standing off a PCB face, see ``find_bosses``), the connector candidates (solids that reach the PCB edge: side,
+   offset along the wall, width, height, overhang) and the tallest / lowest z of everything;
 4. a model with no PCB at all gets GENERAL PART FACTS instead (``part``): the total volume, the cylindrical holes on any
    axis (diameter, a point on the axis, depth) and the convex-cylinder inventory (a typical shared radius is the fillet).
 
@@ -41,6 +41,9 @@ SLAB_FILL = 0.55                # a slab's volume must fill this share of its bo
 MIN_FOOTPRINT = 100.0           # smallest PCB footprint, mm2
 HOLE_D_RANGE = (1.6, 8.0)       # diameters that count as holes
 MOUNT_D_RANGE = (2.0, 6.5)      # diameters that count as MOUNTING holes (M2 .. M6)
+BOSS_D_RANGE = (2.0, 50.0)      # diameters that count as bosses, mm
+MIN_BOSS_H = 0.5                # a boss stands at least this far off the face, mm
+BOSS_SEAT_TOL = 0.1             # the cylinder's seat must sit this close to the PCB face, mm
 EDGE_TOL = 0.5                  # a wall connector may sit this far inside the PCB edge
 MIN_PART_VOLUME = 0.5           # mm3: smaller solids are ignored for connectors and heights
 MAX_CYLINDER_FACES = 3000       # examined per PCB (real vendor models have thousands of vias)
@@ -453,6 +456,42 @@ def find_holes(rec: SolidRecord, thickness: float) -> tuple:
     return holes, corner
 
 
+def find_bosses(rec: SolidRecord, thickness: float, length: float, width: float) -> list:
+    """Bosses of the PCB solid in the board frame: convex cylinders parallel to Z that stand off a PCB face (their
+    seat sits ON the top or bottom plane, the rest of the cylinder outside the board) with the footprint inside the
+    board outline (``length`` x ``width``): ``[{"x", "y", "d", "h", "face"}]``, duplicates merged, sorted (top
+    first, then y, x).
+
+    Deliberately NOT bosses: rounded corners and any convex cylinder inside the board's z band (corner fillets) and
+    separate standoff solids (they are their own parts, not features of the PCB). A cylinder FUSED through the whole
+    board reads as the boss of the face it stands off — the union is identical, so that reconstruction is exact; the
+    upper steps of a stepped boss report only the step seated on the face.
+    """
+    cyl = _cylinders(rec, rec.box[2] - 0.05, rec.box[5] + 0.05)
+    seen, bosses = set(), []
+    for c in cyl:
+        d = 2.0 * c["r"]
+        if not c["convex"] or not (BOSS_D_RANGE[0] <= d <= BOSS_D_RANGE[1]):
+            continue
+        if abs(c["z0"] - thickness) <= BOSS_SEAT_TOL and c["z1"] > thickness + MIN_BOSS_H:
+            face, h = "top", c["z1"] - thickness
+        elif abs(c["z1"]) <= BOSS_SEAT_TOL and c["z0"] < -MIN_BOSS_H:
+            face, h = "bottom", -c["z0"]
+        else:
+            continue
+        if c["x"] - c["r"] < -0.05 or c["x"] + c["r"] > length + 0.05 \
+                or c["y"] - c["r"] < -0.05 or c["y"] + c["r"] > width + 0.05:
+            continue                     # the footprint must sit inside the board outline
+        key = (round(c["x"], 2), round(c["y"], 2), round(d, 2), face)
+        if key in seen:
+            continue
+        seen.add(key)
+        bosses.append({"x": round(c["x"], 4), "y": round(c["y"], 4), "d": round(d, 4),
+                       "h": round(h, 4), "face": face})
+    bosses.sort(key=lambda b: (b["face"] != "top", b["y"], b["x"]))
+    return bosses
+
+
 def mounting_pattern(holes: list) -> "dict | None":
     """The mounting holes among ``holes`` and their pattern: ``{"d", "count", "holes", "pattern"}`` or ``None``.
 
@@ -614,6 +653,7 @@ class Measurement:
     part: "dict | None" = None        # general facts of a reference that is not a PCB (no pcb found)
     holes: list = field(default_factory=list)
     mounting: "dict | None" = None
+    bosses: list = field(default_factory=list)
     connectors: list = field(default_factory=list)
     tall: list = field(default_factory=list)
     tallest_z: "float | None" = None
@@ -687,6 +727,7 @@ def analyze(solids: list, *, board: "dict | None" = None, expected_bbox=None, to
              "thickness": round(thickness, 4), "z0": 0.0, "z1": round(thickness, 4), "corner_radius": round(corner, 4)}
     m.holes = holes
     m.mounting = mounting_pattern(holes)
+    m.bosses = find_bosses(pcb_rec, thickness, length, width)
     pcb_index = next((i for i, r in enumerate(placed) if r.name == frame.pcb_name), -1)
     if frame.method == "faces":
         m.warnings.append("the model is one fused solid: connector candidates cannot be separated; use a model with separate solids "
@@ -753,6 +794,12 @@ def render_text(m: Measurement, *, top_n: int = 8) -> str:
         lines.append(f"Mounting holes: {mt['count']} x diameter {_mm(mt['d'])} at {points}{extra}.")
     elif m.pcb:
         lines.append("Mounting holes: none found.")
+    if m.bosses:
+        listed = "; ".join(f"d {_mm(b['d'])} h {_mm(b['h'])} on the {b['face']} face at ({_mm(b['x'])}, {_mm(b['y'])})"
+                           for b in m.bosses[:6])
+        more = f" (+{len(m.bosses) - 6} more)" if len(m.bosses) > 6 else ""
+        lines.append(f"Bosses: {len(m.bosses)} raised cylinder{'s' if len(m.bosses) != 1 else ''} standing off a PCB "
+                     f"face — {listed}{more}.")
     if m.connectors:
         shown = m.connectors[:top_n]
         lines.append(f"Connector candidates ({len(m.connectors)}; side, offset along the wall, width, height, z range, overhang):")
