@@ -515,8 +515,12 @@ class Project(SummaryMixin, RewindMixin):
         out: list[dict] = []
 
         def add(kind: str, rel: str) -> None:
-            if os.path.isfile(self.path(rel)):
-                out.append({"kind": kind, "name": rel, "path": self.path(rel)})
+            # split the forward-slash rel so the absolute path uses the platform
+            # separator throughout (an embedded "/" made mixed-separator paths on
+            # Windows — pre-existing, surfaced by the flaky artifact-list test)
+            if os.path.isfile(self.path(*rel.split("/"))):
+                out.append({"kind": kind, "name": rel,
+                            "path": self.path(*rel.split("/"))})
 
         add("fcstd", "model.FCStd")
         for name in self._listdir("docs"):
@@ -1319,10 +1323,13 @@ class Project(SummaryMixin, RewindMixin):
                     pass
             return []
         rows = _json_safe(result["rows"])
+        payload = {"schema": 1, "doc": result["doc"], "sheet": result["sheet"],
+                   "step": step, "updated": self._now(), "params": rows}
+        if result.get("sheets"):
+            payload["sheets"] = _json_safe(result["sheets"])   # M1 F2: every parameter sheet, bound counts visible
         self.ensure_dir()
         with self._lock:
-            _atomic_write_json(self.path("params.json"), {"schema": 1, "doc": result["doc"], "sheet": result["sheet"],
-                                                          "step": step, "updated": self._now(), "params": rows})
+            _atomic_write_json(self.path("params.json"), payload)
         return rows
 
     # -- provenance ---------------------------------------------------------------------------------------------
@@ -1453,6 +1460,22 @@ class Project(SummaryMixin, RewindMixin):
         with self._lock:
             _atomic_write_json(self.path("ledger.json"), data)
 
+    @_lifecycle("write_analysis")
+    def write_analysis(self, mesh_name: str, payload: dict) -> "str | None":
+        """K3 (W-3): persist the per-mesh analysis-evidence file ``analysis/<mesh>.json``
+        (diagnostics digest + quality/tolerances + survey digest + the four-category
+        provenance ledger with its verification). Returns the absolute path, or None when
+        the disk refuses (analysis evidence must never break a tool call)."""
+        safe = "".join(c if c.isalnum() or c in "-_." else "_"
+                       for c in str(mesh_name or "mesh"))[:80].strip("_") or "mesh"
+        path = self.path("analysis", f"{safe}.json")
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            _atomic_write_json(path, payload)
+            return path
+        except OSError:
+            return None
+
     @_lifecycle("archive_ledger")
     def archive_ledger(self, turn_id: str) -> None:
         """Move ``ledger.json`` to ``ledgers/<turn_id>.json`` (a finished task's ledger); no-op without one; a disk
@@ -1496,9 +1519,52 @@ class Project(SummaryMixin, RewindMixin):
         with self._lock:
             record = vrec.normalize(data, now=self._now(), default_after_step=self.last_geometry_step())
             record = _json_safe(vrec.merge(self.read_validation(), record))
+            if self._rebuild_ok() and "rebuild" not in record["ran"]:
+                # V-3: the headless rebuild check is a REAL validation producer — when the
+                # manifest holds a passing check not older than the last geometry step,
+                # the record must say so (the Build Summary always did)
+                ran = set(record["ran"]) | {"rebuild"}
+                record["ran"] = [c for c in vrec.CATALOG if c in ran] + \
+                                [r for r in record["ran"] if r not in vrec.CATALOG]
+                record["not_validated"] = [x for x in record["not_validated"]
+                                           if x != "rebuild"]
             _atomic_write_json(self.path("validation.json"), record)
             self._regenerate_docs(rebuild=False)
         return record
+
+    def write_accuracy_md(self) -> "str | None":
+        """V-4: write ``ACCURACY.md`` next to NOTES.md from the recorded reconstruction
+        evidence (the ``analysis/<mesh>.json`` payloads of parametric runs + the stored
+        ``recon.deviation`` rows). Pure rendering of recorded evidence — nothing is
+        re-derived. Returns the path, or None when there is no reconstruction evidence
+        (the file is then not written) or the disk refuses. Never raises."""
+        import glob as _glob
+
+        from .project_docs import render_accuracy_md
+        try:
+            payloads = []
+            for path in sorted(_glob.glob(self.path("analysis", "*.json"))):
+                try:
+                    with open(path, encoding="utf-8") as fh:
+                        data = json.load(fh)
+                except (OSError, ValueError):
+                    continue
+                if isinstance(data, dict) and data.get("mode") == "parametric":
+                    payloads.append(data)
+            if not payloads:
+                return None
+            rows = [r for r in (self.read_validation() or {}).get("fit_rows") or []
+                    if isinstance(r, dict) and r.get("kind") == "recon_deviation"]
+            name = str((self.read_spec() or {}).get("name")
+                       or self.manifest.get("name")
+                       or os.path.basename(self.root) or "project")
+            text = render_accuracy_md(payloads, project_name=name, recon_rows=rows,
+                                      now=self._now()[:19])
+            out = self.path("ACCURACY.md")
+            _atomic_write_text(out, text)
+            return out
+        except Exception:  # noqa: BLE001 - the dossier must never break finalize
+            return None
 
     def mark_exported(self) -> None:
         """Remember that ``exports/`` now reflects the model as of the newest geometry step (called by the export code);
@@ -1590,6 +1656,9 @@ class Project(SummaryMixin, RewindMixin):
                 log_event("project_error", where="finalize_export", error=f"{type(exc).__name__}: {exc}"[:200])
         self.write_notes_md(ledger_dict)
         self.write_rebuild_py()
+        accuracy = self.write_accuracy_md()      # V-4: next to NOTES.md, evidence-only
+        if accuracy:
+            self.note("info", f"accuracy report written: {self.rel(accuracy) or accuracy}")
         with self._lock:
             self.manifest["finalized"] = {"turn_id": self._turn_id, "outcome": outcome, "ts": self._now()}
             self._save_manifest()

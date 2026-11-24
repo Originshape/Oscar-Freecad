@@ -33,6 +33,7 @@ from . import prompt as _prompt
 from . import toolpipe as _toolpipe
 from . import tools as _tools
 from .flow import visible_phases
+from . import flow_intent as _flow_intent
 from .flow_intent import is_goahead, parametric_requested
 from .turnlog import log_event
 
@@ -55,13 +56,20 @@ class ContextTooSmall(RuntimeError):
 # intents whose prismatic parts are better built from a structured (schema 2) plan
 _STRUCTURED_INTENTS = ("bracket", "fixture", "generic_part")
 
+# Issue 003: wording that makes a work turn a RECONSTRUCTION of an imported reference (case-insensitive:
+# shared with the finish gate through flow_intent)
+_RECONSTRUCT_REQUEST = _flow_intent.RECONSTRUCTION_WORDS
 
-def playbooks_for(intent: str, request: str, names: "set[str] | frozenset[str]") -> tuple[str, ...]:
+
+def playbooks_for(intent: str, request: str, names: "set[str] | frozenset[str]",
+                  mesh_intent: "str | None" = None) -> tuple[str, ...]:
     """The prompt playbooks that are ACTIVE for a turn: fem for fem, the parts
-    library when the request names standard parts and the library tools are offered, and structured_part for a
+    library when the request names standard parts and the library tools are offered, structured_part for a
     bracket / fixture / generic_part turn — or ANY turn whose request asks for a parametric, spreadsheet-driven
-    model (``flow_intent.parametric_requested``) — that is offered ``apply_feature_plan``. Pure; no playbook
-    otherwise."""
+    model (``flow_intent.parametric_requested``) — that is offered ``apply_feature_plan``, and reconstruction (Issue 003)
+    when a work-intent request says rebuild/replicate/reverse-engineer/convert and the measure + compare tools
+    are offered. W-1: a routed mesh intent activates the reconstruction playbook directly — the
+    wording regex remains the FALLBACK router, never the primary one. Pure; no playbook otherwise."""
     books: list[str] = []
     if intent == "fem":
         books.append("fem")
@@ -70,6 +78,12 @@ def playbooks_for(intent: str, request: str, names: "set[str] | frozenset[str]")
         books.append("parts_library")
     if (intent in _STRUCTURED_INTENTS or parametric_requested(request)) and "apply_feature_plan" in names:
         books.append("structured_part")
+    if mesh_intent and "reconstruct_mesh" in names:
+        books.append("reconstruction")
+    elif (intent in ("generic_part", "bracket", "fixture", "modify")
+            and {"measure_reference_part", "compare_to_reference"} <= names
+            and _RECONSTRUCT_REQUEST.search(request or "")):
+        books.append("reconstruction")
     return tuple(books)
 
 
@@ -205,7 +219,8 @@ class ContextWiring:
         ``(lite, playbooks, tool_names)``)."""
         intent = self._ledger.intent if self._flow() else "other"
         names = self._turn_tool_names(intent)
-        self._playbooks = playbooks_for(intent, self._request or "", names)
+        mesh_intent = getattr(self._ledger, "mesh_intent", None) if self._flow() else None
+        self._playbooks = playbooks_for(intent, self._request or "", names, mesh_intent=mesh_intent)
         return _prompt.build_system_prompt(self.caps, lite=self._lite, playbooks=self._playbooks,
                                            tool_names=names or None)
 

@@ -67,7 +67,7 @@ class RegistrationTest(unittest.TestCase):
         self.assertEqual(sorted(export["properties"]), ["directory", "doc_name", "formats", "objects", "per_part",
                                                         "print_orientation", "stl_tolerance"])
         props = export["properties"]
-        self.assertEqual(props["formats"]["items"]["enum"], ["step", "stl", "3mf", "brep"])
+        self.assertEqual(props["formats"]["items"]["enum"], ["step", "stl", "3mf", "brep", "svg", "pdf"])
         self.assertEqual(props["formats"]["default"], ["step", "stl"])
         self.assertEqual((props["per_part"]["default"], props["print_orientation"]["default"]), (True, True))
         self.assertEqual((props["stl_tolerance"]["default"], props["stl_tolerance"]["minimum"]), (0.05, 0.001))

@@ -89,7 +89,9 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual(schema.ALL_FEATURE_OPS, schema.FEATURE_OPS + schema.FEATURE_OPS_V2)
 
     def test_v1_vocabulary_for_the_planner_prompt_is_unchanged(self):
-        self.assertEqual(schema.FEATURE_OPS, ("sketch", "pad", "pocket", "revolution", "hole"))
+        # this branch widens v1: groove, sweep, sweep_cut, loft and loft_cut are version-1 ops here
+        self.assertEqual(schema.FEATURE_OPS, ("sketch", "pad", "pocket", "revolution", "groove", "hole",
+                                              "sweep", "sweep_cut", "loft", "loft_cut"))
         self.assertEqual(schema.SCHEMA_VERSION, 1)
         self.assertEqual(schema.SUPPORTED_VERSIONS, (1, 2))
 
@@ -253,7 +255,7 @@ class VersionGateTest(unittest.TestCase):
         plan["schema_version"] = 1
         text = " | ".join(errors_of(plan))
         self.assertIn("feature round: op 'fillet' needs schema_version 2 (this plan is version 1)", text)
-        self.assertIn("('sketch', 'pad', 'pocket', 'revolution', 'hole')", text)
+        self.assertIn(str(schema.FEATURE_OPS), text)   # the widened v1 vocabulary is what the planner is offered
 
     def test_a_v1_plan_may_not_use_parts_profiles_assembly_or_references(self):
         plan = two_parts()
@@ -347,7 +349,7 @@ class ErrorTextTableTest(unittest.TestCase):
         self.case({"id": "p1", "op": "linear_pattern", "of": "hole1", "count": "hole_count", "spacing": "hole_pitch",
                    "direction": "xx"}, "linear_pattern.direction 'xx' not in ['x', 'y', 'z', '-x', '-y', '-z']")
         self.case({"id": "p1", "op": "polar_pattern", "of": "hole1", "count": "hole_count", "angle": "sweep",
-                   "axis": "w"}, "polar_pattern.axis 'w' not in ['x', 'y', 'z']")
+                   "axis": "w"}, "polar_pattern.axis 'w' not in ['x', 'y', 'z', 'sketch_normal']")   # sketch_normal: the original's normal
         self.case({"id": "p1", "op": "mirror", "of": "hole1", "plane": "yx"},
                   "mirror.plane 'yx' not in ['xy', 'xz', 'yz']")
 

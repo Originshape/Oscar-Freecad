@@ -557,7 +557,10 @@ class ExportToolOrientationTest(OrientationFixture):
     def test_no_orientation_line_without_a_spec_and_a_note_for_a_bad_value(self):
         text, _, _ = self.call(doc_name=self.doc.Name)
         self.assertNotIn("Print orientation", text)
-        self.assertNotIn("Note:", text)
+        # V-2 export verification: re-import EQUAL notes appear without a spec; nothing else may ride along
+        for line in text.split("\n"):
+            if line.startswith("Note: "):
+                self.assertIn("re-import EQUAL", line)
         self.spec["print_orientation"]["lid"] = "sideways"
         self.proj.save_spec(self.spec)
         text, _, is_error = self.call(doc_name=self.doc.Name, formats=["step"])

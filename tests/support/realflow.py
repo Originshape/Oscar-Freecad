@@ -191,7 +191,10 @@ class RealFlowCase(_UnitBase):
         self.assertIn(ref["status"], REFERENCE_STATUSES)
         self.assertIn(f"reference status: {ref['status']}", text)
         if ref["status"] in ("none", "catalog-nominal"):
-            self.assertIn("STEP-based collision check", self.section(text, "NOT validated"))
+            # V-3 removed the dead step_collision id; the LITE build's not-validated
+            # section now ends at physical (the rebuild line shows once a check ran)
+            self.assertIn("rebuild.py reproduces the model headless",
+                          self.section(text, "NOT validated"))
         if ref["status"] != "none":
             entry = next(e for e in prov["entries"] if e["id"] == ref["entry"])
             self.assertTrue(entry["source"])

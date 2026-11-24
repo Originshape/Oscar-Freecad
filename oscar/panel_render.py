@@ -1787,6 +1787,16 @@ def restore_card_html(title: str, messages: int, meta: Any, *, notice: str = "",
         hidden = len(steps) - 8 + _int(turn.get("more"))
         if hidden > 0:
             out.append(f"<div style='margin-left:14px;color:{muted};'>… +{hidden} more steps</div>")
+        for ask in [a for a in turn.get("asks") or [] if isinstance(a, dict)][:6]:
+            payload = ask.get("payload") if isinstance(ask.get("payload"), dict) else {}
+            titles = [q.get("title") for q in payload.get("wizard") or [] if isinstance(q, dict)]
+            title = _text(titles[0] if titles else payload.get("title")) or "(decision)"
+            answers = " | ".join(_text(a.get("answer")) for a in ask.get("answers") or []
+                                 if isinstance(a, dict) and _text(a.get("answer")))
+            state = _text(ask.get("state")) or "closed"
+            icon = "◆" if state == "answered" else "◇"
+            out.append(f"<div style='margin-left:14px;color:{muted};'>{icon} decision: {_esc(title)} — "
+                       f"{_esc(answers or state)}</div>")
         out.append("</div>")
     ids = [tid for tid, _path in restore_thumbs(meta, key) if thumbs is None or tid in thumbs]
     if ids:

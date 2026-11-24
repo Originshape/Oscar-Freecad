@@ -206,8 +206,8 @@ class DispatchTimeoutTest(_Drained):
         self._gui_less(emit)
         with mock.patch.object(dispatch, "_RUNNING_GRACE", 0.05):
             result, failed = dispatch.dispatch(
-                lambda: time.sleep(0.45), timeout=0.2, op="probe"
-            )
+                lambda: time.sleep(1.2), timeout=0.2, op="probe"   # wide margin: the task cannot
+            )                                                    # finish inside timeout+grace even under load
         for thread in threads:
             thread.join(5)
         self.assertTrue(failed)

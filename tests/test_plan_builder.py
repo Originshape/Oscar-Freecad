@@ -765,7 +765,9 @@ class IdempotencyTest(_DocTest):
         self.assertTrue(second["success"], second)
         self.assertEqual((second["body"], second["spreadsheet"]), ("Body", "Parameters"))
         self.assertIn("Body", second["replaced"])
-        self.assertIn("Parameters", second["replaced"])
+        # M1 F1: the sheet is no longer deleted and rebuilt — it is updated in
+        # place, so foreign rows and user-edited cells survive a re-apply
+        self.assertNotIn("Parameters", second["replaced"])
         types = [o.TypeId for o in doc.Objects]
         self.assertEqual(types.count("PartDesign::Body"), 1)
         self.assertEqual(types.count("Spreadsheet::Sheet"), 1)
@@ -1066,10 +1068,19 @@ class ModuleHygieneTest(_DocTest):
                                       "PySide2", "PySide6"), f"{name}.py imports {imported}")
 
     def test_no_print_in_library_code(self):
+        # AST-based: a raw text scan false-positives on the S8 macro_text
+        # TEMPLATE (its generated .FCMacro legitimately prints); real library
+        # print() calls are still caught
+        import ast
+
         for name in ("builder", "_buildcore", "_sketchbuild", "_featurebuild"):
             with open(os.path.join(_WORKBENCH, "oscar", "plan", f"{name}.py"),
                       encoding="utf-8") as f:
-                self.assertNotIn("print(", f.read(), name)
+                tree = ast.parse(f.read())
+            calls = [n.lineno for n in ast.walk(tree)
+                     if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                     and n.func.id == "print"]
+            self.assertEqual(calls, [], f"{name}.py calls print() at {calls}")
 
     def test_apply_plan_reports_a_closed_or_missing_document_instead_of_raising(self):
         result = builder.apply_plan(None, _plate())
@@ -1078,6 +1089,125 @@ class ModuleHygieneTest(_DocTest):
         self.assertIn("AttributeError", result["error"])
         self.assertTrue(builder.format_build_failure(result).startswith("Plan failed at 'document'"))
 
+
+
+class SourceColumnsTest(_DocTest):
+    """Issue 003 Area 6: the sheet carries each parameter's source metadata (the kit's layout:
+    column D the source kind, E the ref). Written only when the plan states a source; existing
+    cells are never cleared, values and expressions are untouched."""
+
+    def sourced_plate(self):
+        plan = _plate()
+        plan["schema_version"] = 2
+        plan["parameters"]["thickness"] = {
+            "value": 10.0,
+            "source": {"kind": "user_requirement", "ref": "the user asked for a 10 mm plate"}}
+        return plan
+
+    def test_the_sheet_carries_the_plan_sources(self):
+        doc, report = self.build(self.sourced_plate())
+        sheet = doc.getObject(report["spreadsheet"])
+        row = int(sheet.getCellFromAlias("thickness")[1:])
+        self.assertEqual(sheet.getContents(f"D{row}").lstrip("'"), "user_requirement")
+        self.assertIn("10 mm plate", sheet.getContents(f"E{row}").lstrip("'"))
+        self.assertAlmostEqual(sheet.get("thickness"), 10.0)      # the value cell still reads back
+
+    def test_a_parameter_without_a_source_writes_no_metadata(self):
+        doc, report = self.build(_plate())
+        sheet = doc.getObject(report["spreadsheet"])
+        row = int(sheet.getCellFromAlias("thickness")[1:])
+        self.assertEqual(sheet.getContents(f"D{row}"), "")
+        self.assertEqual(sheet.getContents(f"E{row}"), "")
+
+    def test_re_applying_preserves_a_user_edited_source_cell(self):
+        plan = _plate()
+        doc, report = self.build(plan)
+        sheet = doc.getObject(report["spreadsheet"])
+        row = int(sheet.getCellFromAlias("thickness")[1:])
+        sheet.set(f"D{row}", "user_requirement")
+        doc.recompute()
+        builder.apply_plan(doc, plan)
+        self.assertEqual(sheet.getContents(f"D{row}").lstrip("'"), "user_requirement")
+
+
+class SheetAdoptionTest(_DocTest):
+    """M1 F1 (RC1): a plain parameter sheet that already exists — written by
+    ``set_parameters`` or ``measure_reference_part(write_params=true)`` before
+    ``apply_feature_plan`` — is ADOPTED and updated in place. The build must
+    not spawn a duplicate ``Parameters001`` sheet, the foreign rows survive,
+    and the features bind to the adopted sheet."""
+
+    def plain_sheet(self, doc):
+        """A parameter sheet in the shape ``kit.params.ensure_sheet`` leaves
+        behind: tagged ``OscarRole = "params"``, A the name, B the value
+        aliased, D/E the source kind and ref (the sheet contract)."""
+        sheet = doc.addObject("Spreadsheet::Sheet", "Parameters")
+        sheet.addProperty("App::PropertyString", "OscarRole", "Oscar", "kit tag: OscarRole")
+        sheet.OscarRole = "params"
+        sheet.set("A1", "base_hole_x")
+        sheet.set("B1", "45")
+        sheet.setAlias("B1", "base_hole_x")
+        sheet.set("D1", "'step_measurement")
+        sheet.set("E1", "'z-holes measured at x 45")
+        doc.recompute()
+        return sheet
+
+    def sheets(self, doc):
+        return [o for o in doc.Objects
+                if o.TypeId == "Spreadsheet::Sheet" and o.Name != "OscarParameterProbe"]
+
+    def test_an_existing_plain_parameter_sheet_is_adopted_not_duplicated(self):
+        doc = self.new_doc("AdoptA")
+        self.plain_sheet(doc)
+        report = builder.apply_plan(doc, _plate())
+        self.assertTrue(report.get("success"),
+                        f"{report.get('stage')}: {report.get('error')}")
+        self.assertEqual([s.Name for s in self.sheets(doc)], ["Parameters"])
+        sheet = doc.getObject("Parameters")
+        self.assertIsNotNone(sheet.getCellFromAlias("base_hole_x"))   # the foreign row survived
+        self.assertAlmostEqual(sheet.get("plate_len"), 60.0)
+        self.assertAlmostEqual(self.volume(doc), 60 * 40 * 10, places=2)
+        pad = next(o for o in doc.getObject(report["body"]).Group
+                   if o.TypeId == "PartDesign::Pad")
+        exprs = dict(pad.ExpressionEngine or [])
+        self.assertIn("Parameters", exprs.get("Length", ""))          # bound to the adopted sheet
+
+    def test_re_apply_updates_in_place_and_keeps_foreign_rows(self):
+        doc = self.new_doc("AdoptB")
+        self.plain_sheet(doc)
+        first = builder.apply_plan(doc, _plate())
+        self.assertTrue(first.get("success"), first.get("error"))
+        second = builder.apply_plan(doc, _plate())
+        self.assertTrue(second.get("success"), second.get("error"))
+        self.assertEqual([s.Name for s in self.sheets(doc)], ["Parameters"])
+        self.assertIsNotNone(doc.getObject("Parameters").getCellFromAlias("base_hole_x"))
+        self.assertAlmostEqual(self.volume(doc), 60 * 40 * 10, places=2)
+
+    def test_a_sheet_with_foreign_cells_is_still_moved_aside(self):
+        doc = self.new_doc("AdoptC")
+        sheet = self.plain_sheet(doc)
+        sheet.set("F1", "scratch notes of the user's own")            # beyond the A..E contract
+        doc.recompute()
+        report = builder.apply_plan(doc, _plate())
+        self.assertTrue(report.get("success"),
+                        f"{report.get('stage')}: {report.get('error')}")
+        self.assertEqual([s.Name for s in self.sheets(doc)],
+                         ["Parameters", "Parameters001"])              # untouched, built beside it
+        self.assertIsNotNone(doc.getObject("Parameters").getCellFromAlias("base_hole_x"))
+
+    def test_a_users_own_untagged_sheet_is_never_adopted(self):
+        doc = self.new_doc("AdoptD")
+        sheet = doc.addObject("Spreadsheet::Sheet", "Parameters")     # hand-made: no OscarRole tag
+        sheet.set("A1", "my_dim")
+        sheet.set("B1", "12")
+        sheet.setAlias("B1", "my_dim")
+        doc.recompute()
+        report = builder.apply_plan(doc, _plate())
+        self.assertTrue(report.get("success"),
+                        f"{report.get('stage')}: {report.get('error')}")
+        self.assertEqual([s.Name for s in self.sheets(doc)],
+                         ["Parameters", "Parameters001"])              # untouched, built beside it
+        self.assertIsNotNone(doc.getObject("Parameters").getCellFromAlias("my_dim"))
 
 
 if __name__ == "__main__":
