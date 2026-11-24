@@ -69,6 +69,7 @@ _TOOL_CATEGORY = {
     "execute_code_headless": "build", "apply_feature_plan": "build", "reapply_plan_feature": "build",
     "build_enclosure": "build", "add_cutout": "build", "add_vents": "build",
     "feature_tree_status": "verify", "validate_model": "verify", "check_fit": "verify",
+    "compare_to_reference": "verify",
     "run_fem_analysis": "fem",
     "set_parameters": "params", "get_parameters": "params", "bind_expression": "params", "set_parameter": "params",
     "save_document": "deliver", "export_model": "deliver", "export_rebuild_script": "deliver",
