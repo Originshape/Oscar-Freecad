@@ -186,8 +186,9 @@ class HoleCutTest(_DocCase):
 def _dshape(ccw: bool, shallow: bool = False) -> dict:
     """30x20 block whose right edge is an arc: bulging out (ccw) or notched
     in (cw). Default is a 10 mm-radius semicircle with the radius left
-    free (a plan that does not name it leaves one arc DOF open: v1 limit);
-    ``shallow`` is a minor arc with a named radius."""
+    unnamed — a singular spelling: the sketch report refuses it as
+    under-constrained and names the sanctioned spellings (a 'slot', two
+    quarter arcs, or a minor arc with a radius, the ``shallow`` form)."""
     if shallow:
         arc = {"type": "arc", "to": ["lenx", "heit"],
                "center": ["acx", 10], "ccw": ccw, "radius": "arc_r"}
@@ -210,14 +211,38 @@ class ProfileArcTest(_DocCase):
     HALF_DISC = math.pi * 100 / 2
 
     def test_bulging_arc_builds(self):
-        doc, _ = self._build(_dshape(True))
-        self.assertVolume(doc, (600 + self.HALF_DISC) * 5)
+        # the radius-less exact semicircle used to build silently
+        # under-constrained; the sketch report now refuses it with the fix
+        doc, report = self._build(_dshape(True), ok=False)
+        self.assertEqual(report["feature_id"], "s")
+        self.assertIn("not fully constrained", report["error"])
+        self.assertIn("two quarter arcs", report["error"])
 
     def test_notch_arc_builds(self):
-        # ccw=False swaps the arc's start/end angles; every constraint that
-        # addresses "start"/"end" of the arc has to follow
-        doc, _ = self._build(_dshape(False))
-        self.assertVolume(doc, (600 - self.HALF_DISC) * 5)
+        # ccw=False swaps the arc's start/end angles; the refusal is the same
+        doc, report = self._build(_dshape(False), ok=False)
+        self.assertEqual(report["feature_id"], "s")
+        self.assertIn("not fully constrained", report["error"])
+
+    def test_a_two_quarter_arc_dshape_builds_fully_constrained(self):
+        # the sanctioned spelling of the D-shape: two quarter arcs, each with
+        # a radius, build fully constrained to the same half-disc volume
+        plan = _dshape(True)
+        plan["id"] = "dshape_quarters"
+        plan["parameters"]["arc_r"] = {"value": 10.0,
+                                       "assumption": "test fixture dimension"}
+        plan["parameters"]["mid_x"] = {"expr": "lenx + arc_r"}
+        plan["features"][0]["profile"]["segments"][1] = {
+            "type": "arc", "to": ["mid_x", 10], "center": ["lenx", 10],
+            "ccw": True, "radius": "arc_r"}
+        insert = {"type": "arc", "to": ["lenx", "heit"],
+                  "center": ["lenx", 10], "ccw": True, "radius": "arc_r"}
+        plan["features"][0]["profile"]["segments"].insert(2, insert)
+        doc, report = self._build(plan)
+        info = report["features"][0]["info"]
+        self.assertTrue(info["fully_constrained"], info)
+        self.assertNotIn("redundant", info)
+        self.assertVolume(doc, (600 + self.HALF_DISC) * 5)
 
     def test_arc_profile_rides_the_spreadsheet(self):
         # minor arc segment: 20 mm chord, r = sqrt(125)

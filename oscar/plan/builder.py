@@ -68,7 +68,9 @@ Known v2 limits, reported honestly rather than papered over:
 
 Known v1 limits, reported honestly rather than papered over:
 * polyline profiles bind vertex positions via per-segment DistanceX/Y
-  expressions; arcs bind radius only when the plan names it; an arc that is
+  expressions; every arc must name a ``radius`` (or ``diameter``) parameter
+  — an arc without one is refused as under-constrained (free degrees of
+  freedom would make later edits under-specified); an arc that is
   exactly a semicircle over its chord is singular for a radius dimension
   (the sketch fails with the solver's redundancy named: use a ``slot`` or
   two quarter arcs).

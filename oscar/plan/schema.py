@@ -25,6 +25,11 @@ model gets them fed back for repair):
   other parameters, dependency-ordered and cycle-checked);
 * feature ids are unique identifiers and ordered; extrusion ops must
   reference an earlier sketch;
+* a polyline profile's declared segment dimensions (``length`` /
+  ``diameter`` / ``radius``) must agree with the geometry its coordinates
+  describe, and an arc's endpoints must sit equidistant on its centre's
+  circle — the builder follows the coordinates, so a contradicting declared
+  dimension is an error; a sketch no later feature consumes is a warning;
 * the op/profile vocabulary is a closed set — anything else is rejected
   by name.
 
@@ -59,6 +64,13 @@ VALID_UNITS = ("mm",)          # the builder interprets every number as millimet
 SKETCH_SHAPES = ("rectangle", "circle", "slot", "profile")
 FEATURE_OPS = ("sketch", "pad", "pocket", "revolution", "groove", "hole",   # the v1 vocabulary
                "sweep", "sweep_cut", "loft", "loft_cut")
+
+# A polyline segment's declared length / radius / diameter is compared with the geometry its own
+# coordinates describe.  Coordinates are written by people and models and are often rounded to one
+# decimal, which moves a length or a radius by up to ~0.14 mm; the builder follows the coordinates
+# anyway, so only a real contradiction is an error.
+SEGMENT_TOL_MM = 0.2         # a declared dimension may differ from its coordinates by this, or
+SEGMENT_TOL_REL = 1e-3       # by this share of the dimension (1 mm per metre)
 
 # keys each level of a plan may carry; anything else is an error (features,
 # profiles, planes, segments, parameters) or a warning (top level, frame)
@@ -786,6 +798,89 @@ def _check_ranges(plan: dict, values: dict[str, float],
                           f"{need}")
 
 
+def _check_segment_consistency(prof: dict, fid: str, val, errors: list[str]) -> None:
+    """A polyline profile's declared segment dimensions must agree with the
+    geometry its own coordinates describe: the builder follows the
+    coordinates, so a ``length`` / ``radius`` / ``diameter`` that contradicts
+    them is a plan that lies about its shape (and an arc whose endpoints are
+    not equidistant from its centre has no circle through them at all —
+    the sketch solver would fail naming the wrong constraints)."""
+
+    def coords(point):
+        if not isinstance(point, list) or len(point) != 2:
+            return None
+        out = []
+        for c in point:
+            v = val(c)
+            if v is None:
+                return None
+            out.append(v)
+        return out
+
+    def near(a, b):
+        return abs(a - b) <= max(SEGMENT_TOL_MM, SEGMENT_TOL_REL * max(abs(a), abs(b)))
+
+    def dist(a, b):
+        return math.hypot(a[0] - b[0], a[1] - b[1])
+
+    cursor = coords(prof.get("start") or [])
+    if cursor is None:
+        return
+    segments = prof.get("segments")
+    for i, seg in enumerate(segments or []):
+        if not isinstance(seg, dict):
+            return
+        to = coords(seg.get("to") or [])
+        if to is None:
+            return                       # an unknown reference: reported elsewhere
+        if seg.get("type") == "line":
+            length = dist(cursor, to)
+            if length <= 1e-9:
+                errors.append(f"feature {fid}: segment {i} is zero-length "
+                              f"(it ends where it starts); give it a real "
+                              f"direction or remove it")
+            elif "length" in seg:
+                declared = val(seg["length"])
+                if declared is not None and not near(declared, length):
+                    errors.append(f"feature {fid}: segment {i} declares "
+                                  f"length {declared:g} mm but its endpoints "
+                                  f"are {length:g} mm apart; fix the 'to' "
+                                  f"coordinates or the length")
+        elif seg.get("type") == "arc":
+            center = coords(seg.get("center") or [])
+            if center is None:
+                cursor = to
+                continue
+            r_start, r_end = dist(cursor, center), dist(to, center)
+            if not near(r_start, r_end):
+                errors.append(f"feature {fid}: arc segment {i}: the start "
+                              f"point is {r_start:g} mm and the end point "
+                              f"{r_end:g} mm from the center — both must sit "
+                              f"on the arc (fix the center or an endpoint)")
+            elif dist(cursor, to) <= 1e-9:
+                errors.append(f"feature {fid}: arc segment {i} ends where it "
+                              f"starts; use shape 'circle' for a full circle")
+            else:
+                if "radius" in seg:
+                    declared = val(seg["radius"])
+                    if declared is not None and not near(declared, r_start):
+                        errors.append(f"feature {fid}: arc segment {i} "
+                                      f"declares radius {declared:g} mm but "
+                                      f"its endpoints are {r_start:g} mm from "
+                                      f"its center; fix the center, an "
+                                      f"endpoint or the radius")
+                if "diameter" in seg:
+                    declared = val(seg["diameter"])
+                    if declared is not None and not near(declared, 2 * r_start):
+                        errors.append(f"feature {fid}: arc segment {i} "
+                                      f"declares diameter {declared:g} mm but "
+                                      f"its endpoints are {r_start:g} mm from "
+                                      f"its center (a {2 * r_start:g} mm "
+                                      f"diameter); fix the center, an "
+                                      f"endpoint or the diameter")
+        cursor = to
+
+
 def _check_relations(plan: dict, values: dict[str, float],
                      errors: list[str], warnings: list[str]) -> None:
     """Cross-field relations that make a feature geometrically impossible."""
@@ -804,6 +899,9 @@ def _check_relations(plan: dict, values: dict[str, float],
                               f"exceed its width ({width:g}); a slot as wide "
                               f"as it is long is a circle (use shape "
                               f"'circle')")
+        for prof in profs:
+            if prof.get("shape") == "profile":
+                _check_segment_consistency(prof, fid, val, errors)
         if feat.get("op") != "hole":
             continue
         try:
@@ -1324,6 +1422,17 @@ def _validate_plan(plan: dict, errors: list[str], warnings: list[str]) -> None:
     if unused:
         warnings.append(f"parameters never referenced by features: "
                         f"{sorted(map(str, unused))}")
+    # a sketch no later feature consumes is dead geometry: it builds, but
+    # nothing pads / pockets / revolves it (holes and bosses carry their own
+    # profile), so the model shows an orphan sketch
+    consumed = {f.get("sketch") for f in features if isinstance(f, dict)}
+    for feat in features:
+        if (isinstance(feat, dict) and feat.get("op") == "sketch"
+                and isinstance(feat.get("id"), str)
+                and feat["id"] not in consumed):
+            warnings.append(f"sketch '{feat['id']}' is never used by a later "
+                            f"pad / pocket / revolution — dead geometry; give "
+                            f"a later feature its id as 'sketch' or remove it")
 
 
 def resolve(plan: dict, name: str) -> float:
