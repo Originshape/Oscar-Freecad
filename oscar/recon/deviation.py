@@ -133,24 +133,52 @@ def _shape_points(shape, max_points=30000):
     return pts
 
 
-def shape_points_and_normals(shape, max_points=30000):
-    """Sampled model surface as ``(centroids, unit_normals)`` from its tessellation triangles —
-    the normal side needed by point-to-plane ICP (registration stage)."""
+def shape_points_and_normals(shape, max_points=30000, min_samples=1024):
+    """Sampled model surface as ``(points, unit_normals)`` for point-to-plane ICP
+    (registration stage), DENSIFIED beyond the raw triangle centroids: a prismatic solid
+    tessellates each planar face into ~2 triangles, so the centroids alone are a dozen
+    points that cannot anchor a registration (issue #13 — the aligned diagnostic must
+    also exist for simple geometry). Area-weighted barycentric samples fill the faces up
+    to ``min_samples`` (still capped by ``max_points``); the fixed seed keeps sampling
+    deterministic between runs."""
+    import numpy as np
+
     verts, facets = shape.tessellate(0.3)
     pts = [(p.x, p.y, p.z) for p in verts]
     tri = [(pts[a], pts[b], pts[c]) for a, b, c in facets]
     if len(tri) > max_points:
         step = max(1, len(tri) // max_points)
         tri = tri[::step]
-    import numpy as np
-
     P = np.array([[[t[0][0], t[0][1], t[0][2]],
                    [t[1][0], t[1][1], t[1][2]],
                    [t[2][0], t[2][1], t[2][2]]] for t in tri], dtype=float)   # (n, 3, 3)
     v0, v1, v2 = P[:, 0], P[:, 1], P[:, 2]
-    n = np.cross(v1 - v0, v2 - v0)
-    n = n / (np.linalg.norm(n, axis=1, keepdims=True) + 1e-12)
-    return (v0 + v1 + v2) / 3.0, n
+    cross = np.cross(v1 - v0, v2 - v0)
+    n = cross / (np.linalg.norm(cross, axis=1, keepdims=True) + 1e-12)
+    centroids = (v0 + v1 + v2) / 3.0
+    target = min(max(len(tri), min(min_samples, max_points)), max_points)
+    extra = target - len(tri)
+    if extra <= 0 or not len(tri):
+        return centroids, n
+    areas = 0.5 * np.linalg.norm(cross, axis=1)
+    weights = areas / max(float(areas.sum()), 1e-12)
+    rng = np.random.default_rng(20261119)
+    # the tessellation VERTICES ride along (an owning-triangle normal each): a coarse or
+    # CAD-tessellated scan's own vertices are exactly these corners — corner-to-corner
+    # correspondences are what makes a prismatic part's registration converge tightly
+    verts_arr, vert_n = P.reshape(-1, 3), np.repeat(n, 3, axis=0)
+    if len(centroids) + len(verts_arr) > max_points:
+        vstep = max(1, (len(centroids) + len(verts_arr)) // (max_points - len(centroids) or 1))
+        verts_arr, vert_n = verts_arr[::vstep], vert_n[::vstep]
+    extra = min(extra, max(max_points - len(centroids) - len(verts_arr), 0))
+    pick = np.minimum(np.searchsorted(np.cumsum(weights), rng.random(extra), side="right"),
+                      len(tri) - 1)
+    r1, r2 = rng.random(extra), rng.random(extra)
+    s = np.sqrt(r1)                       # uniform barycentric mapping on each triangle
+    b0, b1, b2 = (1.0 - s), s * (1.0 - r2), s * r2
+    samples = (v0[pick] * b0[:, None] + v1[pick] * b1[:, None] + v2[pick] * b2[:, None])
+    return (np.vstack([centroids, verts_arr, samples]),
+            np.vstack([n, vert_n, n[pick]]))
 
 
 def _region_keep_mask(points, regions):
@@ -319,7 +347,8 @@ def exact_residuals(mesh, shape, *, a="scan", b="model", warn_mm=0.3, worst_n=32
             kinds.append(kind)
             off_dists.append(float(dist))
         scan_per_point = (float(mesh.Area) or 1.0) / max(len(scan_sample), 1)
-        clusters += _finish_clusters(offenders, kinds, scan_per_point, dists=off_dists)
+        clusters += _finish_clusters(offenders, kinds, scan_per_point, dists=off_dists,
+                                     direction="s2m")
     else:
         rows.append(_row("exact_scan_to_model.max", "exact_mm", 0.0, warn_mm, "SKIP",
                          "budget exhausted before any scan refinement", a, b))
@@ -374,7 +403,7 @@ def exact_residuals(mesh, shape, *, a="scan", b="model", warn_mm=0.3, worst_n=32
                                                 "tessellation-based and non-uniform on "
                                                 "planar faces — the area estimate is "
                                                 "crude there",
-                                         dists=off_dists_m)
+                                         dists=off_dists_m, direction="m2s")
         else:
             rows.append(_row("exact_model_to_scan.max", "exact_mm", 0.0, warn_mm,
                              "SKIP", "budget exhausted before any model refinement",
@@ -405,7 +434,8 @@ def _shape_area(shape) -> float:
         return 0.0
 
 
-def _finish_clusters(offenders, kinds, per_point_area, caveat="", dists=None):
+def _finish_clusters(offenders, kinds, per_point_area, caveat="", dists=None,
+                     direction=None, member_cap=200):
     """Cluster beyond-warn offenders: merge radius from the offenders' own LOCAL spacing
     (3× their median nearest-neighbour distance — self-consistent even when planar faces
     are sparsely tessellated), area = member count × the side's per-point sampling share,
@@ -431,10 +461,13 @@ def _finish_clusters(offenders, kinds, per_point_area, caveat="", dists=None):
     else:
         spacing = 1.0
     labels = _clusters_labels(pts, max(3.0 * spacing, 1e-6))
+    # thin-sample regime: a handful of offenders (long strips under-sampled by the refinement
+    # cap) still cluster at 2 members — 2 spatially-agreeing points are evidence, 1 is noise
+    min_members = 3 if len(pts) >= 30 else 2
     out = []
     for c in np.unique(labels):
         member = [i for i, l in enumerate(labels.tolist()) if l == c]
-        if len(member) < 3:
+        if len(member) < min_members:
             continue
         votes = {"missing": 0, "excess": 0}
         for i in member:
@@ -445,6 +478,15 @@ def _finish_clusters(offenders, kinds, per_point_area, caveat="", dists=None):
                   "points": len(member),
                   "area_mm2": round(len(member) * per_point_area, 2),
                   "centroid_mm": [round(float(x), 3) for x in pts[member].mean(axis=0)]}
+        if direction is not None:
+            # localization feed (L-1): the direction the cluster was found IN and a capped
+            # set of member coordinates — enough for bounding boxes and feature association
+            # without retaining every offender
+            sel = member if len(member) <= member_cap else member[::len(member) // member_cap + 1]
+            record["direction"] = direction
+            record["member_points_mm"] = [[round(float(x), 3) for x in pts[i]] for i in sel]
+            if dists is not None and len(dists) == len(offenders):
+                record["member_dists_mm"] = [round(float(dists[i]), 4) for i in sel]
         if dists is not None and len(dists) == len(offenders):
             member_d = [float(dists[i]) for i in member]
             record["mean_dist_mm"] = round(sum(member_d) / len(member_d), 4)
@@ -560,20 +602,38 @@ def _build_rows(scan_pts, model_pts, *, a, b, warn_mm, engine_note="", distances
     return rows
 
 
-def _points_to_mesh_exact(points, mesh, chunk=48):
+def _mesh_tri(mesh):
+    """The mesh's triangle corner arrays ``(A, B, C)`` for `_points_to_mesh_exact` —
+    prepared ONCE by callers that probe the SAME mesh repeatedly (hole-rim probes:
+    ~45 calls x a 34k-facet re-preparation each was a measured case-07 hotspot).
+    Byte-identical to the in-function preparation."""
+    import numpy as np
+
+    V = np.array([[p.x, p.y, p.z] for p in mesh.Topology[0]], dtype=float)
+    F = np.array(mesh.Topology[1], dtype=int).reshape(-1, 3)
+    return V[F[:, 0]], V[F[:, 1]], V[F[:, 2]]
+
+
+def _points_to_mesh_exact(points, mesh, chunk=48, tri=None):
     """EXACT distance from every point to the mesh's triangle surface (pure
     numpy point-to-triangle, chunked). Replaces triangle-BRep sewing for the
     model→scan direction: sewing a mesh whose walls self-intersect (crossing
     holes) can hang the kernel outright, and the mesh IS the ground truth —
-    its facets are exactly the measured surface."""
+    its facets are exactly the measured surface. ``tri`` is a preprepared
+    `_mesh_tri(mesh)` bundle (identical numerics, no re-preparation)."""
     import numpy as np
 
     P = np.asarray(points, dtype=float)
-    V = np.array([[p.x, p.y, p.z] for p in mesh.Topology[0]], dtype=float)
-    F = np.array(mesh.Topology[1], dtype=int).reshape(-1, 3)
-    if not len(P) or not len(F):
-        return None
-    A, B, C = V[F[:, 0]], V[F[:, 1]], V[F[:, 2]]
+    if tri is not None:
+        A, B, C = tri
+        if not len(P) or not len(A):
+            return None
+    else:
+        V = np.array([[p.x, p.y, p.z] for p in mesh.Topology[0]], dtype=float)
+        F = np.array(mesh.Topology[1], dtype=int).reshape(-1, 3)
+        if not len(P) or not len(F):
+            return None
+        A, B, C = V[F[:, 0]], V[F[:, 1]], V[F[:, 2]]
     out = np.full(len(P), np.inf)
 
     def _seg(p, x, d, l2):
@@ -641,6 +701,28 @@ def _drop_phantom_max(model_pts, dists, shape):
     return [d for k, d in enumerate(dists) if k not in drop], len(drop)
 
 
+def _importance_sample(scan_pts, model_pts, cap_fn, seed_top=64):
+    """``cap_fn(points)`` (the historic uniform cap) seeded with the ``seed_top`` worst
+    sampled-NN offenders first, then uniform-filled to the same size. Bounded: never
+    exceeds the cap. Falls back to pure uniform when the NN pass is unavailable."""
+    base = cap_fn(scan_pts)
+    if len(scan_pts) <= len(base) or len(scan_pts) < 3 * seed_top:
+        return base
+    try:
+        import numpy as np
+
+        d, _ = _distances(scan_pts, model_pts)
+        order = np.argsort(d)[::-1]
+        chosen = list(dict.fromkeys(int(i) for i in order[:seed_top]))
+        rng = np.random.default_rng(0)
+        rest = [i for i in rng.permutation(len(scan_pts)) if i not in set(chosen)]
+        need = max(0, len(base) - len(chosen))
+        idx = chosen + [int(i) for i in rest[:need]]
+        return [scan_pts[i] for i in sorted(set(idx))][:len(base)]
+    except Exception:  # noqa: BLE001 - sampling strategy, never worth failing for
+        return base
+
+
 def _exact_raw_distances(mesh, shape, scan_pts, model_pts, budget_s=15.0,
                          max_points=1600, max_sew_facets=200_000):
     """EXACT point-to-surface distances where bounded, sampled NN otherwise.
@@ -665,7 +747,7 @@ def _exact_raw_distances(mesh, shape, scan_pts, model_pts, budget_s=15.0,
     try:
         import Part
 
-        sel = _subset(scan_pts)
+        sel = _importance_sample(scan_pts, model_pts, _subset)
         out, t0 = [], time.monotonic()
         for p in sel:
             out.append(float(Part.Vertex(float(p[0]), float(p[1]),
@@ -780,16 +862,35 @@ def registered_deviation(mesh, shape, *, a="scan", b="model", warn_mm=0.3, budge
     if not reg.get("valid"):
         # planar-blind rescue: point-to-plane on face centroids cannot see in-plane sliding;
         # the model's tessellation VERTICES (corners/edges) make point-to-point observable
-        verts_sub = np.asarray(model_pts[::stride if stride > 1 else 1], dtype=float)
-        retry = register.icp_register(scan_sub, verts_sub, None, method="point_to_point")
+        # planar-blind rescue: point-to-plane on the sampled surface cannot see in-plane
+        # sliding (a box's flat faces); the DENSIFIED surface samples (issue #13 — raw
+        # tessellation vertices are a prismatic solid's 8 corners, far too few) make
+        # point-to-point observable and converge where the normal-only view cannot
+        retry = register.icp_register(scan_sub, centroids[::mstride], None,
+                                      method="point_to_point")
         if retry.get("valid"):
-            retry["method"] = "point_to_plane→point_to_point(vertices)"
-            retry["warnings"] = (["point-to-plane on face centroids did not converge; "
-                                  "vertex-based point-to-point fallback: "]
+            retry["method"] = "point_to_plane→point_to_point(surface samples)"
+            retry["warnings"] = (["point-to-plane on the surface samples did not converge; "
+                                  "sample-based point_to_point fallback: "]
                                  + (reg.get("warnings") or []) + retry.get("warnings", []))
             reg = retry
     if not reg.get("valid"):
         return {"raw": raw, "aligned": None, "registration": reg, "mask": masked}
+    # Issue #13: a CONVERGED registration can still be one of several equally good alignments
+    # (symmetric or degenerate geometry admits 180°-flip twins). The bounded PCA second
+    # opinion marks it — the aligned rows stay (a lower bound of SOME good alignment) but are
+    # reported unreliable; they never touch the outcome either way.
+    try:
+        if now() < deadline:
+            _, amb = register._pca_init(scan_sub, centroids)
+            if amb.get("ambiguous"):
+                reg = dict(reg)
+                reg["ambiguous"] = True
+                reg["warnings"] = reg.get("warnings", []) + [
+                    "alignment AMBIGUOUS (symmetric or degenerate geometry): several rigid "
+                    "transforms fit equally well — the aligned numbers are unreliable"]
+    except Exception:  # noqa: BLE001 - the probe is advisory and never blocks the rows
+        pass
     R, t = np.asarray(reg["R"]), np.asarray(reg["t"])
     aligned_pts = (R @ np.asarray(scan_pts, dtype=float).T).T + t
     aligned = _build_rows(aligned_pts, model_pts, a=a, b=b, warn_mm=warn_mm,
@@ -852,6 +953,21 @@ def exact_iou(mesh, shape, *, facet_cap: int = 20000, a: str = "scan", b: str = 
     out["elapsed_s"] = round(time.monotonic() - t0, 2)
     if union <= 0:
         out["note"] = "degenerate union (zero volume)"
+        return out
+    if inter <= 0:
+        # physically impossible for solids whose bounding boxes overlap: the sew of a
+        # NOISY mesh can yield a degenerate solid against which OCC's common() silently
+        # returns empty (observed: iou 0.0 with both volumes positive on the noisy
+        # bracket). Reporting 0.0 would claim a measured zero overlap that does not
+        # exist — the honest outcome is "cannot compute".
+        bi = shape.BoundBox
+        bj = scan_solid.BoundBox
+        overlap = (min(bi.XMax, bj.XMax) - max(bi.XMin, bj.XMin) > 0
+                   and min(bi.YMax, bj.YMax) - max(bi.YMin, bj.YMin) > 0
+                   and min(bi.ZMax, bj.ZMax) - max(bi.ZMin, bj.ZMin) > 0)
+        out["note"] = ("empty intersection despite overlapping bounding boxes "
+                       "(degenerate sewn solid)" if overlap
+                       else "the shapes' bounding boxes do not overlap (frame mismatch?)")
         return out
     out["iou"] = round(inter / union, 4)
     return out

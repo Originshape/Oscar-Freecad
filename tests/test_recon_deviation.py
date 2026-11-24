@@ -330,6 +330,29 @@ class ExactIouTest(unittest.TestCase):
         self.assertIsNone(row["iou"])
         self.assertIn("cap", row["note"])
 
+    def test_an_empty_intersection_of_overlapping_solids_is_a_reported_anomaly(self):
+        # the noisy-bracket anomaly: OCC's common() silently returns empty against a
+        # degenerate sewn solid — reporting iou 0.0 would claim a measured zero overlap
+        # that does not exist. OCC itself computes valid solids correctly (a mirrored
+        # box still yields its true intersection), so the guard is exercised through a
+        # lying proxy: valid shape, positive volume, overlapping bbox, empty common().
+        from oscar.recon import deviation
+
+        class _LyingShape:
+            def __init__(self, real):
+                self._real = real
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+            def common(self, other):
+                return Part.Compound([])
+
+        mesh, shape = self._mesh_and_shape(20, 10, 5)
+        row = deviation.exact_iou(mesh, _LyingShape(shape))
+        self.assertIsNone(row["iou"], row)
+        self.assertIn("despite overlapping", row["note"])
+
     def test_an_invalid_shape_is_reported_not_substituted(self):
         from oscar.recon import deviation
 

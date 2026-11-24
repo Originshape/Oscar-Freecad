@@ -23,14 +23,15 @@ from typing import Any, Callable, Iterable, Sequence
 from .flow_guard import (BreakerVerdict, FailureBreaker, Watchdog, WatchdogConfig,  # noqa: F401  (re-exported)
                          WATCHDOG_REASONS)
 from .flow_intent import (INTENTS, KEYWORD_RULES, WORK, classify_intent, clauses_of,  # noqa: F401  (re-exported)
-                          extract_requirements, is_continuation, is_reconstruction_request, mesh_ambiguous,  # W-1
-                          mesh_operation, needs_reference)
+                         extract_requirements, is_continuation, is_reconstruction_request, mesh_ambiguous,  # W-1
+                         mesh_operation, needs_reference, parametric_requested)
 
 __all__ = [
     "PHASES", "INTENTS", "WORK", "OUTCOMES", "STEP_STATUSES", "TERMINAL", "NOT_REQUESTED",
     "NOT_VERIFIED_HEADER", "NOT_VERIFIED_FOOTER", "NO_CHANGES_TEXT", "ENCLOSURE_REQUIRED_PARAMS",
     "Requirement", "LedgerStep", "Ledger", "LedgerError",
-    "classify_intent", "extract_requirements", "needs_reference", "is_continuation", "seed_template",
+    "classify_intent", "extract_requirements", "needs_reference", "is_continuation", "parametric_requested",
+    "seed_template",
     "derive_phase", "phase_exit_met", "visible_phases", "TurnState", "GateVerdict", "finish_gate",
     "format_governor", "health_label", "phase_guidance", "tool_category", "AgentConfig",
     "Watchdog", "WatchdogConfig", "FailureBreaker", "BreakerVerdict",
@@ -520,6 +521,12 @@ class Ledger:
     def is_work_turn(self) -> bool:
         """``has_open_required_steps() or intent in WORK`` (state based, language independent)."""
         return self.has_open_required_steps() or self.intent in WORK
+
+    @property
+    def parametric(self) -> bool:
+        """The request asks for a parametric (spreadsheet-driven, editable) model: derived from the stored request,
+        so it survives the JSON round trip; the finish-time validation enforces it."""
+        return parametric_requested(self.request)
 
     def _app_blocked(self, step: LedgerStep) -> bool:
         return step.status == "blocked" and any(e.get("app_blocked") for e in step.evidence)
@@ -1434,22 +1441,9 @@ def finish_gate(ledger: "Ledger", state: TurnState, cfg: "AgentConfig", *, reply
             ids = ", ".join(str(r.get("id") if isinstance(r, dict) else r) for r in fails[:6])
             add("FIT_FAIL", f"check_fit reports FAIL: {ids}",
                 f"check_fit reports FAIL: {ids}. Fix the geometry or the parameter (set_parameter) and run check_fit again")
-    if (ledger.reference_status not in ("", "none") and intent in WORK
-            and (is_reconstruction_request(ledger.request or "")
-                 or getattr(ledger, "mesh_intent", None))
-            and (validation is None or "reference.deviation" not in (validation.get("ran") or []))):
-        add("RECONSTRUCTION_UNVERIFIED",
-            "an imported reference exists but the reconstruction was never compared with it",
-            "the reference was never compared: run compare_to_reference (name object and reference by name) "
-            "as the LAST check, then report the deviation rows")
-    elif (getattr(ledger, "mesh_intent", None) in ("parametric", "modify")
-          and (validation is None
-               or not ({"recon.deviation", "reference.deviation"}
-                       & set(validation.get("ran") or ())))):
-        add("RECONSTRUCTION_UNVERIFIED",
-            "a mesh reconstruction was requested but the result was never compared with the scan",
-            "run the reconstruction with deviation rows (reconstruct_mesh parametric reports them; "
-            "compare_to_reference works when a reference part exists) and report them verbatim")
+    unfinished = reconstruction_unfinished(ledger, intent, validation)
+    if unfinished:
+        add(*unfinished)
     pending = ledger.pending_required()
     if pending and not (intent == "deliver" and "DELIVERABLE_MISSING" in codes):
         listing = "; ".join(f"{_step_label(s)} {_pending_detail(s)}" for s in pending[:6])
@@ -1493,7 +1487,7 @@ def finish_gate(ledger: "Ledger", state: TurnState, cfg: "AgentConfig", *, reply
 
 # ---------------------------------------------------------------------------------------------------
 # Outcome texts, governor line, configuration: private module ``flow_run`` (kept apart to keep this file small)
-from .flow_mesh import MESH_INTENTS, _mesh_steps, resolve_mesh_intent  # noqa: E402,F401  (W-1; bottom import like flow_run)
+from .flow_mesh import MESH_INTENTS, _mesh_steps, reconstruction_unfinished, resolve_mesh_intent  # noqa: E402,F401  (W-1; bottom import like flow_run)
 from .flow_run import (NO_CHANGES_TEXT, NOT_VERIFIED_FOOTER, NOT_VERIFIED_HEADER, AgentConfig,  # noqa: E402,F401
                        compose_capped, compose_failed, compose_needs_help, compose_unverified, format_governor,
                        health_label, phase_guidance)

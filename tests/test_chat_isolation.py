@@ -113,6 +113,10 @@ class ChatIsolationTest(FlowTestCase):
                                           return_value=QtWidgets.QMessageBox.Yes)):
             patcher.start()
             self.addCleanup(patcher.stop)
+        # The panel resolves each chat's profile through its own profile list before it sends. In an
+        # isolated test the seeded "OriginShape" account profile is signed out, which would refuse every
+        # send and no worker would exist; a list without it lets the mocked ``active_profile`` answer.
+        self.p._profiles = [params.Profile(name="t", provider="openai_compat", model="m")]
 
     def send(self, text):
         self.p.input.setPlainText(text)
@@ -243,6 +247,7 @@ class ChatIsolationTest(FlowTestCase):
         self.assertTrue(p.stop_btn.isHidden())           # chat 2 is idle: no stop control of chat 1's turn
         self.assertFalse(p._esc_shortcut.isEnabled())    # Esc is the application's again
         self.assertEqual(p.send_btn.text(), "➤")         # the button sends
+        self.assertFalse(p.send_btn.isHidden())          # and shows: chat 2's composer is idle (shell redesign)
         self.assertTrue(p.heartbeat_row.isHidden())      # chat 1's heartbeat does not show in chat 2
         p.input.setPlainText("a question in chat two")
         p._on_flow_button()                              # ➤ sends: the message queues in chat 2
@@ -253,12 +258,12 @@ class ChatIsolationTest(FlowTestCase):
         p._on_chat_picked(p.sessions.index(session1))    # back in the turn's own chat: its controls show
         self.assertFalse(p.stop_btn.isHidden())
         self.assertTrue(p._esc_shortcut.isEnabled())
-        self.assertEqual(p.send_btn.text(), "⏸")
+        self.assertTrue(p.send_btn.isHidden())           # the Stop square has the trailing slot (shell redesign)
         self.assertFalse(p.heartbeat_row.isHidden())
-        p._on_flow_button()                              # ⏸ pauses chat 1's turn
+        p._on_pause_button()                             # the heartbeat's pause control pauses chat 1's turn
         self.assertEqual(worker1.calls, ["pause"])
         p._on_flow_paused(True)
-        self.assertEqual(p.send_btn.text(), "▶")         # and ▶ resumes it
+        self.assertEqual(p.pause_btn.text(), "▶")        # and ▶ resumes it
 
     def test_an_account_failure_on_the_first_request_gives_the_message_back_to_its_chat(self):
         """R2: the turn's first request failed for an account reason while ANOTHER chat is shown: the

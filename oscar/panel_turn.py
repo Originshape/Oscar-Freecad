@@ -4,7 +4,7 @@ Signals consumed. The legacy ones keep their exact behaviour (``text_delta``,
 ``reasoning_delta``, ``tool_started``, ``tool_finished``, ``turn_finished``, ``notice``, ``flow_paused``); the
 additive ones feed a ``panel_render.TurnView`` and the widgets built here:
 
-- ``plan_changed`` -> the pinned plan strip (never auto-collapsed; ``plan:toggle`` is the user's choice) and
+- ``plan_changed`` -> the compact, initially collapsed plan strip (``plan:toggle`` expands it on demand) and
   ``session["ledger"]`` (what the next turn carries over);
 - ``step_started`` / ``step_finished`` -> the SAME ``Step`` row the legacy ``tool_started`` created (rich view:
   title, delta, health, thumbnail, code / output on demand; the legacy ``tool_finished`` that follows never
@@ -65,7 +65,8 @@ class TurnMixin:
         self._steps_by_call: dict[str, Step] = {}
         self._thumbs = ThumbCache()
         self._thumb_retry = False
-        self._plan_collapsed = False
+        self._plan_collapsed = True
+        self._plan_rendered_collapsed = True
         self._plan_markup = ""
         self._artifacts: dict | None = None
         self._artifacts_markup = ""
@@ -101,11 +102,12 @@ class TurnMixin:
         self.plan_strip.setOpenExternalLinks(False)
         self.plan_strip.anchorClicked.connect(self._on_anchor)
         self.plan_strip.setFrameShape(QtWidgets.QFrame.NoFrame)
-        self.plan_strip.setStyleSheet(
-            "QTextBrowser { background: rgba(128,128,128,0.08); border: 1px solid rgba(128,128,128,0.25);"
-            " border-radius: 8px; }")
         self.plan_strip.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        self.plan_strip.setMinimumHeight(0)
         self.plan_strip.hide()
+        self._plan_animation = QtCore.QPropertyAnimation(self.plan_strip, b"maximumHeight", self)
+        self._plan_animation.setDuration(150)
+        self._plan_animation.setEasingCurve(QtCore.QEasingCurve.OutCubic)
 
         self.artifacts_strip = QtWidgets.QLabel()
         self.artifacts_strip.setObjectName("oscarArtifactsStrip")
@@ -117,7 +119,7 @@ class TurnMixin:
 
         self.activity_dot = QtWidgets.QLabel("●")
         self.activity_dot.setObjectName("oscarActivityDot")
-        self.activity_dot.setStyleSheet("color:#3B82F6;font-size:10px;")
+        self.activity_dot.setStyleSheet(f"color:{_theme.TOKENS['attention']};font-size:10px;")
         self.activity_dot.setFixedWidth(12)
         self.activity_effect = QtWidgets.QGraphicsOpacityEffect(self.activity_dot)
         self.activity_effect.setOpacity(0.35)
@@ -187,6 +189,7 @@ class TurnMixin:
             return
         self._plan_markup = markup
         if not markup:
+            self._plan_animation.stop()
             self.plan_strip.clear()
             self.plan_strip.hide()
             return
@@ -197,17 +200,29 @@ class TurnMixin:
         self.plan_strip.setVisible(True)
         if appearing:   # a subtle 120–180 ms appear, never blocking the GUI thread
             _theme.fade_in(self.plan_strip)
-        self._fit_plan_strip()
+        animate = self._plan_rendered_collapsed != self._plan_collapsed
+        self._fit_plan_strip(animate=animate)
+        self._plan_rendered_collapsed = self._plan_collapsed
         bar.setValue(min(scrolled, bar.maximum()))   # a plan the user scrolled stays where it was
 
-    def _fit_plan_strip(self) -> None:
+    def _fit_plan_strip(self, *, animate: bool = False) -> None:
         """Height of the strip: its content, at most about 30% of the panel (it scrolls beyond that)."""
         document = self.plan_strip.document()
         width = self.plan_strip.viewport().width()
         document.setTextWidth(max(160, width))
         wanted = int(document.size().height()) + 12
-        limit = max(90, int(self.height() * 0.30))
-        self.plan_strip.setFixedHeight(min(wanted, limit))
+        limit = max(90, int(self.height() * 0.22))
+        target = min(wanted, limit)
+        animation = getattr(self, "_plan_animation", None)
+        if animate and animation is not None and self.plan_strip.isVisible():
+            current = max(0, self.plan_strip.height())
+            animation.stop()
+            self.plan_strip.setMaximumHeight(max(current, target))
+            animation.setStartValue(current)
+            animation.setEndValue(target)
+            animation.start()
+        else:
+            self.plan_strip.setMaximumHeight(target)
 
     def resizeEvent(self, event):  # noqa: N802 - Qt override
         super().resizeEvent(event)
@@ -245,9 +260,8 @@ class TurnMixin:
         self._update_heartbeat()
 
     def _update_heartbeat(self) -> None:
-        """Heartbeat row: shown while a turn runs — in its own chat only (another chat's screen is idle).
-        The text comes from the latest ``progress`` payload and is re-asked every second (the elapsed
-        counters keep moving between payloads)."""
+        """Show a short, user-facing description derived from the worker's current progress state — shown
+        in the running turn's chat only (another chat's screen is idle)."""
         busy = self.worker is not None and self._turn_chat_shown()
         self.heartbeat_row.setVisible(busy)
         self.activity_dot.setVisible(busy)
@@ -338,6 +352,10 @@ class TurnMixin:
         for block in self.blocks:
             if block.kind == Block.RESTORE and block.thumbs:
                 keep |= block.thumbs
+            elif block.kind == Block.PREVIEW and block.call_id:
+                keep.add(block.call_id)
+                if block.snapshot_path and not self._thumbs.has(block.call_id):
+                    self._thumbs.load(block.call_id, block.snapshot_path, keep=keep)
         for block in self.blocks:
             if block.kind == Block.RESTORE and block.thumbs:
                 alive = {t for t in block.thumbs if self._thumbs.has(t)}
@@ -830,6 +848,8 @@ class TurnMixin:
                 # turn ended without any streamed text (e.g. tool-only turn)
                 self._turn_append(Block.ASSISTANT, answer)
         self._current = None
+        if ok and card is not None:
+            self._append_cad_preview(card)
         actions = [("continue:", "Continue")] if outcome == "capped" else []
         if summary or actions:
             self._turn_append(Block.SUMMARY, summary).actions = actions
@@ -937,9 +957,26 @@ class TurnMixin:
         re-read from the project folder (exports, NOTES.md and rebuild.py were written at the end)."""
         self._act_now_armed = True
         session = self._turn_chat()
+        project = self._project_of(session)
+        manifest = getattr(project, "manifest", None)
+        bound_doc = str(manifest.get("active_doc") or "") if isinstance(manifest, dict) else ""
+        if session is not None and bound_doc:
+            if session.get("doc_name") != bound_doc:
+                session["doc_name"] = bound_doc
+                self._persist_current(session)
         fresh = self._artifacts_of(session)
         if fresh is not None and self._turn_chat_shown():
             self._artifacts = fresh   # the strip shows the chat on screen
+        has_model = any(str(item.get("kind") or "") == "fcstd"
+                        and str(item.get("name") or "") == "model.FCStd"
+                        for item in (self._artifacts or {}).get("files") or [] if isinstance(item, dict))
+        for block in self.blocks:
+            if block.kind == Block.PREVIEW:
+                action = ("oscar://artifact/open-doc", "model.FCStd")
+                if has_model and action not in block.actions:
+                    block.actions.append(action)
+                elif not has_model and action in block.actions:
+                    block.actions.remove(action)
         self._refresh_artifacts_strip()
         self._refresh_plan_strip()
         self._update_heartbeat()
@@ -948,6 +985,28 @@ class TurnMixin:
         refresh = getattr(self, "_refresh_side_views", None)
         if callable(refresh):
             refresh()
+
+    def _append_cad_preview(self, card: Block) -> None:
+        """Show the newest successful geometry snapshot in Chat, reusing the step's saved image."""
+        for index in range(len(card.steps) - 1, -1, -1):
+            step = card.steps[index]
+            view = step.view
+            path = self._abs_snapshot(str(getattr(view, "snapshot_path", "") or "")) if view is not None else ""
+            if step.is_thought or step.plain or step.ok is not True or not path or not os.path.isfile(path):
+                continue
+            call_id = str(getattr(view, "call_id", "") or step.call_id or f"preview-{card.bid}-{index}")
+            if self._thumbs.load(call_id, path, keep={call_id}) is None:
+                return
+            preview = self._append(Block.PREVIEW, str(getattr(view, "title", "") or step.summary or "CAD preview"))
+            preview.snapshot_path = path
+            preview.call_id = call_id
+            if card.revertible:
+                preview.actions.append((f"revert:{card.bid}", "↶ Revert"))
+            files = (getattr(self, "_artifacts", {}) or {}).get("files") or []
+            if any(str(item.get("kind") or "") == "fcstd"
+                   and str(item.get("name") or "") == "model.FCStd" for item in files if isinstance(item, dict)):
+                preview.actions.append(("oscar://artifact/open-doc", "model.FCStd"))
+            return
 
     def _settle_queued(self, unsent: list[dict], ok: bool) -> None:
         """End of turn for the steered ("queued") bubbles: delivered ones become plain bubbles; the ones

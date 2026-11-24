@@ -44,7 +44,7 @@ FAST_MODULES = (
     "test_flow", "test_flow_guard", "test_loopcore", "test_agent_loop", "test_agent_loop_surface", "test_oscar_regressions",
     "test_providers", "test_provider_faults", "test_provider_catalogue", "test_models",
     "test_tools_and_params", "test_tool_registry", "test_tools_ask", "test_netguard",
-    "test_recon_pointcloud", "test_recon_askwire", "test_recon_classify", "test_recon_partialarc",
+    "test_recon_pointcloud", "test_recon_askwire", "test_recon_classify", "test_recon_accuracy_gates", "test_recon_correct", "test_recon_localize", "test_recon_partialarc",
     "test_project", "test_prompt", "test_context", "test_context_guard",
 )
 
@@ -83,7 +83,7 @@ RECON_MODULES = (
     "test_recon_dressings", "test_recon_patterns", "test_recon_reopen",
     "test_plan_sweep_loft",
     "test_cadbench_adapter",
-    "test_recon_deviation", "test_recon_nominal", "test_recon_datums", "test_tools_recon",
+    "test_recon_deviation", "test_recon_register", "test_recon_nominal", "test_recon_datums", "test_tools_recon",
     "test_recon_approve",
     "test_import_file", "test_tool_registry",
     "test_export_reimport", "test_export_drawing", "test_hide_source_mesh", "test_benchmark_recon",

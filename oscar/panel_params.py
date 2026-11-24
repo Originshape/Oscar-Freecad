@@ -34,8 +34,8 @@ path the tools use. It is DATA-FED and passive, exactly like
   (``oscarParamModified`` / ``oscarParamApplied`` / ``oscarParamError``) in
   the :data:`FLAG_ROLE` data of the row's items - ``QTableWidgetItem`` is not
   a QObject, so there is no objectName to set on it; a shell item delegate
-  reads the role and paints from QSS tokens. No color is set here
-  (theme-agnostic).
+  reads the role and paints a subtle token-based tint for pending, applied
+  and invalid edits.
 
 The decision logic (diffing, change collection, unit parsing, nudging) lives
 in the module-level pure functions below; the widget only renders state and
@@ -47,6 +47,8 @@ import math
 import re
 
 from PySide import QtCore, QtGui, QtWidgets
+
+from .panel_theme import TOKENS
 
 __all__ = [
     "FLAG_ROLE", "ParamsTab", "collect_changes", "diff_rows", "flag_state", "format_number",
@@ -337,6 +339,27 @@ def _mono_font() -> QtGui.QFont:
 # ---------------------------------------------------------------------------
 
 
+class _NumericDelegate(QtWidgets.QStyledItemDelegate):
+    """A locale-stable decimal editor; units remain in their own read-only column."""
+
+    def createEditor(self, parent, _option, _index):
+        editor = QtWidgets.QLineEdit(parent)
+        validator = QtGui.QDoubleValidator(-1e100, 1e100, 12, editor)
+        validator.setNotation(QtGui.QDoubleValidator.ScientificNotation)
+        validator.setLocale(QtCore.QLocale.c())
+        editor.setValidator(validator)
+        return editor
+
+    def setEditorData(self, editor, index):
+        text = str(index.data(QtCore.Qt.EditRole) or "")
+        parsed = parse_numeric(text)
+        editor.setText(format_number(parsed[0]) if parsed else text.strip().split()[0] if text.strip() else "")
+        editor.selectAll()
+
+    def setModelData(self, editor, model, index):
+        model.setData(index, editor.text().strip(), QtCore.Qt.EditRole)
+
+
 class ParamsTab(QtWidgets.QWidget):
     """The Parameters workspace: readable editable table, buffered Apply /
     Discard, visible validation errors, F-K evidence columns when present.
@@ -364,6 +387,7 @@ class ParamsTab(QtWidgets.QWidget):
         self._errors: list = []            # [{"name", "error"}]
         self._applied: set = set()         # names changed since the previous refresh
         self._sheet = ""
+        self._applying = False
 
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -398,6 +422,7 @@ class ParamsTab(QtWidgets.QWidget):
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.DoubleClicked
                                    | QtWidgets.QAbstractItemView.SelectedClicked
                                    | QtWidgets.QAbstractItemView.EditKeyPressed)
+        self.table.setItemDelegateForColumn(1, _NumericDelegate(self.table))
         self.table.horizontalHeader().setStretchLastSection(False)
         self.table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
@@ -437,14 +462,13 @@ class ParamsTab(QtWidgets.QWidget):
         self.discard_btn = QtWidgets.QPushButton("Discard")
         self.discard_btn.setObjectName("oscarParamsDiscard")
         self.discard_btn.clicked.connect(self.discard)
-        self.discard_btn.hide()
         footer.addWidget(self.discard_btn)
         self.apply_btn = QtWidgets.QPushButton("Apply")
         self.apply_btn.setObjectName("oscarParamsApply")
         self.apply_btn.clicked.connect(self.apply)
-        self.apply_btn.hide()
         footer.addWidget(self.apply_btn)
         root.addLayout(footer)
+        self._refresh_footer()
 
     # -- data ---------------------------------------------------------------
 
@@ -517,6 +541,8 @@ class ParamsTab(QtWidgets.QWidget):
                     item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable)
                 if col in (0, 1):
                     item.setFont(_mono_font())
+                if col == 1 and editable:
+                    item.setToolTip("Original: %s" % row_value_text(row))
                 self.table.setItem(r, col, item)
             if not editable:
                 self.table.item(r, 1).setToolTip(self._readonly_tooltip(row))
@@ -587,6 +613,15 @@ class ParamsTab(QtWidgets.QWidget):
             state = flag_state(name, self._pending, self._errors, self._applied)
             name_item.setData(FLAG_ROLE, state)
             value_item.setData(FLAG_ROLE, state)
+            tint = {FLAG_MODIFIED: TOKENS["accent"], FLAG_APPLIED: TOKENS["success"],
+                    FLAG_ERROR: TOKENS["danger"]}.get(state)
+            background = QtGui.QBrush()
+            if tint:
+                color = QtGui.QColor(tint)
+                color.setAlpha(38 if state == FLAG_MODIFIED else 30)
+                background = QtGui.QBrush(color)
+            name_item.setBackground(background)
+            value_item.setBackground(background)
             font = value_item.font()
             font.setBold(state in (FLAG_MODIFIED, FLAG_ERROR))
             value_item.setFont(font)
@@ -600,9 +635,11 @@ class ParamsTab(QtWidgets.QWidget):
 
     def _refresh_footer(self) -> None:
         count = len(self._pending)
-        self.apply_btn.setVisible(count > 0)
-        self.discard_btn.setVisible(count > 0)
-        self.apply_btn.setText("Apply (%d)" % count if count else "Apply")
+        self.apply_btn.setText("Applying…" if self._applying else ("Apply (%d)" % count if count else "Apply"))
+        self.apply_btn.setEnabled(bool(count) and not self._applying)
+        self.discard_btn.setEnabled(bool(count) and not self._applying)
+        self.table.setEnabled(not self._applying)
+        self.refresh_btn.setEnabled(not self._applying)
 
     # -- errors --------------------------------------------------------------
 
@@ -637,6 +674,8 @@ class ParamsTab(QtWidgets.QWidget):
         write path. Local validation failures and ``apply_fn`` failures are
         shown in the error area; a success updates the baseline so the rows
         stop being modified (a host refresh confirms with fresh data)."""
+        if self._applying:
+            return
         changes, errors = collect_changes(self._rows, self.table)
         if errors:
             self._show_errors(errors)
@@ -645,6 +684,14 @@ class ParamsTab(QtWidgets.QWidget):
         if not changes:
             return
         fn = self._apply_fn if callable(self._apply_fn) else _default_apply_fn
+        self._applying = True
+        self._refresh_footer()
+        try:
+            app = QtWidgets.QApplication.instance()
+            if app is not None:
+                app.processEvents(QtCore.QEventLoop.ExcludeUserInputEvents)
+        except Exception:  # noqa: BLE001 - repaint support varies across Qt builds
+            pass
         try:
             result = fn(changes)
             if not (isinstance(result, tuple) and len(result) == 2):
@@ -652,8 +699,11 @@ class ParamsTab(QtWidgets.QWidget):
             ok, apply_errors = result
         except Exception as exc:  # noqa: BLE001 - an apply failure is data, never a crash
             ok, apply_errors = False, ["%s: %s" % (type(exc).__name__, exc)]
+        finally:
+            self._applying = False
         if not ok:
             self._show_errors(list(apply_errors or []))
+            self._refresh_footer()
             return
         for change in changes:
             name = change["name"]

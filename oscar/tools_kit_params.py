@@ -233,6 +233,33 @@ def _rebuild_dependents(doc: Any, spec_dict: "dict | None", names: "list[str]", 
     return results, ""
 
 
+def _edit_value_error(table, row: dict, name: str, value: Any) -> str:
+    """Validate one existing-row edit using the same cell parser and unit rules as Params.set()."""
+    if row.get("expr") and not (isinstance(value, str) and value.strip().startswith("=")):
+        return f"'{name}' is derived ({row['expr']}) — change its inputs or pass a new '=' formula"
+    try:
+        cell, unit = str(row.get("cell") or ""), str(row.get("unit") or "")
+        match = re.fullmatch(r"B(\d+)", cell)
+        default_unit = table._current_unit(name, int(match.group(1))) if match else unit
+        _text, resolved_unit = _params._cell_value(name, value, None, None, default_unit)
+        # a plan sheet's rows are unitless on purpose (cells stay plain numbers the sketches bind to):
+        # a unit-ful edit is accepted there and plainified by the caller — the mismatch refusal
+        # applies only to a row that DECLARES a unit
+        if unit and resolved_unit != unit:
+            return f"'{name}' uses '{unit or 'unitless'}'; the edit resolves to '{resolved_unit or 'unitless'}'"
+    except _params.ParamsError as exc:
+        return _clean(exc)
+    return ""
+
+
+def _restore_parameter_cells(table, old: dict, names: list[str]) -> None:
+    """Restore sheet cells and metadata captured before a single or batch parameter edit."""
+    for name in names:
+        record = old[name]
+        table.set(name, record["contents"], unit=record["unit"],
+                  source=record["source"] or "assumption", note=record["note"])
+
+
 def _stages_current(doc: Any, spec_dict: "dict | None") -> bool:
     """True when no built kit stage is stale against ``spec_dict`` (so a spec sync may re-stamp the hashes honestly)."""
     if not spec_dict:
@@ -627,9 +654,9 @@ def _set_parameter(doc_name: str, name: str, value: Any, recompute: bool = True,
             close = difflib.get_close_matches(param, names, n=3, cutoff=0.6)
             return {"error": f"'{param}' is not a parameter in sheet '{sheet_name}'. Parameters: {base.limit_list(names, 12)}"
                              + (f" (similar: {', '.join(close)})" if close else "") + "."}
-        if row["expr"] and not is_formula:
-            return {"error": f"'{param}' is derived ({row['expr']}), so a number would be overwritten at the next rebuild; change its "
-                             "inputs with set_parameter, or pass a formula starting with '=' to replace the derivation"}
+        edit_error = _edit_value_error(table, row, param, value)
+        if edit_error:
+            return {"error": edit_error}
         kit_sheet = sheet_name == _params.SHEET_NAME
         new_value = value if kit_sheet else _plain_value(value)
         # the chat's spec may belong to another document, and a FeaturePlan sheet is never the enclosure's
@@ -661,11 +688,18 @@ def _set_parameter(doc_name: str, name: str, value: Any, recompute: bool = True,
             results, skip_note = _rebuild_dependents(doc, spec_here, [param], ref_status)
             failed = [r for r in results if not r.ok]
             if failed:
-                table.set(param, old["contents"], unit=old["unit"], source=old["source"] or "assumption", note=old["note"])
-                doc.recompute()
-                _rebuild_dependents(doc, spec_here, [param], ref_status)
-                return {"error": f"rebuilding '{failed[0].stage}' with {param} = {value} failed ({failed[0].message}); "
-                                 f"'{param}' was set back to {_value_text(old['value'], old['unit'])}"}
+                rollback_error = ""
+                try:
+                    with build.atomic(doc, f"Oscar rollback set_parameter {param}"):
+                        _restore_parameter_cells(table, {param: old}, [param])
+                        doc.recompute()
+                    restored, _ = _rebuild_dependents(doc, spec_here, [param], ref_status)
+                    rollback_error = next((r.message for r in restored if not r.ok), "")
+                except Exception as exc:  # noqa: BLE001 - report rollback failure instead of claiming restoration
+                    rollback_error = f"{type(exc).__name__}: {exc}"
+                suffix = (f"; rollback rebuild failed ({rollback_error})" if rollback_error else
+                          f"; '{param}' was restored to {_value_text(old['value'], old['unit'])}")
+                return {"error": f"rebuilding '{failed[0].stage}' with {param} = {value} failed ({failed[0].message}){suffix}"}
         table = _params.Params(doc, sheet_name)
         new_row = _row(table.table(), param) or row
         after_state = _geometry_state(doc)
@@ -701,14 +735,13 @@ def _set_parameter(doc_name: str, name: str, value: Any, recompute: bool = True,
     if out.get("fit"):
         lines.append(out["fit"])
     return "\n".join(lines)
-
-
 # ---------------------------------------------------------------------------
 # The panel's Parameters tab (UI redesign): the same write path the tools use,
 # without the tool pipeline (no step records, no model context). Additive public
 # helper — the tools above are unchanged.
 
-def apply_parameter_edits(doc_name: str, edits: "list[dict]") -> dict:
+def apply_parameter_edits(doc_name: str, edits: "list[dict]", *, spec_dict: "dict | None" = None,
+                          reference_status: str = "") -> dict:
     """Apply several parameter edits in ONE undo transaction (the panel's Apply button).
 
     ``edits`` are ``{"name": str, "value": str | number}`` — numbers, numbers with units or
@@ -750,12 +783,18 @@ def apply_parameter_edits(doc_name: str, edits: "list[dict]") -> dict:
             row = _row(rows, name)
             if row is None:
                 return {"error": f"'{name}' is not a parameter in sheet '{sheet_name}'"}
-            if row["expr"] and not (isinstance(value, str) and value.strip().startswith("=")):
-                return {"error": f"'{name}' is derived ({row['expr']}) — only a new '=' formula may replace it"}
+            edit_error = _edit_value_error(table, row, name, value)
+            if edit_error:
+                return {"error": edit_error}
             old[name] = {"value": row["value"], "unit": row["unit"], "source": row["source"],
                          "note": row["note"], "contents": table.sheet.getContents(row["cell"]) or ""}
             staged.append((name, value if sheet_name == _params.SHEET_NAME else _plain_value(value)))
         names = [n for n, _v in staged]
+        if len(set(names)) != len(names):
+            return {"error": "A parameter may be edited only once per Apply operation."}
+        kit_sheet = sheet_name == _params.SHEET_NAME
+        spec_here = spec_dict if kit_sheet and base.spec_applies(doc, spec_dict, "") else None
+        was_current = _stages_current(doc, spec_here)
         invalid_before = _invalid_names(doc)
         recomputed = 0
         try:
@@ -763,22 +802,33 @@ def apply_parameter_edits(doc_name: str, edits: "list[dict]") -> dict:
                 for name, value in staged:
                     table.set(name, value, source="user_requirement", note=old[name]["note"])
                 recomputed = int(doc.recompute() or 0)
+                if spec_here and any(name in _spec.DESIGN_PARAMS for name in names):
+                    errors = _effective_errors(doc, spec_here)
+                    if errors:
+                        raise _Refused("the edited values break the enclosure spec rules: " + "; ".join(errors[:5]))
                 broke = sorted(_invalid_names(doc) - invalid_before)
                 if broke:
                     raise _Refused(f"the edit leaves {', '.join(broke[:4])} invalid")
         except (_Refused, _params.ParamsError) as exc:
-            return {"error": f"{_clean(exc) if isinstance(exc, _params.ParamsError) else exc}; "
-                             f"nothing was applied"}
-        results, skip_note = _rebuild_dependents(doc, None, names, "")
+            return {"error": f"{_clean(exc) if isinstance(exc, _params.ParamsError) else exc}; nothing was applied"}
+        except Exception as exc:  # noqa: BLE001 - report failed recompute without claiming rollback succeeded
+            return {"error": f"recompute failed ({type(exc).__name__}: {exc}); nothing was applied"}
+        results, skip_note = _rebuild_dependents(doc, spec_here, names, reference_status)
         failed = [r for r in results if not r.ok]
         if failed:
-            for name in names:   # the tool's policy: a failed rebuild restores the old value
-                table.set(name, old[name]["contents"], unit=old[name]["unit"],
-                          source=old[name]["source"] or "assumption", note=old[name]["note"])
-            doc.recompute()
-            _rebuild_dependents(doc, None, names, "")
+            rollback_error = ""
+            try:
+                with build.atomic(doc, "Oscar rollback parameters apply"):
+                    _restore_parameter_cells(table, old, names)
+                    doc.recompute()
+                restored, _ = _rebuild_dependents(doc, spec_here, names, reference_status)
+                rollback_error = next((r.message for r in restored if not r.ok), "")
+            except Exception as exc:  # noqa: BLE001 - expose rollback failure instead of claiming restoration
+                rollback_error = f"{type(exc).__name__}: {exc}"
+            restored_text = (f"rollback rebuild failed ({rollback_error})" if rollback_error
+                             else "all edits were restored")
             return {"error": f"rebuilding '{failed[0].stage}' failed ({failed[0].message}); "
-                             f"all edits were set back"}
+                             f"{restored_text}"}
         table = _params.Params(doc, sheet_name)
         fresh_rows = table.table()
         lines = []
@@ -791,9 +841,11 @@ def apply_parameter_edits(doc_name: str, edits: "list[dict]") -> dict:
             text += f" · rebuilt {', '.join(r.stage for r in results)}"
         if skip_note:
             text += f" ({skip_note})"
-        return {"ok": True, "text": text, "applied": names, "error": ""}
+        new_spec = _sync_spec(doc, spec_here, names, was_current) if spec_here else None
+        return {"ok": True, "text": text, "applied": names, "error": "", "spec": new_spec}
 
     out = base.gui_call("apply_parameter_edits", task)
     if out.get("error"):
         return {"ok": False, "text": str(out["error"]), "applied": []}
-    return {"ok": True, "text": str(out.get("text") or "Applied."), "applied": list(out.get("applied") or [])}
+    return {"ok": True, "text": str(out.get("text") or "Applied."), "applied": list(out.get("applied") or []),
+            "spec": out.get("spec")}

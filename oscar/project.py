@@ -602,6 +602,54 @@ class Project(SummaryMixin, RewindMixin):
                               checkpoint_note="", script="", replay={"kind": "none", "why": "project error"},
                               geometry=bool(geometry))
 
+    @_lifecycle("record_panel_action")
+    def record_panel_action(self, *, tool: str, title: str, args: dict, text: str, ok: bool, doc: str,
+                            geometry: bool = False, turn_id: str = "panel") -> StepRecord | None:
+        """Record a direct panel mutation in this chat's journal using the normal project hooks.
+
+        Unlike ``on_tool_result`` this has no agent ``ToolContext`` or tool round, but successful geometry
+        actions still receive the usual autosave, checkpoint, snapshot and parameter-sheet synchronization.
+        """
+        if not tool:
+            raise ProjectError("record_panel_action needs a tool name")
+        self.ensure_dir()
+        title = _clip_title(title) or tool
+        args = args if isinstance(args, dict) else {}
+        text = text if isinstance(text, str) else str(text or "")
+        with self._lock:
+            index = self._reserve_index()
+        rec = StepRecord(index=index, ts=self._now(), turn_id=str(turn_id or "panel"), round=0,
+                         call_id=f"panel-{uuid.uuid4().hex[:12]}", tool=tool, title=title,
+                         args=_json_safe(args), ok=bool(ok), result_head=text[:_RESULT_HEAD],
+                         result_chars=len(text), dur_s=0.0, doc=str(doc or ""),
+                         delta={"added": [], "removed": [], "changed": []}, health=None,
+                         snapshot="", snapshot_note="", checkpoint="", checkpoint_note="",
+                         script="", replay={"kind": "none", "why": "direct panel action"},
+                         geometry=bool(geometry))
+        if rec.geometry:
+            budget = _Budget(self.HOOK_BUDGET_S)
+            token = _BUDGET.set(budget)
+            try:
+                self._gui_hooks(rec, text=text, delta=rec.delta, ok=rec.ok, geometry=True,
+                                should_stop=lambda: False, budget=budget)
+            finally:
+                _BUDGET.reset(token)
+        elif rec.ok:
+            rec.snapshot_note = "not a geometry tool"
+        with self._lock:
+            if rec.doc:
+                self._note_doc(rec.doc)
+            if rec.geometry and rec.ok:
+                if rec.doc and not self.manifest.get("active_doc"):
+                    self.manifest["active_doc"] = rec.doc
+                self.manifest["last_geometry_step"] = index
+            self._append_raw(rec.to_line())
+            self._max_index = max(self._max_index, index)
+            self._jcache = None
+            self._save_manifest()
+            self._regenerate_docs(rebuild=True)
+        return rec
+
     def _record(self, *, turn_id: str, round_: int, call_id: str, tool: str, title: str, args: dict, text: str,
                 ok: bool, dur_s: float, doc: str, delta: dict, health: dict | None, geometry: bool) -> StepRecord:
         self.ensure_dir()
@@ -1483,63 +1531,6 @@ class Project(SummaryMixin, RewindMixin):
             _atomic_write_json(self.path("validation.json"), record)
             self._regenerate_docs(rebuild=False)
         return record
-
-    def _hide_source_meshes(self, outcome: str) -> None:
-        """W-2 (re-applied from fix/5-hide-source-mesh, outcome-conditioned): after a
-        VERIFIED outcome (``verified_parametric`` / ``partially_verified_parametric``)
-        every visible source mesh of the active document is hidden once a visible solid
-        tip exists (the rebuilt body is the deliverable; the mesh stays in the tree),
-        before the autosave so the saved FCStd carries the state, with a decision note
-        per hidden mesh. An outcome that is NOT verified shows again the meshes Oscar
-        had hidden earlier. A failure is logged and never breaks ``finalize``."""
-        doc_name = self.manifest.get("active_doc") or ""
-        if not doc_name:
-            return
-        verified = str(outcome) in ("verified_parametric",
-                                    "partially_verified_parametric")
-        ctx = current_context()
-
-        def task() -> list:
-            found = gui.resolve_doc(doc_name)
-            if found is None:
-                return []
-            if verified:
-                return ["hide", *gui.hide_source_meshes(found)]
-            hidden = (self.manifest.get("hidden_source_meshes") or {}).get(doc_name) or []
-            return ["show", *gui.show_source_meshes(found, hidden)]
-
-        try:
-            result, error = gui.gui_call(task, 10.0, "project_hide_source_meshes",
-                                         ctx.should_stop)
-        except Exception as exc:  # noqa: BLE001 - never break finalize
-            log_event("project_error", where="hide_source_meshes",
-                      error=f"{type(exc).__name__}: {exc}"[:200])
-            return
-        if error:
-            log_event("project_error", where="hide_source_meshes", error=error[:200])
-            return
-        action, names = (result or [None, []])[0], (result or [None, []])[1:]
-        if action == "hide" and names:
-            self.ensure_dir()                 # a lazy project may not exist on disk yet
-            with self._lock:
-                record = self.manifest.setdefault("hidden_source_meshes", {})
-                record[doc_name] = sorted(set((record.get(doc_name) or []) + names))
-                self._save_manifest()
-            for name in names:
-                self.note("decision",
-                          f"source mesh '{name}' hidden: the verified body is the "
-                          "deliverable (the mesh stays in the tree)")
-        elif action == "show" and names:
-            self.ensure_dir()
-            with self._lock:
-                record = self.manifest.setdefault("hidden_source_meshes", {})
-                record[doc_name] = [n for n in (record.get(doc_name) or [])
-                                    if n not in set(names)]
-                self._save_manifest()
-            for name in names:
-                self.note("decision",
-                          f"source mesh '{name}' visible again: the outcome is not "
-                          "verified, so the scan must stay in view")
 
     def write_accuracy_md(self) -> "str | None":
         """V-4: write ``ACCURACY.md`` next to NOTES.md from the recorded reconstruction

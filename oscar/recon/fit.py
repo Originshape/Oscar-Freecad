@@ -430,6 +430,35 @@ def classify(P, N, tol, sigma, kinds=KINDS, plane_fit=None, cylinder_fit=None):
         plane = {"normal": plane[0], "point": plane[1], "rms": plane[2]}
     report["plane"] = plane["rms"] if plane else None
     if plane and plane["rms"] <= tol and "plane" in kinds:
+        # M2 curvature-significance override: a COARSELY tessellated curved wall fits a
+        # plane within the gate (the case-13 recognition failure — the wall's sagitta at
+        # coarse resolution is smaller than the noise gate), so plane-by-Occam would eat
+        # every hole. When the normals SPREAD (a real plane's normals are parallel) and a
+        # cylinder fits decisively better (rms <= 60% of the plane rms, inside the same
+        # gate, passing the impostor checks below), the cylinder wins on evidence.
+        if N is not None and len(N) == len(P) and "cylinder" in kinds and len(P) >= 6:
+            n_hat = np.asarray(plane["normal"], dtype=float)
+            n_hat = n_hat / (np.linalg.norm(n_hat) + 1e-30)
+            normals = np.asarray(N, dtype=float)
+            spread = float(np.degrees(np.arccos(np.clip(np.abs(normals @ n_hat), -1.0, 1.0))).max())
+            if spread > 10.0:
+                # bounded probe: a ≤400-point subsample with the UNREFINED Kåsa fit decides
+                # significance; only an accepted hole wall pays for the full refined fit
+                if len(P) > 400:
+                    sel = np.linspace(0, len(P) - 1, 400).astype(int)
+                    P_t, N_t = P[sel], np.asarray(N, dtype=float)[sel]
+                else:
+                    P_t, N_t = P, np.asarray(N, dtype=float)
+                cyl_try = fit_cylinder(P_t, N_t, refine=False)
+                if cyl_try and cyl_try["rms"] <= tol and cyl_try["rms"] <= 0.6 * plane["rms"]:
+                    extent = float(np.linalg.norm(np.ptp(P, axis=0))) if len(P) else 0.0
+                    if cyl_try["radius"] <= _EXTENT_FACTOR * extent:
+                        full = cylinder_fit if cylinder_fit is not None else fit_cylinder(P, N)
+                        if full and full["rms"] <= tol:
+                            report["plane_override"] = (
+                                f"normals span {spread:.0f} deg; cylinder rms "
+                                f"{full['rms']:.4g} << plane rms {plane['rms']:.4g}")
+                            return {"kind": "cylinder", "fit": full, "report": report}
         return {"kind": "plane", "fit": plane, "report": report}
     cyl = cylinder_fit
     if cyl is None and "cylinder" in kinds:

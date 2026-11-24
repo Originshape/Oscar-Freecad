@@ -963,8 +963,8 @@ class ModuleContractTest(unittest.TestCase):
         import inspect
 
         sig = inspect.signature(pr.plan_strip_html)
-        self.assertEqual(sig.parameters["accent"].default, "#1e6ee8")
-        self.assertEqual(sig.parameters["muted"].default, "#888888")
+        self.assertEqual(sig.parameters["accent"].default, "#3cc9c0")
+        self.assertEqual(sig.parameters["muted"].default, "#8a90a0")
         self.assertEqual(list(inspect.signature(pr.step_row_html).parameters)[:3], ["view", "bid", "index"])
         self.assertTrue(inspect.signature(pr.step_row_html).parameters["expanded"].kind is inspect.Parameter.KEYWORD_ONLY)
         self.assertTrue(inspect.signature(pr.heartbeat_text).parameters["now"].kind is inspect.Parameter.KEYWORD_ONLY)
@@ -1056,7 +1056,7 @@ class AccountRenderTest(unittest.TestCase):
         self.assertIn("too old", markdown)
         self.assertEqual(actions[0], ("oscar://account/download", "Get the update"))
         self.assertIn("href='oscar://account/download'", pr.account_card_html(markdown, actions, kind="outdated"))
-        self.assertIn("#d9902b", pr.account_card_html(markdown, actions, kind="outdated"))
+        self.assertIn("#e6b422", pr.account_card_html(markdown, actions, kind="outdated"))
 
     def test_a_newer_oscar_is_mentioned_without_getting_in_the_way(self):
         state = {**self.state(), "update": "available", "latest_version": "0.3.0", "min_version": "0.2.0",
@@ -1097,9 +1097,9 @@ class AccountRenderTest(unittest.TestCase):
         self.assertIn("&lt;b&gt;Buy&lt;/b&gt;", markup)
         for bad in ("evil.example", "javascript", "onclick", "<script>"):
             self.assertNotIn(bad, markup)
-        self.assertIn("#d9902b", markup)                                   # a warning-coloured border
+        self.assertIn("#e6b422", markup)                                   # a warning-coloured border
         self.assertIn("OriginShape account", markup)
-        self.assertNotIn("#d9902b", pr.account_card_html(*pr.account_card("onboarding"), kind="onboarding"))
+        self.assertNotIn("#e6b422", pr.account_card_html(*pr.account_card("onboarding"), kind="onboarding"))
         self.assertEqual(pr.account_card_html("", []), "")
         self.assertEqual(pr.account_card_html("  ", [("https://evil.example", "x")]), "")
         self.assertNotIn("keeps going from the plan", pr.account_card_html(*pr.account_card("waitlisted")))
@@ -1643,6 +1643,28 @@ class SnapshotNoteTest(unittest.TestCase):
         for note in ("no 3D view (headless session)", "blank frame", "empty document", "skipped (GUI busy)"):
             self.assertIn(note, pr.step_row_html(self.view(note), 1, 0))
         self.assertNotIn("font-size:small", pr.step_row_html(self.view(""), 1, 0))
+
+
+class CadPreviewHtmlTest(unittest.TestCase):
+    def test_preview_uses_existing_snapshot_and_safe_action_links(self):
+        markup = pr.cad_preview_html("snapshots/001.png", "call-001", "Flange <preview>",
+                                     [("revert:7", "Revert"), ("bad target", "Bad")])
+        self.assertIn("es-img://step/call-001", markup)
+        self.assertIn("Flange &lt;preview&gt;", markup)
+        self.assertIn("href='revert:7'", markup)
+        self.assertIn("Updated", markup)
+        self.assertIn("#3cc9c0", markup)
+        self.assertNotIn("href='bad target'", markup)
+
+    def test_preview_status_accepts_compact_dimension_detail(self):
+        markup = pr.cad_preview_html("snapshots/001.png", "call-001", actions=[("revert:7", "Revert")],
+                                     status="Updated · 8 mm")
+        self.assertIn("Updated · 8 mm", markup)
+        self.assertIn("href='revert:7'", markup)
+
+    def test_preview_is_empty_without_snapshot_association(self):
+        self.assertEqual(pr.cad_preview_html("", "call-001"), "")
+        self.assertEqual(pr.cad_preview_html("snapshots/001.png", ""), "")
 
 
 if __name__ == "__main__":

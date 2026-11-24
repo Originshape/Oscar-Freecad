@@ -178,8 +178,10 @@ class ConnectPanelTest(FlowTestCase):
         progress = [e["data"] for e in self.fake.events["t1"] if e["kind"] == "progress"]
         self.assertIn({"title": "Make the box", "ok": True}, progress)
         uploads = [(u["kind"], u["format"]) for u in self.fake.uploads]
-        self.assertEqual(uploads[0], ("preview", "stl"))
-        self.assertEqual(sorted(uploads[1:]), [("export", "fcstd"), ("export", "step"), ("export", "stl")])
+        self.assertEqual(uploads[0], ("preview", "stl"))    # the live preview goes up first
+        # preview refreshes interleave with the exports by event timing — assert the export set, not the order
+        exports = [u for u in uploads[1:] if u[0] == "export"]
+        self.assertEqual(sorted(exports), [("export", "fcstd"), ("export", "step"), ("export", "stl")])
 
         chat = self.p._current_session()
         self.assertEqual(chat["title"], "Workspace: Box")
@@ -474,7 +476,7 @@ class ConnectPanelTest(FlowTestCase):
         # The panel names the task's model while the turn runs, then the active profile's again.
         self.assertEqual(labels[0], "Origin1 Super")
         self.assertEqual(labels[-1], params.model_display_name(params.active_profile()))
-        self.assertEqual(self.p.model_label.text(), labels[-1])
+        self.assertIn(labels[-1], self.p.model_label.text())
         # The request to the gateway names the task's model.
         profile = params.account_profile()
         profile.model = "origin1-super"

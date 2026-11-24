@@ -294,7 +294,7 @@ class HeartbeatMarkupTest(FlowTestCase):
         self.assertEqual(p.heartbeat_label.textFormat(), QtCore.Qt.PlainText)
         # redesign: the heartbeat shows fixed phase phrases only — the model-chosen tool name is data
         # (view.progress), never label text, so it can never render as markup
-        self.assertEqual(p.heartbeat_label.text(), "Oscar is building the model…")
+        self.assertEqual(p.heartbeat_label.text(), "Oscar is building the model…")   # the BUILD-phase phrase
         self.assertEqual(p._turn_view.progress.get("tool"), "<img src='x'>")
 
 
@@ -662,10 +662,14 @@ class RealWorkerReviewTest(FlowTestCase):
         self.addCleanup(dispatch.shutdown)
         for patcher in (mock.patch.object(_params, "active_profile",
                                           return_value=Profile(name="t", provider="openai_compat", model="m")),
+                        mock.patch.object(_params, "active_profile_name", return_value="t"),
                         mock.patch("oscar.cad.get_engine", return_value=engine),
                         mock.patch.object(agent._tools, "run_tool", fake_run_tool)):
             patcher.start()
             self.addCleanup(patcher.stop)
+        for session in self.p.sessions:   # the panel pinned these to the sandbox default profile at init
+            session.pop("profile_name", None)
+            session.pop("model", None)
         self.addCleanup(self.stop_worker)
 
     def stop_worker(self):
@@ -697,7 +701,8 @@ class RealWorkerReviewTest(FlowTestCase):
 
         def factory(history, **kw):
             self.workers.append(kw)
-            return agent.AgentWorker(history, provider=provider, profile=profile,
+            kw = dict(kw)
+            return agent.AgentWorker(history, provider=provider, profile=kw.pop("profile", profile),
                                      validator=lambda doc, ctx: fake_validation(True), **kw)
 
         with mock.patch.object(panel, "AgentWorker", factory):
@@ -881,12 +886,12 @@ class SettingsCommandRefreshTest(PanelTestCase):
     def test_the_open_panel_follows_the_saved_active_profile(self):
         from oscar import commands
 
-        self.assertEqual(self.p.profile_combo.currentText(), "Alpha")
+        self.assertIn("Alpha", self.p.profile_button.text())
         _params.set_active_profile("Gamma")                       # what the dialog's Save did
         with mock.patch.object(commands.Gui, "getMainWindow", create=True, return_value=self.window):
             self.assertTrue(commands.refresh_panel_profiles())
-        self.assertEqual(self.p.profile_combo.currentText(), "Gamma")
-        self.assertEqual(self.p.model_label.text(), "m-gamma")
+        self.assertIn("Gamma", self.p.profile_button.text())
+        self.assertIn("m-gamma", self.p.model_label.text())
 
     def test_without_a_panel_nothing_happens(self):
         from oscar import commands
@@ -930,9 +935,13 @@ class _SendHarness(FlowTestCase):
         for patcher in (mock.patch.object(panel, "AgentWorker", CapturingWorker),
                         mock.patch.object(_params, "active_profile",
                                           return_value=Profile(name="t", provider="openai_compat", model="m")),
+                        mock.patch.object(_params, "active_profile_name", return_value="t"),
                         mock.patch("oscar.cad.get_engine", return_value=engine)):
             patcher.start()
             self.addCleanup(patcher.stop)
+        for session in self.p.sessions:   # the panel pinned these to the sandbox default profile at init
+            session.pop("profile_name", None)
+            session.pop("model", None)
 
     def other_chat_and_back(self):
         """Open a second chat, then return to the first one (the first now has to be re-activated)."""

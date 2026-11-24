@@ -394,7 +394,10 @@ def _plan_prismatic(survey, diag, mesh=None):
         x, y = float(np.dot(c - base_origin, u)), float(np.dot(c - base_origin, v))
         dia = "hole_d" if same_d else f"hole_d{i}"
 
+        tri = None   # lazy _mesh_tri bundle, shared by every rim probe (the source mesh is immutable)
+
         def _opening_radius(face_pt, r_bore):
+            nonlocal tri   # the bundle is prepared once, on the first probe
             """Measured material boundary on ONE face plane at this hole: ring
             probes outward from the bore (exact point-to-mesh) until material
             appears. Returns (flare_mm, opening_diameter) — (0, 0) when the
@@ -404,9 +407,11 @@ def _plan_prismatic(survey, diag, mesh=None):
             if mesh is None or r_bore <= 0:
                 return 0.0, 0.0
             try:
-                from .deviation import _points_to_mesh_exact
+                from .deviation import _mesh_tri, _points_to_mesh_exact
             except Exception:  # noqa: BLE001 - no probe without the engine
                 return 0.0, 0.0
+            if tri is None:
+                tri = _mesh_tri(mesh)
             ref = np.array([1.0, 0.0, 0.0])
             if abs(float(n @ ref)) > 0.9:
                 ref = np.array([0.0, 1.0, 0.0])
@@ -416,7 +421,7 @@ def _plan_prismatic(survey, diag, mesh=None):
             for rr in np.arange(r_bore + 0.25, r_bore + 3.01, 0.25):
                 pts = [tuple(face_pt + rr * (math.cos(a) * pu + math.sin(a) * pv))
                        for a in np.arange(0.0, 2.0 * math.pi, math.pi / 4.0)]
-                d = _points_to_mesh_exact(pts, mesh)
+                d = _points_to_mesh_exact(pts, mesh, tri=tri)
                 if d is None:
                     return 0.0, 0.0
                 if sum(1 for q in d if float(q) <= 0.35) >= 5:
@@ -1236,6 +1241,78 @@ def _measured_mask(base, work, scan_report):
                     if (scan_exclude or regions) else ""}
 
 
+_EXACT_MAX_IDS = ("exact_scan_to_model.max", "exact_model_to_scan.max")
+_CORRECT_MIN_GAP = 0.10          # fit vs constructed must disagree beyond 10% (relative)
+_CORRECT_ROUNDS = 1             # bounded: one deviation-driven correction round, keep-better
+
+
+def corrections_from_regions(regions, survey, plan, *, warn_mm=0.3):
+    """M1: parameter corrections from HIGH-confidence DIMENSION_ERROR attributions.
+
+    Each correction sets the plan parameter to the FITTED value the attribution chain
+    recorded (the ``r=<fit>`` of its recognized feature — the survey fit, never an invented
+    number). Only complete evidence corrects: HIGH confidence, DIMENSION_ERROR (the chain
+    proved the fitted and constructed values disagree), the fit present, and the gap beyond
+    the nominal-snap tolerance (a G8-level snap is not a correction). One per parameter."""
+    import re as _re
+
+    ops = {f.get("id"): f for f in (plan or {}).get("features") or []}
+    params = (plan or {}).get("parameters") or {}
+    out, seen = [], set()
+    for region in regions or []:
+        if (region.get("attribution_confidence") != "HIGH"
+                or region.get("deviation_type") != "DIMENSION_ERROR"):
+            continue
+        feature = ops.get(region.get("plan_operation_id")) or {}
+        m = _re.search(r"r=([0-9.]+)", str(region.get("recognized_feature") or ""))
+        if not m:
+            continue
+        fitted = float(m.group(1))
+        if feature.get("op") == "hole":
+            key, target = feature.get("diameter"), round(2.0 * fitted, 3)
+            fits = [round(2.0 * float(h.get("radius") or -1.0), 3)
+                    for h in (survey or {}).get("holes") or []]
+        elif feature.get("op") in ("fillet", "chamfer"):
+            key, target = feature.get("size"), round(fitted, 3)
+            fits = [round(float(d.get("radius_mm") or -1.0), 3)
+                    for d in ((survey or {}).get("dressings") or [])
+                    if d.get("kind") in ("fillet", "chamfer")]
+        else:
+            continue
+        # the fit must still exist in the survey (stale attributions never correct)
+        if not any(abs(f - target) <= 1e-3 for f in fits):
+            continue
+        constructed = (params.get(key) or {}).get("value") if key else None
+        if not isinstance(constructed, (int, float)):
+            continue
+        frm = float(constructed)
+        if abs(frm - target) <= max(_CORRECT_MIN_GAP * max(frm, target), 2.0 * warn_mm):
+            continue          # a snap-level difference: the nominal band already covers it
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"parameter": key, "from": frm, "to": target,
+                    "op": region.get("plan_operation_id"),
+                    "evidence": (region.get("evidence") or [])[:1]})
+    return out
+
+
+def _geometric_ok(hausdorff, deviation_rows, warn_mm):
+    """The verified-outcome geometric gate: the sampled two-sided Hausdorff estimate AND every
+    COMPUTED exact residual maximum must sit within ``warn_mm``. The sampled estimate is a
+    lower bound (two sampled maxima) and can miss a small region the exact pass catches; the
+    exact rows are therefore evidence WITH teeth. A SKIPped or absent exact row (budget,
+    engine fallback) never gates — an honest not-checked, not a pass."""
+    if hausdorff is None or hausdorff > warn_mm:
+        return False
+    for row in deviation_rows or []:
+        if row.get("id") in _EXACT_MAX_IDS:
+            value = row.get("value")
+            if value is not None and row.get("status") != "SKIP" and value > warn_mm:
+                return False
+    return True
+
+
 def reconstruct(doc, mesh, *, warn_mm=0.3, user_unit=None, authorized=(),
                 preview=False, plan_override=None, prefer_class=None) -> dict:
     """Diagnose → safe-repair a copy → recognize → plan → build with the existing builder →
@@ -1547,9 +1624,6 @@ def reconstruct(doc, mesh, *, warn_mm=0.3, user_unit=None, authorized=(),
     result["registration"] = measured["registration"]
     result["measured_mask"] = measured.get("mask")   # G6: what the rows do NOT cover
     hausdorff = next((r["value"] for r in rows if r["id"] == "hausdorff"), None)
-    ok = hausdorff is not None and hausdorff <= warn_mm
-    # V-1: exact worst-point refinement + signed missing/excess clusters (additive rows;
-    # budget-guarded inside, masked to measured regions, never changes the outcome math)
     residual = None
     try:
         residual = deviation.exact_residuals(work, body.Shape, a="scan", b=body.Name,
@@ -1558,6 +1632,59 @@ def reconstruct(doc, mesh, *, warn_mm=0.3, user_unit=None, authorized=(),
     except Exception:  # noqa: BLE001 - refinement is additive honesty, never a blocker
         residual = None
     result["residual_analysis"] = residual
+    # L-2: localized deviation regions + feature attribution (diagnosis only — no rebuild)
+    try:
+        from . import localize as _localize
+        result["localized_deviations"] = _localize.localize_deviations(
+            residual, survey=survey, plan=plan, build=report, warn_mm=warn_mm)
+    except Exception:  # noqa: BLE001 - localization is diagnostic, never a blocker
+        result["localized_deviations"] = {"regions": [], "unattributed": 0,
+                                         "note": "localization unavailable"}
+    # M1: bounded deviation-driven correction — engine-synthesized plans only (an explicit
+    # plan_override is the agent's decision and is never silently edited), ONE round, and the
+    # rebuild is kept only when it measurably improves the gate evidence; reverted otherwise.
+    if (plan_override is None and _CORRECT_ROUNDS
+            and os.environ.get("OSCAR_RECON_CORRECT", "1") == "1"
+            and (result.get("localized_deviations") or {}).get("regions")):
+        corrections = corrections_from_regions(result["localized_deviations"]["regions"],
+                                               survey, plan, warn_mm=warn_mm)
+        if corrections:
+            saved = {c["parameter"]: plan["parameters"][c["parameter"]]["value"] for c in corrections}
+            for change in corrections:
+                plan["parameters"][change["parameter"]]["value"] = change["to"]
+            report2 = builder.apply_plan(doc, plan)
+            if report2.get("success"):
+                body2 = doc.getObject(report2["body"])
+                rows2 = deviation.registered_deviation(
+                    work, body2.Shape, a="scan", b=body2.Name,
+                    warn_mm=warn_mm, mask=measured_mask)["raw"]
+                hausdorff2 = next((r["value"] for r in rows2 if r["id"] == "hausdorff"), None)
+                if hausdorff2 is not None and (hausdorff is None or hausdorff2 < hausdorff):
+                    residual2 = None
+                    try:
+                        residual2 = deviation.exact_residuals(
+                            work, body2.Shape, a="scan", b=body2.Name,
+                            warn_mm=warn_mm, mask=measured_mask)
+                        rows2 = rows2 + residual2["rows"]
+                    except Exception:  # noqa: BLE001 - additive honesty, never a blocker
+                        residual2 = None
+                    report, rows, hausdorff = report2, rows2, hausdorff2
+                    result["build"], result["deviation"] = report2, rows2
+                    result["residual_analysis"] = residual2
+                    body = body2
+                    meta["corrections"] = corrections
+                else:                                   # worse or unmeasured: revert honestly
+                    for key, value in saved.items():
+                        plan["parameters"][key]["value"] = value
+                    builder.apply_plan(doc, plan)
+                    meta["corrections_reverted"] = corrections
+            else:
+                for key, value in saved.items():
+                    plan["parameters"][key]["value"] = value
+                meta["corrections_reverted"] = corrections
+    ok = _geometric_ok(hausdorff, result.get("deviation"), warn_mm)
+    # V-1: exact worst-point refinement + signed missing/excess clusters (additive rows;
+    # budget-guarded inside, masked to measured regions, never changes the outcome math)
     # D-1: the exact boolean IoU row — additive EVIDENCE beside the sampled rows (which stay
     # authoritative for the outcome); OPT-IN (OSCAR_RECON_IOU=1): on noisy scans the sew itself
     # can cost minutes (measured 418 s on the 2k-facet noisy bracket), which no laptop run
@@ -1610,4 +1737,9 @@ def reconstruct(doc, mesh, *, warn_mm=0.3, user_unit=None, authorized=(),
         meta["reconciliation"]["unexplained"].append(
             f"{_recognized_holes - _realized_holes} recognized hole(s) not realized "
             "in the tree")
+    if meta["reconciliation"]["unexplained"] and result["outcome"] == "verified_parametric":
+        # completeness gate: the tree does not represent every recognized source feature —
+        # a valid recompute of an incomplete tree is NOT a verified reconstruction
+        result["outcome"] = "partially_verified_parametric"
+        meta["completeness_cap"] = "recognized source feature(s) not realized in the tree"
     return result

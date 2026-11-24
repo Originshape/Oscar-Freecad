@@ -774,6 +774,8 @@ def _render(result) -> str:
             lines.append(f"  UNEXPLAINED: {u}")
     if result.get("deviation"):
         lines.append(fit_block(result["deviation"]))
+    from .recon.localize import localization_block
+    lines.extend(localization_block(result.get("localized_deviations")))
     mm = result.get("measured_mask")
     if mm and (mm.get("scan_excluded") or mm.get("model_excluded")):
         lines.append(f"MEASURED-ONLY DEVIATION: {mm['scan_excluded']} synthetic scan "
@@ -783,9 +785,14 @@ def _render(result) -> str:
     reg = result.get("registration")
     if reg is not None:
         aligned = result.get("deviation_aligned")
-        lines.append("REGISTRATION (ICP, %s): %s" % (
-            reg.get("method"), "valid and converged" if reg.get("valid") else
-            "INVALID — aligned deviation withheld, raw numbers above remain authoritative"))
+        if reg.get("valid") and reg.get("ambiguous"):
+            state = ("AMBIGUOUS — several alignments fit equally well; the aligned numbers "
+                     "below are unreliable and never affect the outcome")
+        elif reg.get("valid"):
+            state = "valid and converged (a lower-bound diagnostic; it never affects the outcome)"
+        else:
+            state = "INVALID — aligned deviation withheld, raw numbers above remain authoritative"
+        lines.append("REGISTRATION (ICP, %s): %s" % (reg.get("method"), state))
         if aligned:
             raw_h = next((r["value"] for r in result["deviation"] if r["id"] == "hausdorff"), None)
             alg_h = next((r["value"] for r in aligned if r["id"] == "hausdorff"), None)

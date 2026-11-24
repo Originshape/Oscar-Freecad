@@ -9,7 +9,7 @@ tool facts. A step completes ONLY on recorded facts; a failed/blocked result blo
 with the reason; optional stages seed as skipped and are WOKEN by real evidence.
 """
 
-from .flow_intent import mesh_ambiguous, mesh_operation
+from .flow_intent import WORK, is_reconstruction_request, mesh_ambiguous, mesh_operation
 
 MESH_INTENTS = ("analyse", "repair", "solid", "brep", "parametric", "modify", "ambiguous")
 
@@ -184,6 +184,29 @@ def _repair_chain_current(ledger) -> bool:
         return False
     return (m7.get("output") == live.get("input") or m7.get("output") == live.get("output")
             or (m7.get("output_mm") and m7.get("output_mm") == live.get("input_mm")))
+
+
+def reconstruction_unfinished(ledger, intent: str, validation) -> "tuple[str, str, str] | None":
+    """The finish gate's RECONSTRUCTION_UNVERIFIED finding for this turn — ``(code, what is unfinished, the
+    fix)`` — or ``None`` when nothing reconstruction-like was asked for, or it was compared with its
+    reference / scan. Moved here from ``flow.py`` unchanged so that module keeps its size invariant."""
+    if (ledger.reference_status not in ("", "none") and intent in WORK
+            and (is_reconstruction_request(ledger.request or "")
+                 or getattr(ledger, "mesh_intent", None))
+            and (validation is None or "reference.deviation" not in (validation.get("ran") or []))):
+        return ("RECONSTRUCTION_UNVERIFIED",
+                "an imported reference exists but the reconstruction was never compared with it",
+                "the reference was never compared: run compare_to_reference (name object and reference by name) "
+                "as the LAST check, then report the deviation rows")
+    if (getattr(ledger, "mesh_intent", None) in ("parametric", "modify")
+            and (validation is None
+                 or not ({"recon.deviation", "reference.deviation"}
+                         & set(validation.get("ran") or ())))):
+        return ("RECONSTRUCTION_UNVERIFIED",
+                "a mesh reconstruction was requested but the result was never compared with the scan",
+                "run the reconstruction with deviation rows (reconstruct_mesh parametric reports them; "
+                "compare_to_reference works when a reference part exists) and report them verbatim")
+    return None
 
 
 def mesh_evidence(ledger, outcome) -> bool:

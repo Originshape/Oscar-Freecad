@@ -131,16 +131,20 @@ class PlanStripTest(FlowTestCase):
         p = self.p
         self.begin_turn()
         p._on_plan_changed(j(ledger()))
-        # UI redesign 2026-11-16: the pinned plan is the strip's markup (the tab shell owns its placement)
+        # UI redesign 2026-11-16: the pinned plan is the strip's markup (the tab shell owns its placement).
+        # The strip pins COMPACT — the anchor line and the running step — and expands on request.
         self.assertTrue(p._plan_markup)
         text = p.plan_strip.toPlainText()
-        for title in ("Source the board", "Bottom shell: floor, walls, standoffs", "Lid", "Optional vents"):
-            self.assertIn(title, text)
         self.assertIn("step 5/8", text)                    # the running step is the 5th
         self.assertIn("round 7/30", text)
         self.assertIn("BUILD", text)
         self.assertIn("(1/2)", text)                       # stage progress of the staged step
-        self.assertIn("intent: enclosure", text)
+        self.assertIn("Bottom shell: floor, walls, standoffs", text)
+        p._on_anchor(QtCore.QUrl("plan:toggle"))           # expanded: the whole plan is readable
+        expanded = p.plan_strip.toPlainText()
+        for title in ("Source the board", "Lid", "Optional vents"):
+            self.assertIn(title, expanded)
+        self.assertIn("intent: enclosure", expanded)
         session = p._current_session()
         self.assertEqual(session["ledger"]["intent"], "enclosure")
         self.assertEqual(len(session["ledger"]["steps"]), 8)
@@ -150,6 +154,7 @@ class PlanStripTest(FlowTestCase):
         p = self.p
         self.begin_turn()
         p._on_plan_changed(j(ledger()))
+        p._on_anchor(QtCore.QUrl("plan:toggle"))           # the user expanded it; only the user may fold it away
         before = p.plan_strip.toPlainText()
         for event in (lambda: p._on_progress(j(progress(round=9))), lambda: p._on_tool_started("get_objects"),
                       lambda: p._on_tool_finished("get_objects()", True, "x"), lambda: p._on_notice("hello"),
@@ -162,12 +167,15 @@ class PlanStripTest(FlowTestCase):
         p = self.p
         self.begin_turn()
         p._on_plan_changed(j(ledger()))
+        # redesign 2026-11-16: the strip pins compact; the toggle expands it, and folds it back
+        p._on_anchor(QtCore.QUrl("plan:toggle"))
+        expanded = p.plan_strip.toPlainText()
+        self.assertIn("Bottom shell", expanded)
+        self.assertIn("Optional vents", expanded)
         p._on_anchor(QtCore.QUrl("plan:toggle"))
         collapsed = p.plan_strip.toPlainText()
         self.assertIn("Bottom shell", collapsed)           # the current step stays
         self.assertNotIn("Optional vents", collapsed)
-        p._on_anchor(QtCore.QUrl("plan:toggle"))
-        self.assertIn("Optional vents", p.plan_strip.toPlainText())
 
     def test_progress_moves_the_round_in_the_header(self):
         p = self.p
@@ -185,6 +193,8 @@ class PlanStripTest(FlowTestCase):
         self.finish_turn()
         # UI redesign 2026-11-16: pinned means the strip keeps the final plan's markup between turns
         self.assertTrue(p._plan_markup)                    # the final plan stays pinned between turns
+        self.assertIn("Bottom shell", p.plan_strip.toPlainText())   # compact pin: the anchor + running step
+        p._on_anchor(QtCore.QUrl("plan:toggle"))
         self.assertIn("Lid", p.plan_strip.toPlainText())
         first = p._current_session()
         first["history"].append(panel.Message(role="user", content="make a lid"))   # "new chat" is refused in an unused chat
@@ -193,7 +203,8 @@ class PlanStripTest(FlowTestCase):
         self.assertEqual(p.plan_strip.toPlainText(), "")
         p._activate_session(first)
         self.assertTrue(p._plan_markup)
-        self.assertIn("Lid", p.plan_strip.toPlainText())
+        # re-pinning starts compact again (per chat): its running step proves the plan came back
+        self.assertIn("Bottom shell", p.plan_strip.toPlainText())
 
     def test_clearing_a_chat_drops_its_plan(self):
         p = self.p
@@ -473,10 +484,11 @@ class StepRowTest(FlowTestCase):
 
 class ThumbnailTest(FlowTestCase):
     def open_log(self):
-        """Open whatever Log surface this shell has (the redesign moved step snapshots off the Chat)."""
+        """Switch to the Logs page — the timeline view that resolves and renders step snapshots now."""
         p = self.p
-        if hasattr(p, "tabs"):          # the redesigned shell: the Logs page
-            p.tabs.setCurrentIndex(2)
+        # UI redesign 2026-11-16: step thumbnails left the Chat; the Logs page timeline rebuilds from the
+        # project journal (refresh_from) when the tab opens, resolving snapshot paths against the root
+        p.tabs.setCurrentIndex(2)
 
 
 
@@ -524,9 +536,9 @@ class ThumbnailTest(FlowTestCase):
         self.assertEqual(p._abs_snapshot("/abs/x.png"), "/abs/x.png")
         self.begin_turn()
         self.rich_step(snapshot_path="snapshots/001_a.png")
-        self.open_log()                                     # whatever Log surface exists (mock project here)
-        # the timeline resolves the record's relative snapshot against the project root — the
-        # surface the Logs page feeds: build_timeline(snapshot_dir=project.root)
+        self.open_log()                                     # the Logs page follows the journal (a mock project here)
+        # the timeline resolves the record's relative snapshot against the project root — the path the
+        # Logs page feeds refresh_from -> build_timeline(snapshot_dir=project.root)
         from oscar.panel_activity import build_timeline
         entries = build_timeline([{"call_id": self.card().steps[0].call_id, "tool": "execute_code", "ok": True,
                                    "snapshot": "snapshots/001_a.png"}], snapshot_dir=root)
@@ -961,14 +973,15 @@ class OutcomeTest(FlowTestCase):
             self.assertEqual(card.header_kind, kind)
 
     def test_warning_and_error_headers_are_coloured(self):
+        # redesign palette (panel_render): danger #ef6f61, warn #e6b422, success never shouted
         card = self.finish("failed", "It broke.", ok=False)
-        self.assertIn("#e06c5a", card.html())
+        self.assertIn("#ef6f61", card.html())
         self.p.blocks.clear()
         card = self.finish("unverified", "NOT VERIFIED: x")
-        self.assertIn("#d9902b", card.html())
+        self.assertIn("#e6b422", card.html())
         self.p.blocks.clear()
         card = self.finish("validated", "ok")
-        self.assertNotIn("#3aa76d", card.html())            # success is not shouted
+        self.assertNotIn("#3cc9c0", card.html())            # success is not shouted
 
     def test_failed_text_is_cut_at_the_summary_too(self):
         p = self.p
