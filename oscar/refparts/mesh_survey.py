@@ -576,9 +576,12 @@ def survey_solid(shape) -> dict:
             ts = [_dot(q, axis) for q in verts] or [_dot(center, axis)]
             try:
                 # the centre of curvature tells the side: a hole's axis mid-point sits in
-                # the void, a pin's inside the material
+                # the void, a pin's inside the material. The face's mid-height is measured
+                # FROM THE CYLINDER'S OWN AXIS POINT: added to it as an absolute height, a
+                # step far from the origin was probed outside the part and read as a hole
                 raw_axis = (surf.Axis.x, surf.Axis.y, surf.Axis.z)
-                mid = tuple(center[d] + raw_axis[d] * ((min(ts) + max(ts)) / 2.0) for d in range(3))
+                mid_height = (min(ts) + max(ts)) / 2.0 - _dot(center, axis)
+                mid = tuple(center[d] + raw_axis[d] * mid_height for d in range(3))
                 concave = not bool(shape.isInside(App.Vector(*mid), 1e-7, True))
             except Exception:  # noqa: BLE001 — the probe is evidence, not a requirement
                 concave = None

@@ -188,6 +188,22 @@ class SolidSurveyTest(SurveyCase):
         self.assertFalse(s["valid"])
         self.assertEqual(s["cylinders"], [])
 
+    def test_outer_cylinders_away_from_the_origin_are_convex(self):
+        # the concavity probe is taken at the face's mid-height measured from the cylinder's
+        # own axis point. Added to it as an absolute height, it landed outside a stepped
+        # shaft and its two upper steps were reported as holes
+        shaft = (Part.makeCylinder(10.0, 40.0)
+                 .fuse(Part.makeCylinder(6.0, 30.0, V(0, 0, 40)))
+                 .fuse(Part.makeCylinder(4.0, 20.0, V(0, 0, 70)))).removeSplitter()
+        s = mesh_survey.survey_solid(shaft)
+        self.assertEqual(sorted((round(c["diameter"], 1), c["concave"]) for c in s["cylinders"]),
+                         [(8.0, False), (12.0, False), (20.0, False)])
+        # and a hole far from the origin is still a hole
+        plate = Part.makeBox(40, 30, 5, V(100, 100, 50)).cut(
+            Part.makeCylinder(3.0, 30, V(120, 115, 40)))
+        holes = [c for c in mesh_survey.survey_solid(plate)["cylinders"] if c["concave"]]
+        self.assertEqual([round(h["diameter"], 1) for h in holes], [6.0])
+
 
 class NoiseAndSmallFeatureTest(SurveyCase):
     """What the survey measures on a scan (fixed seeds) and what it says when it cannot."""
