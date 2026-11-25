@@ -774,6 +774,12 @@ def _render(result) -> str:
             lines.append(f"  UNEXPLAINED: {u}")
     if result.get("deviation"):
         lines.append(fit_block(result["deviation"]))
+    iou = result.get("exact_iou") or {}
+    if iou.get("iou") is not None:
+        lines.append(f"EXACT IOU (opt-in evidence; volume overlap only, not used by the result "
+                     f"class): {iou['iou']} · {iou.get('elapsed_s', 0.0)} s")
+    elif os.environ.get("OSCAR_RECON_IOU", "") == "1":
+        lines.append(f"EXACT IOU (opt-in): {iou.get('note') or 'not computed'}")
     from .recon.localize import localization_block
     lines.extend(localization_block(result.get("localized_deviations")))
     mm = result.get("measured_mask")
