@@ -14,8 +14,26 @@ Two recognizers, one output schema (``{"face_count", "surface_kinds", "planes", 
   ``concave=None`` rather than a guess.
 
 Everything is bounded: facets over ``MAX_FACETS`` skip recognition (bbox facts still exact,
-a warning says so), regions under ``MIN_REGION_SHARE`` of the total area are noise, and no
+a warning says so), a region under ``MIN_REGION_SHARE`` of the total area is noise unless it
+is a cylinder (the wall of a small hole is a sliver of the area on a large plate), and no
 method here raises — a mesh that cannot be surveyed reports itself honestly.
+
+What the tessellation survey measures, and where it stops (six fixtures — a plate with four
+holes, an L-bracket, a stepped shaft, a four-hole bracket, a rounded plate, a board with
+four bosses and four mounting holes — at three seeds per noise level):
+
+* clean tessellation: every hole, bore, boss and step is found, diameter error <= 0.01 mm;
+* 0.01 mm of vertex noise: most are still found and nothing false is reported;
+* from about 0.02 mm: on a finely tessellated face, noise turns the small facets at a hole's
+  rim enough that region growing merges the face with its hole walls, and those holes are
+  NOT reported (a face merges with its hole walls through the rim);
+* from 0.05 mm: a few small spurious cylinders appear;
+* a cylinder tangent to a plane (a rounded plate's ends, a fillet) grows into one region
+  with that plane and is never reported as a cylinder.
+
+``unsurveyed_area_pct`` is the share of the surface the vocabulary did not cover; the
+model-facing text repeats it, because "no hole listed" must never read as "the part has no
+hole" on a noisy scan.
 
 The numbers feed plan parameters as ``step_measurement``-grade evidence: hole / bore / step
 diameters and positions, plane normals and offsets, overall extents. Their accuracy is the
@@ -29,11 +47,21 @@ Pure geometry on plain arrays (``_jacobi_eigen``, ``_fit_circle``, ``_fit_sphere
 import math
 
 MAX_FACETS = 20_000          # recognition is skipped above this (the bbox facts stay exact)
-MIN_REGION_SHARE = 0.005     # a region under 0.5 % of the total area is noise
-MAX_TURN_DEG = 75.0          # facets joined across a normal turn up to this grow one region
+MIN_REGION_SHARE = 0.005     # a region under 0.5 % of the total area is noise — unless it is a cylinder
+MAX_TURN_DEG = 60.0          # facets joined across a normal turn up to this grow one region (a
+                             # smooth tessellation turns at most ~60° per step; a right-angle
+                             # edge must keep a margin noise cannot close — at 75° it did not)
 PLANE_SPREAD_DEG = 4.0       # a region whose normals stay this close is a plane
+PLANE_RESIDUAL_MM = 0.15     # ... or whose points stay this close to one plane: the reconstruction
+                             # engine's own fit band (recon.section.MERGE_TOL_DEFAULT), so a scan's
+                             # noise does not turn every face into "freeform"
+SMOOTH_GATE_DEG = 45.0       # a facet's normal is averaged with neighbours facing its way within
+                             # this turn (half a right angle): a sliver at a junction has a normal
+                             # its size cannot support, and one facet's noise is one facet's noise
 SEW_TOL = 0.05               # mm: mirrors cad.imported.SEW_TOLERANCE (fit residuals absorb it)
 AXIS_PERPENDICULAR_SIN = math.sin(math.radians(8.0))   # facet normals of a cylinder are perpendicular to its axis
+OUTLIER_AREA_SHARE = 0.05    # ... judged by area: this share of a band may disagree (one noisy facet
+                             # rejected the whole hole, which then fell through to the sphere fit)
 
 
 # ---------------------------------------------------------------------------
@@ -202,10 +230,36 @@ def _turn_deg(na, nb) -> float:
     return math.degrees(math.acos(c))
 
 
+def _smoothed_frames(frames, neighbours) -> list[tuple]:
+    """Each facet's normal replaced by the area-weighted mean of its own and of the
+    neighbours that face its way (within ``SMOOTH_GATE_DEG``). A sliver where two
+    surfaces meet has a normal its size cannot support: raw, it lies within
+    ``MAX_TURN_DEG`` of BOTH surfaces and lets one region grow from a face into its
+    hole walls (measured: 0.01 mm of noise on a bracket merged 73 % of the part into
+    one region). Smoothed, it belongs to one side only. A facet on a right-angle edge
+    is not pulled across it, and a cylinder band's facets keep their radial spread."""
+    gate = math.cos(math.radians(SMOOTH_GATE_DEG))
+    out = []
+    for f, (_n, area, centroid) in enumerate(frames):
+        own = frames[f][0]
+        sx = sy = sz = 0.0
+        for g in [f] + neighbours[f]:
+            n_g, a_g, _c = frames[g]
+            if _dot(own, n_g) >= gate:
+                sx += a_g * n_g[0]
+                sy += a_g * n_g[1]
+                sz += a_g * n_g[2]
+        out.append((_unit((sx, sy, sz)) or own, area, centroid))
+    return out
+
+
 def _regions(points, facets, flip: bool) -> list[dict]:
-    """Grow contiguous facet regions across normal turns up to ``MAX_TURN_DEG``."""
-    frames = _facet_frames(points, facets, flip)
+    """Grow contiguous facet regions across normal turns up to ``MAX_TURN_DEG``.
+    Every region is returned (small ones too): whether a small region is noise is
+    decided after it is classified — a hole's wall is a sliver of the area on a large
+    plate, and dropping it first is how small holes went unreported."""
     neighbours = _adjacency(facets)
+    frames = _smoothed_frames(_facet_frames(points, facets, flip), neighbours)
     seen = [False] * len(facets)
     cos_limit = math.cos(math.radians(MAX_TURN_DEG))
     out = []
@@ -223,8 +277,26 @@ def _regions(points, facets, flip: bool) -> list[dict]:
                     stack.append(g)
         area = sum(frames[m][1] for m in members)
         out.append({"members": members, "area": area, "frames": frames})
-    total = sum(r["area"] for r in out) or 1.0
-    return [r for r in out if r["area"] >= MIN_REGION_SHARE * total]
+    return out
+
+
+def _plane_residual(centroids, areas, normal=None) -> float:
+    """Area-weighted RMS distance of points from their plane (the given normal, or the
+    least-squares one)."""
+    total = sum(areas) or 1.0
+    c = [sum(p[d] * w for p, w in zip(centroids, areas)) / total for d in range(3)]
+    if normal is None:
+        acc = [[0.0] * 3 for _ in range(3)]
+        for p, w in zip(centroids, areas):
+            q = _sub(p, c)
+            for i in range(3):
+                for j in range(3):
+                    acc[i][j] += w * q[i] * q[j]
+        normal = _unit(_jacobi_eigen(acc)[0][1])
+        if normal is None:
+            return 0.0
+    return math.sqrt(sum(w * _dot(_sub(p, c), normal) ** 2
+                         for p, w in zip(centroids, areas)) / total)
 
 
 def _classify_region(region: dict, points, facets) -> dict:
@@ -251,8 +323,11 @@ def _classify_region(region: dict, points, facets) -> dict:
     else:
         spread_deg = max(_turn_deg(n, mean) for n in normals)
     kind = {"kind": "freeform", "area": region["area"]}
-    if spread_deg <= PLANE_SPREAD_DEG:
-        n = _unit(mean)
+    n = _unit(mean) if _norm(mean) > 1e-9 else None
+    # a face is flat when its normals agree, or when noise is all that scatters them:
+    # its points then still lie within the fit band of one plane
+    flat = n is not None and _plane_residual(centroids, areas, n) <= PLANE_RESIDUAL_MM
+    if spread_deg <= PLANE_SPREAD_DEG or flat:
         if n is None:            # degenerate facets only (all normals zero): nothing to read
             return kind
         offsets = [_dot(p, n) for p in centroids]
@@ -264,7 +339,13 @@ def _classify_region(region: dict, points, facets) -> dict:
     # normal covariance; the points then fit one circle about that axis
     eigen = _jacobi_eigen(acc)
     axis = _unit(eigen[0][1]) if _norm(eigen[0][1]) > 1e-9 else None
-    if axis is not None and all(abs(_dot(n, axis)) <= AXIS_PERPENDICULAR_SIN for n in normals):
+    # a cylinder's normals are perpendicular to its axis. Judged by area, not by every
+    # facet: on a scan one noisy facet in a band rejected the whole hole, which then fell
+    # through to the sphere fit; up to OUTLIER_AREA_SHARE of the area may disagree
+    outlier_share = (sum(w for n, w in zip(normals, areas)
+                         if abs(_dot(n, axis)) > AXIS_PERPENDICULAR_SIN) / total_w
+                     if axis is not None else 1.0)
+    if axis is not None and outlier_share <= OUTLIER_AREA_SHARE:
         ref = (1.0, 0.0, 0.0) if abs(axis[0]) < 0.9 else (0.0, 1.0, 0.0)
         u = _unit(_sub(ref, tuple(axis[d] * _dot(ref, axis) for d in range(3))))
         v = _cross(axis, u)
@@ -274,7 +355,15 @@ def _classify_region(region: dict, points, facets) -> dict:
             cx, cy, radius = fit
             residuals = [abs(math.hypot(x - cx, y - cy) - radius) for x, y in pts2]
             rms = math.sqrt(sum(w * r * r for r, w in zip(residuals, areas)) / total_w)
-            if rms <= max(2.0 * SEW_TOL, 0.02 * radius):
+            # the circle must explain the points better than their best plane does. A face
+            # that is not flat only because of noise "fits" a circle thousands of mm across
+            # with a tiny residual (2 % of that radius is generous), and was reported as a
+            # giant hole; a real cylinder's points leave any plane far further than that
+            # ... and the region must be at least as non-flat as the band that would have
+            # made it a plane: noise alone scatters a small patch of a face, and that patch
+            # then "fits" a small circle
+            if (rms <= max(2.0 * SEW_TOL, 0.02 * radius)
+                    and max(2.0 * rms, PLANE_RESIDUAL_MM) <= _plane_residual(centroids, areas)):
                 center_on_axis = tuple(u[d] * cx + v[d] * cy for d in range(3))
                 ts = [_dot(points[i], axis) for m in members for i in facets[m]]
                 t0, t1 = min(ts), max(ts)
@@ -364,17 +453,28 @@ def recognize(points, facets, *, oriented: bool) -> dict:
                 "warnings": [f"{len(facets):,} facets is beyond the {MAX_FACETS:,} the survey reads; "
                              "only the bounding box and volume are measured"]}
     grown = _regions(points, facets, flip=False)
+    total = sum(r["area"] for r in grown) or 1.0
     classified = []
     for region in grown:
         region["oriented"] = oriented
-        classified.append(_classify_region(region, points, facets))
+        kind = _classify_region(region, points, facets)
+        # a small region is noise — unless it is a cylinder: the wall of a small hole is
+        # a sliver of the area on a large plate, and was dropped before it could be read
+        if region["area"] >= MIN_REGION_SHARE * total or kind["kind"] == "cylinder":
+            classified.append(kind)
     planes = sorted(_merge_planes(classified), key=lambda p: -p["area"])[:16]
     cylinders = sorted(_group_cylinders(classified), key=lambda c: -c["area"])
     kinds: dict[str, int] = {}
     for r in classified:
         kinds[r["kind"]] = kinds.get(r["kind"], 0) + 1
+    # the share of the surface the vocabulary above does not cover (freeform, or a region
+    # that noise merged across an edge): whatever holes or bosses lie inside it are NOT
+    # reported, so the text must not let "no hole listed" read as "the part has no hole"
+    kept = sum(r["area"] for r in classified) or 1.0
+    unsurveyed = sum(r["area"] for r in classified if r["kind"] not in ("plane", "cylinder"))
     return {"face_count": len(classified), "surface_kinds": kinds,
-            "planes": planes, "cylinders": cylinders, "warnings": warnings}
+            "planes": planes, "cylinders": cylinders, "warnings": warnings,
+            "unsurveyed_area_pct": round(100.0 * unsurveyed / kept, 1)}
 
 
 # ---------------------------------------------------------------------------
@@ -535,6 +635,11 @@ def render_text(survey: dict) -> str:
     for p in surface["planes"][:6]:
         lines.append(f"plane: normal {tuple(round(a, 2) for a in p['normal'])}, offset {_mm(p['offset'])} mm "
                      f"from the origin, area share {round(100 * p['area'] / max(1e-9, sum(x['area'] for x in surface['planes'])))}%")
+    not_read = surface.get("unsurveyed_area_pct") or 0
+    if not_read:
+        lines.append(f"not surveyed: {not_read}% of the surface (freeform, or regions that noise merged "
+                     "across their edges). Holes and bosses inside it are not listed above: no hole "
+                     "listed is not evidence that the part has none.")
     for w in (survey.get("warnings") or [])[:4]:
         lines.append(f"Warning: {w}.")
     return "\n".join(lines)

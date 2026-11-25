@@ -2,9 +2,11 @@
 
 Real FreeCAD documents under ``freecadcmd``: synthetic parts tessellated at a coarse, scan-like deviation,
 so every recovered dimension carries the chord error of the mesh, and the assertions use honest tolerances.
-The open-mesh cases prove the survey reports nothing rather than inventing it.
+The open-mesh cases prove the survey reports nothing rather than inventing it; the noise cases fix the
+mesh by seed and pin what the survey reads on a scan — and that it says when it could not.
 """
 
+import json
 import os
 import sys
 import unittest
@@ -19,7 +21,9 @@ isolation.isolate_process()   # temp settings / projects / logs / cache / downlo
 import FreeCAD as App  # noqa: E402
 import Mesh  # noqa: E402
 import Part  # noqa: E402
+import numpy as np  # noqa: E402
 
+from oscar.plan import builder  # noqa: E402
 from oscar.refparts import mesh_survey  # noqa: E402
 
 V = App.Vector
@@ -32,12 +36,32 @@ def mesh_of(shape, deviation=TESS):
     return Mesh.Mesh([list(verts[i]) + list(verts[j]) + list(verts[k]) for i, j, k in tris])
 
 
+def noisy_mesh(shape, sigma, seed, deviation=TESS):
+    """``shape`` as ``mesh_of`` makes it, with Gaussian vertex noise of ``sigma`` mm drawn from
+    a fixed seed: the same mesh on every run (and the same on FreeCAD 1.1.3 and 1.1.4)."""
+    points, facets = mesh_of(shape, deviation).Topology
+    P = np.array([[p.x, p.y, p.z] for p in points], dtype=float)
+    P = P + sigma * np.random.default_rng(seed).standard_normal(P.shape)
+    return Mesh.Mesh(([App.Vector(*p) for p in P], [tuple(int(i) for i in f) for f in facets]))
+
+
 def plate_with_holes(length=100.0, width=60.0, thickness=8.0, hole_d=10.0,
                      centers=((30, 15), (-30, 15), (30, -15), (-30, -15))):
     base = Part.makeBox(length, width, thickness, V(-length / 2, -width / 2, 0))
     for x, y in centers:
         base = base.cut(Part.makeCylinder(hole_d / 2, thickness + 2, V(x, y, -1)))
     return base
+
+
+def boss_board():
+    """A thin board with four bosses standing on it and four small mounting holes: each
+    hole's wall is well under 0.5 % of the surface area."""
+    board = Part.makeBox(85, 56, 1.4)
+    for x, y in ((20, 12), (65, 12), (20, 44), (65, 44)):
+        board = board.fuse(Part.makeCylinder(4.0, 12.0, V(x, y, 1.4)))
+    for i in range(4):
+        board = board.cut(Part.makeCylinder(1.6, 10, V(15 + i * 18, 28, -1)))
+    return board.removeSplitter()
 
 
 class SurveyCase(unittest.TestCase):
@@ -163,6 +187,59 @@ class SolidSurveyTest(SurveyCase):
         s = mesh_survey.survey_solid(Part.Shape())
         self.assertFalse(s["valid"])
         self.assertEqual(s["cylinders"], [])
+
+
+class NoiseAndSmallFeatureTest(SurveyCase):
+    """What the survey measures on a scan (fixed seeds) and what it says when it cannot."""
+
+    def test_small_holes_on_a_large_plate_are_reported(self):
+        # each mounting hole's wall is a sliver of the area: dropped as noise before it was
+        # classified, a clean board reported none of its four holes
+        s = self.survey(boss_board())
+        holes = self.cylinders(s, concave=True)
+        pins = self.cylinders(s, concave=False)
+        self.assertEqual(len(holes), 4)
+        self.assertEqual(len(pins), 4)
+        for h in holes:
+            self.assertAlmostEqual(h["diameter"], 3.2, delta=CYL_TOL)
+        for p in pins:
+            self.assertAlmostEqual(p["diameter"], 8.0, delta=CYL_TOL)
+        self.assertEqual(s["surface"]["unsurveyed_area_pct"], 0.0)
+        self.assertNotIn("not surveyed", mesh_survey.render_text(s))
+
+    def test_holes_survive_a_little_noise(self):
+        # 0.01 mm of vertex noise: all four holes are still read, and nothing is invented
+        s = mesh_survey.survey_mesh(noisy_mesh(plate_with_holes(), 0.01, 22))
+        holes = self.cylinders(s, concave=True)
+        self.assertEqual(len(holes), 4)
+        for h in holes:
+            self.assertAlmostEqual(h["diameter"], 10.0, delta=CYL_TOL)
+        self.assertEqual(len(self.cylinders(s)), 4)
+
+    def test_a_noisy_face_is_never_reported_as_a_giant_cylinder(self):
+        # the committed plate plan, tessellated like a scan and given 0.02 mm of noise: a
+        # face that stopped being flat "fitted" a circle 32 427 mm across with a tiny
+        # residual, and it was listed as a cylinder of that size on a 100 mm plate
+        doc = App.newDocument("MSfixture")
+        self.addCleanup(App.closeDocument, doc.Name)
+        with open(os.path.join(os.path.dirname(__file__), "fixtures", "plans", "plate_4holes.json"),
+                  encoding="utf-8") as fh:
+            report = builder.apply_plan(doc, json.load(fh))
+        self.assertTrue(report["success"], report["error"])
+        s = mesh_survey.survey_mesh(noisy_mesh(doc.getObject(report["body"]).Shape, 0.02, 22))
+        diagonal = sum(v * v for v in s["bbox"]["size"]) ** 0.5
+        for c in self.cylinders(s):
+            self.assertLessEqual(c["diameter"], diagonal, c)
+
+    def test_a_degraded_survey_says_how_much_it_did_not_read(self):
+        # 0.02 mm: the face merges with three of its four hole walls. The survey must not
+        # let "one hole listed" read as "the part has one hole"
+        s = mesh_survey.survey_mesh(noisy_mesh(plate_with_holes(), 0.02, 11))
+        self.assertLess(len(self.cylinders(s, concave=True)), 4)
+        self.assertGreater(s["surface"]["unsurveyed_area_pct"], 20.0)
+        text = mesh_survey.render_text(s)
+        self.assertIn("not surveyed", text)
+        self.assertIn("not evidence that the part has none", text)
 
 
 if __name__ == "__main__":  # pragma: no cover
