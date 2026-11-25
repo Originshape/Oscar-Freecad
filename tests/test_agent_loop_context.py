@@ -274,7 +274,7 @@ class RequestViewTest(LoopCase):
     def test_rounds_are_dropped_into_the_pinned_memory_when_the_window_is_small(self):
         events = []
         with mock.patch.object(agent_ctx, "log_event", lambda kind, **f: events.append((kind, f))):
-            result = self.long_build(7, caps=ModelCaps(context_window=20000, max_output=2048))
+            result = self.long_build(7, caps=ModelCaps(context_window=16000, max_output=2048))
         self.assertEqual(result.outcome, "answered")
         views = [f for k, f in events if k == "context_view"]
         self.assertEqual(len(views), len(self.provider.requests))
@@ -783,7 +783,7 @@ class ProjectWiringTest(LoopCase):
             json.dump({"schema": 1, "params": [{"name": "wall_t", "value": 2.0, "unit": "mm", "source": "assumption"}]}, f)
         script = [calls(call("create_object", obj_name=f"B{i}")) for i in range(7)] + [say("Built the plate.")]
         result = self.run_turn("make a plate", script, tools_=FakeTools(texts={"create_object": BIG}), project=project,
-                               caps=ModelCaps(context_window=20000, max_output=2048), validator=lambda d, c: fake_validation(True))
+                               caps=ModelCaps(context_window=16000, max_output=2048), validator=lambda d, c: fake_validation(True))
         self.assertEqual(result.outcome, "validated")
         self.assertIn("## Build Summary", result.text)
         memory_views = [r.messages[0].content for r in self.provider.requests if "<task_memory>" in (r.messages[0].content or "")]
@@ -885,6 +885,44 @@ class StructuredPartPlaybookSelectionTest(unittest.TestCase):
             self.assertIn("apply_feature_plan", {s.name for s in tools.specs(intent=intent)}, intent)
         names = {s.name for s in tools.specs(intent="enclosure")}
         self.assertNotIn("apply_feature_plan", names)  # build_enclosure builds a housing: the playbook follows the tool
+
+
+class ReconstructionPlaybookSelectionTest(unittest.TestCase):
+    """Issue 003: ``playbooks_for`` adds the reconstruction playbook for rebuild-the-reference wording."""
+
+    OFFERED = {"apply_feature_plan", "execute_code", "validate_model", "measure_reference_part",
+               "compare_to_reference", "import_file"}
+
+    def test_selected_for_rebuild_wording_on_work_intents(self):
+        for request in ("reconstruct the attached bracket as a parametric part",
+                        "please replicate this scanned housing",
+                        "reverse-engineer the imported step file into editable cad",
+                        "remodel the stl as a proper solid",
+                        "convert the imported step model into an editable parametric body",
+                        "Convert the imported STEP model into an editable parametric body",   # Issue 003 GUI run: capital first word
+                        "Reconstruct this imported model as an editable parametric part"):
+            for intent in ("generic_part", "bracket", "fixture", "modify"):
+                self.assertIn("reconstruction", agent_ctx.playbooks_for(intent, request, self.OFFERED),
+                              f"{intent}: {request}")
+
+    def test_not_selected_without_the_wording_or_the_tools(self):
+        self.assertNotIn("reconstruction", agent_ctx.playbooks_for("generic_part", "make a plate", self.OFFERED))
+        for intent in ("generic_part", "bracket", "fixture", "modify"):
+            self.assertNotIn("reconstruction",
+                             agent_ctx.playbooks_for(intent, "reconstruct the attached bracket",
+                                                     self.OFFERED - {"compare_to_reference"}), intent)
+            self.assertNotIn("reconstruction",
+                             agent_ctx.playbooks_for(intent, "reconstruct the attached bracket",
+                                                     self.OFFERED - {"measure_reference_part"}), intent)
+
+    def test_not_selected_for_non_work_intents(self):
+        for intent in ("enclosure", "inspect", "question", "other", "fem", "deliver"):
+            self.assertNotIn("reconstruction",
+                             agent_ctx.playbooks_for(intent, "reconstruct the attached part", self.OFFERED), intent)
+
+    def test_it_combines_with_structured_part_after_it(self):
+        books = agent_ctx.playbooks_for("generic_part", "reconstruct the attached flange", self.OFFERED)
+        self.assertEqual(books, ("structured_part", "reconstruction"))
 
 
 if __name__ == "__main__":

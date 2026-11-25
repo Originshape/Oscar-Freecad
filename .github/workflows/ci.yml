@@ -56,7 +56,7 @@ jobs:
           FC="$PWD/squashfs-root"
           export PYTHONHOME="$FC/usr" PATH_TO_FREECAD_LIBDIR="$FC/usr/lib" SSL_CERT_FILE="$FC/usr/ssl/cacert.pem"
           export QT_QPA_PLATFORM=xcb OSCAR_TEST_LOCALE=C.UTF-8
-          xvfb-run -a -s "-screen 0 1600x1000x24" env FREECAD_GUI="$FC/usr/bin/freecad" scripts/test.sh gui
+          OSCAR_SNAPSHOT_DEBUG_DIR="$PWD/smoke-debug" xvfb-run -a -s "-screen 0 1600x1000x24" env FREECAD_GUI="$FC/usr/bin/freecad" scripts/test.sh gui
 
   macos:
     name: macOS
@@ -75,7 +75,17 @@ jobs:
           hdiutil attach -readonly -nobrowse -mountpoint /tmp/fc "$DMG"
           cp -R /tmp/fc/FreeCAD.app /Applications/FreeCAD.app && hdiutil detach /tmp/fc
       - run: scripts/test.sh full
-      - run: scripts/test.sh gui
+      - name: GUI smoke test
+        run: scripts/test.sh gui
+        env:
+          OSCAR_SNAPSHOT_DEBUG_DIR: ${{ github.workspace }}/smoke-debug
+      - name: Upload smoke diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-diagnostics-${{ runner.os }}
+          path: smoke-debug/
+          if-no-files-found: ignore
 
   windows:
     # ONE Windows check covering BOTH supported FreeCAD versions: two separately reported steps,

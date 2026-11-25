@@ -56,7 +56,7 @@ def full(**over):
         "fit_ran": True, "fail_rows": [], "dfm": [{"id": "dfm.min_wall", "status": "PASS", "detail": "2.0 >= 1.2"}],
         "coverage": [{"requirement": "R2", "status": "covered", "by": ["S6"], "detail": "11/11 openings cut"}],
         "ran": ["health", "fit.interference", "fit.clearance", "fit.ports", "fit.retention", "dfm"],
-        "not_validated": ["editability", "rebuild", "step_collision", "physical"], "text": "VALIDATE ...",
+        "not_validated": ["editability", "rebuild", "physical"], "text": "VALIDATE ...",
         "after_step": 2}
     data.update(over)
     return data
@@ -154,7 +154,7 @@ class MergeTest(unittest.TestCase):
         self.assertEqual(merged["dfm"][0]["id"], "dfm.min_wall")
         self.assertEqual(merged["coverage"][0]["requirement"], "R2")
         self.assertEqual(merged["health"]["counts"]["objects"], 9, "the fresh health report wins")
-        self.assertEqual(merged["not_validated"], ["physical", "editability", "rebuild", "step_collision"])
+        self.assertEqual(merged["not_validated"], ["physical", "editability", "rebuild"])
         self.assertTrue(merged["ok"])
         self.assertEqual(merged["ts"], NOW)
 

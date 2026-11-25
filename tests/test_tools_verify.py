@@ -552,83 +552,6 @@ class CheckFitTest(VerifyCase):
         self.assertIn("is not solid geometry", text)
 
 
-# ---------------------------------------------------------------------------------------------- compare_to_reference
-
-
-class CompareToReferenceTest(VerifyCase):
-    """The reconstruction deviation tool: a plan-built Body judged against a Ref_ mesh."""
-
-    PLATE = {
-        "schema_version": 1, "id": "plate", "part_class": "plate", "units": "mm",
-        "parameters": {
-            "length": {"value": 60.0, "evidence": {"op": "user_request", "detail": "60 mm long"}},
-            "width": {"value": 40.0, "evidence": {"op": "user_request", "detail": "40 mm wide"}},
-            "thick": {"value": 6.0, "evidence": {"op": "user_request", "detail": "6 mm thick"}}},
-        "features": [
-            {"id": "sk", "op": "sketch", "plane": {"normal": [0, 0, 1]},
-             "profile": {"shape": "rectangle", "width": "length", "height": "width"}},
-            {"id": "pad", "op": "pad", "sketch": "sk", "length": "thick"}],
-    }
-
-    def rebuilt(self, name="Cmp"):
-        """A document with the plan-built plate and its own tessellation as the Ref_ mesh."""
-        import Mesh
-
-        from oscar.plan import builder
-
-        doc = self.new_doc(name)
-        result = builder.apply_plan(doc, self.PLATE)
-        self.assertTrue(result["success"], result["error"])
-        body = doc.getObject(result["body"])
-        verts, tris = body.Shape.tessellate(0.3)
-        mesh_obj = doc.addObject("Mesh::Feature", "Scan")
-        mesh_obj.Mesh = Mesh.Mesh([list(verts[i]) + list(verts[j]) + list(verts[k]) for i, j, k in tris])
-        ref = doc.addObject("App::Part", "Ref_TEST")
-        ref.addObject(mesh_obj)
-        doc.recompute()
-        return doc, body, mesh_obj
-
-    def test_a_faithful_rebuild_reports_pass_rows_and_is_not_an_error(self):
-        doc, body, _mesh = self.rebuilt()
-        text, image, is_error = self.run_tool("compare_to_reference", doc_name=doc.Name)
-        self.assertFalse(is_error, text)
-        self.assertIsNone(image)
-        self.assertTrue(text.startswith(f"DEVIATION of '{body.Label}'"), text)
-        self.assertIn("deviation.bbox_axis", text)
-        self.assertIn("PASS", text)
-        self.assertIn("never gate the turn", text)
-
-    def test_a_wrong_dimension_warns_and_the_sheet_fix_recovers_it(self):
-        doc, _body, _mesh = self.rebuilt()
-        sheet = doc.getObject("Parameters")
-        sheet.set(sheet.getCellFromAlias("width"), "=45.0")     # 5 mm too wide
-        doc.recompute()
-        text, _, is_error = self.run_tool("compare_to_reference", doc_name=doc.Name)
-        self.assertFalse(is_error, text)                        # WARN informs, it never fails the turn
-        self.assertIn("WARN", text)
-        sheet.set(sheet.getCellFromAlias("width"), "=40.0")
-        doc.recompute()
-        text, _, is_error = self.run_tool("compare_to_reference", doc_name=doc.Name)
-        self.assertFalse(is_error, text)
-        self.assertNotIn("WARN deviation.bbox_axis", text)
-
-    def test_explicit_names_resolve_and_unknown_ones_are_named(self):
-        doc, body, mesh_obj = self.rebuilt()
-        text, _, is_error = self.run_tool("compare_to_reference", doc_name=doc.Name,
-                                          reference=mesh_obj.Name, built=body.Name)
-        self.assertFalse(is_error, text)
-        text, _, is_error = self.run_tool("compare_to_reference", doc_name=doc.Name, reference="Ghost")
-        self.assertTrue(is_error)
-        self.assertIn("'Ghost' is not an object", text)
-
-    def test_a_document_without_a_reference_mesh_says_so(self):
-        doc = self.new_doc("NoRef")
-        doc.addObject("PartDesign::Body", "Body")
-        text, _, is_error = self.run_tool("compare_to_reference", doc_name=doc.Name)
-        self.assertTrue(is_error)
-        self.assertIn("no reference mesh found", text)
-
-
 # ---------------------------------------------------------------------------------------------- run_validation
 
 
@@ -640,7 +563,7 @@ class RunValidationTest(VerifyCase):
         fake_fields = {f.name for f in dataclasses.fields(FakeValidation)}
         mine = {f.name for f in dataclasses.fields(TV.ValidationResult)}
         self.assertLessEqual(fake_fields, mine)
-        self.assertEqual(mine - fake_fields, {"editability"})
+        self.assertEqual(mine - fake_fields, {"editability", "reopen"})
 
     def test_a_sound_document_validates(self):
         doc = self.new_doc()
@@ -651,8 +574,11 @@ class RunValidationTest(VerifyCase):
         self.assertEqual(result.doc, doc.Name)
         self.assertEqual((result.gate_errors, result.fail_rows, result.fit_rows, result.fit_ran), ([], [], [], False))
         self.assertEqual(result.ran, ["health"])
+        # step_collision left the not_validated ledger on the 003 lineage (its catalog entry
+        # remains, but run_validation no longer lists it for this model kind)
         self.assertEqual(result.not_validated, ["fit.interference", "fit.clearance", "fit.ports", "fit.retention",
-                                                "dfm", "editability", "rebuild", "step_collision", "physical"])
+                                                "dfm", "editability", "reference.deviation", "recon.deviation", "rebuild",
+                                                "physical"])
         self.assertTrue(result.health["valid"])
         self.assertEqual(result.health["doc"], doc.Name)
         self.assertTrue(result.text.startswith("[health] doc "))
@@ -1002,5 +928,246 @@ class RegistryFactsTest(unittest.TestCase):
         project.on_tool_result.assert_not_called()
 
 
+class LeftoverCutterGateTest(VerifyCase):
+    """Issue 003 Area 5: THIS TURN'S visible, unconsumed helper cutters beside a distinct final solid
+    are a gate error. False positives are pinned: the user's own primitives, consumed construction
+    objects, hidden cutters and primitive-only models are never leftovers."""
+
+    def final_solid(self, doc, name="FinalSolid"):
+        import Part
+
+        obj = doc.addObject("Part::Feature", name)
+        obj.Shape = Part.makeBox(30.0, 20.0, 10.0)
+        obj.Visibility = True
+        doc.recompute()
+        return obj
+
+    def cutter(self, doc, name="LooseCutter", visible=True):
+        obj = doc.addObject("Part::Cylinder", name)
+        obj.Radius, obj.Height = 3.0, 12.0
+        obj.Visibility = visible
+        doc.recompute()
+        return obj
+
+    def touched_ctx(self, doc, *names):
+        return ToolContext(state={"touched": {doc.Name: set(names)}})
+
+    def test_a_visible_unconsumed_cutter_beside_a_final_solid_fails_validation(self):
+        doc = self.new_doc("Cutter1")
+        base = self.final_solid(doc, "Deliverable")
+        used = self.cutter(doc, "UsedCutter")
+        cut = doc.addObject("Part::Cut", "AppliedCut")      # boolean intent: one cutter was used ...
+        cut.Base, cut.Tool = base, used
+        base.Visibility = False
+        doc.recompute()
+        self.cutter(doc)                                     # ... and this one was left behind
+        text, _img, is_error = self.run_tool(
+            "validate_model", ctx=self.touched_ctx(doc, "Deliverable", "UsedCutter", "AppliedCut", "LooseCutter"),
+            doc_name=doc.Name)
+        self.assertTrue(is_error, text)
+        error_line = next(line for line in text.splitlines() if line.startswith("ERROR LEFTOVER_CUTTERS"))
+        self.assertIn("LooseCutter", error_line)
+        self.assertNotIn("UsedCutter", error_line)
+
+    def test_the_users_own_primitive_from_before_the_turn_is_never_a_leftover(self):
+        doc = self.new_doc("Cutter2")
+        self.final_solid(doc)
+        self.cutter(doc, "UserBox")            # same shape, but NOT created this turn
+        text, _img, is_error = self.run_tool("validate_model", doc_name=doc.Name)
+        self.assertFalse(is_error, text)
+
+    def test_a_cutter_consumed_by_a_boolean_is_construction_not_a_leftover(self):
+        doc = self.new_doc("Cutter3")
+        base = self.final_solid(doc, "Deliverable")
+        tool = self.cutter(doc, "ConsumedCutter")
+        cut = doc.addObject("Part::Cut", "FinalCut")
+        cut.Base, cut.Tool = base, tool
+        base.Visibility = False
+        doc.recompute()
+        text, _img, is_error = self.run_tool(
+            "validate_model", ctx=self.touched_ctx(doc, "Deliverable", "ConsumedCutter", "FinalCut"),
+            doc_name=doc.Name)
+        self.assertFalse(is_error, text)
+
+    def test_a_primitive_only_model_is_the_deliverable_not_a_leftover(self):
+        doc = self.new_doc("Cutter4")
+        one = self.cutter(doc, "TheModel")
+        two = self.cutter(doc, "AlsoTheModel")
+        text, _img, is_error = self.run_tool(
+            "validate_model", ctx=self.touched_ctx(doc, one.Name, two.Name), doc_name=doc.Name)
+        self.assertFalse(is_error, text)
+
+    def test_a_hidden_cutter_is_tolerated(self):
+        doc = self.new_doc("Cutter5")
+        self.final_solid(doc)
+        self.cutter(doc, visible=False)
+        text, _img, is_error = self.run_tool("validate_model",
+                                             ctx=self.touched_ctx(doc, "FinalSolid", "LooseCutter"),
+                                             doc_name=doc.Name)
+        self.assertFalse(is_error, text)
+
+    def test_a_sibling_primitive_apart_from_the_final_solid_is_a_deliverable(self):
+        import Part
+
+        doc = self.new_doc("Cutter6")
+        self.final_solid(doc)
+        sibling = doc.addObject("Part::Cylinder", "SiblingPart")
+        sibling.Radius, sibling.Height = 5.0, 15.0
+        sibling.Placement.Base = App.Vector(200.0, 0.0, 0.0)      # sits apart, does not overlap
+        sibling.Visibility = True
+        doc.recompute()
+        text, _img, is_error = self.run_tool("validate_model",
+                                             ctx=self.touched_ctx(doc, "FinalSolid", "SiblingPart"),
+                                             doc_name=doc.Name)
+        self.assertFalse(is_error, text)
+
+
+class ParamsUnboundGateTest(VerifyCase):
+    """M1 F4 (RC5): a deliverable parameter sheet whose parameters bind NOTHING is decoration, not
+    a parametric model — validation fails when the document holds non-reference geometry but zero
+    expression bindings. Bound sheets, sheet-only and geometry-only documents never trip it."""
+
+    def sheet(self, doc, rows=(("plate_len", 60.0), ("plate_wid", 40.0)), name="Parameters"):
+        obj = doc.addObject("Spreadsheet::Sheet", name)
+        for i, (alias, value) in enumerate(rows, start=1):
+            obj.set(f"A{i}", alias)
+            obj.set(f"B{i}", repr(float(value)))
+            obj.setAlias(f"B{i}", alias)
+        doc.recompute()
+        return obj
+
+    def solid(self, doc, name="Deliverable"):
+        import Part
+
+        obj = doc.addObject("Part::Feature", name)
+        obj.Shape = Part.makeBox(30.0, 20.0, 10.0)
+        obj.Visibility = True
+        doc.recompute()
+        return obj
+
+    def touched_ctx(self, doc, *names):
+        return ToolContext(state={"touched": {doc.Name: set(names)}})
+
+    def test_an_unbound_sheet_beside_geometry_fails_validation(self):
+        doc = self.new_doc("Unbound1")
+        self.sheet(doc)
+        self.solid(doc)
+        text, _img, is_error = self.run_tool("validate_model",
+                                             ctx=self.touched_ctx(doc, "Parameters", "Deliverable"),
+                                             doc_name=doc.Name)
+        self.assertTrue(is_error, text)
+        error_line = next(line for line in text.splitlines() if line.startswith("ERROR PARAMS_UNBOUND"))
+        self.assertIn("Parameters", error_line)
+        self.assertIn("2 parameter", error_line)
+
+    def test_a_bound_sheet_does_not_trip_the_gate(self):
+        doc = self.new_doc("Unbound2")
+        self.sheet(doc)
+        box = doc.addObject("Part::Box", "Bound")
+        box.setExpression("Length", "Parameters.plate_len")
+        doc.recompute()
+        text, _img, is_error = self.run_tool("validate_model",
+                                             ctx=self.touched_ctx(doc, "Parameters", "Bound"),
+                                             doc_name=doc.Name)
+        self.assertFalse(is_error, text)
+        self.assertNotIn("PARAMS_UNBOUND", text)
+
+    def test_a_sheet_without_geometry_or_geometry_without_a_sheet_is_fine(self):
+        doc = self.new_doc("Unbound3")
+        self.sheet(doc)
+        text, _img, is_error = self.run_tool("validate_model", doc_name=doc.Name)
+        self.assertFalse(is_error, text)                       # reference-only / sheet-only doc
+        doc2 = self.new_doc("Unbound4")
+        self.solid(doc2)
+        text, _img, is_error = self.run_tool(
+            "validate_model", ctx=self.touched_ctx(doc2, "Deliverable"), doc_name=doc2.Name)
+        self.assertFalse(is_error, text)                       # no sheet at all
+
+
+class NonParametricDeliverableGateTest(VerifyCase):
+    """M1 F5 (RC4, the 16:54 session): a RECONSTRUCTION turn whose touched deliverable is loose
+    solids and booleans — no native sketches or PartDesign features, nothing bound — cannot
+    validate as a parametric reconstruction. Ordinary boolean workflows (no reconstruction
+    wording) and feature-built deliverables never trip it."""
+
+    RECON = "Convert the imported STEP model into an editable parametric body"
+
+    def loose_build(self, doc):
+        base = doc.addObject("Part::Feature", "BaseSolid")
+        base.Shape = Part.makeBox(60.0, 40.0, 5.0)
+        cutter = doc.addObject("Part::Cylinder", "BigHoleCutter")
+        cutter.Radius, cutter.Height = 5.0, 20.0
+        cut = doc.addObject("Part::Cut", "Cut1")
+        cut.Base, cut.Tool = base, cutter
+        base.Visibility = False
+        doc.recompute()
+        return ["BaseSolid", "BigHoleCutter", "Cut1"]
+
+    def ctx_for(self, doc, names, request):
+        from types import SimpleNamespace
+
+        return ToolContext(ledger=SimpleNamespace(request=request),
+                           state={"touched": {doc.Name: set(names)}})
+
+    def test_loose_solids_cannot_validate_as_a_reconstruction(self):
+        doc = self.new_doc("Loose1")
+        names = self.loose_build(doc)
+        text, _img, is_error = self.run_tool("validate_model",
+                                             ctx=self.ctx_for(doc, names, self.RECON),
+                                             doc_name=doc.Name)
+        self.assertTrue(is_error, text)
+        error_line = next(line for line in text.splitlines()
+                          if line.startswith("ERROR NON_PARAMETRIC_DELIVERABLE"))
+        self.assertIn("Cut1", error_line)
+
+    def test_the_same_build_without_reconstruction_wording_stays_a_legit_boolean_workflow(self):
+        doc = self.new_doc("Loose2")
+        names = self.loose_build(doc)
+        text, _img, is_error = self.run_tool("validate_model",
+                                             ctx=self.ctx_for(doc, names, "Make an L-bracket 60 mm tall"),
+                                             doc_name=doc.Name)
+        self.assertFalse(is_error, text)
+        self.assertNotIn("NON_PARAMETRIC_DELIVERABLE", text)
+
+    def test_a_feature_built_deliverable_does_not_trip_it(self):
+        doc = self.new_doc("Loose3")
+        S.build_parametric(doc)
+        names = [o.Name for o in doc.Objects
+                 if o.TypeId.startswith("PartDesign::") or o.TypeId == "Spreadsheet::Sheet"]
+        text, _img, is_error = self.run_tool("validate_model",
+                                             ctx=self.ctx_for(doc, names, self.RECON),
+                                             doc_name=doc.Name)
+        self.assertFalse(is_error, text)
+        self.assertNotIn("NON_PARAMETRIC_DELIVERABLE", text)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReopenProbeTest(unittest.TestCase):
+    """D-2: the opt-in save/reopen evidence row — never claimed when not checked."""
+
+    def setUp(self):
+        import FreeCAD as App
+
+        self.doc = App.newDocument("ReopenT")
+        self.addCleanup(App.closeDocument, self.doc.Name)
+
+    def test_default_off_reports_not_checked_and_never_gates(self):
+        result = TV.run_validation(self.doc.Name, deep=True)
+        self.assertFalse(result.reopen.get("checked"))
+        self.assertIn("opt-in", result.reopen["note"])
+        self.assertIn("REOPEN:", result.text)
+        self.assertNotIn("REOPEN", " ".join(result.gate_errors))
+
+    def test_opt_in_verifies_a_parametric_document_round_trip(self):
+        import verify_support as S
+
+        S.build_parametric(self.doc)
+        self.doc.recompute()
+        with mock.patch.dict(os.environ, {"OSCAR_VALIDATE_REOPEN": "1"}):
+            result = TV.run_validation(self.doc.Name, deep=True)
+        self.assertTrue(result.reopen.get("checked"), result.reopen)
+        self.assertTrue(result.reopen.get("ok"), result.reopen)
+        self.assertIn("REOPEN: ok", result.text)

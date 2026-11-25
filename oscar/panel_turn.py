@@ -941,6 +941,9 @@ class TurnMixin:
             root = getattr(project, "root", "") or session.get("project_dir") or ""
             meta = make_turn_meta(self._turn_request, outcome, card.text if card is not None else "",
                                   view.steps, root=root)
+            asks = list(getattr(self, "_turn_asks", None) or [])
+            if asks:
+                meta["asks"] = asks
             session["blocks_meta"] = trim_turn_metas(list(session.get("blocks_meta") or []) + [meta])
         manifest = getattr(session.get("_project"), "manifest", None)
         note = str(manifest.get("storage_note") or "") if isinstance(manifest, dict) else ""

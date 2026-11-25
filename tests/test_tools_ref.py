@@ -881,6 +881,29 @@ class EndToEndTest(ImportBase):
         self.assertIn("-x offset 28 width 12 height 1.5 z -1.5..0 overhang 2.5 (microsd -> microsd)", text)
 
 
+class PlainImportMeasureTest(ImportBase):
+    """Issue 003 Area 4b: a measured plain ``import_file`` solid is a real reference — the
+    status upgrades from none to user-attached and the SOURCE file's sha256 is recorded."""
+
+    def test_measure_upgrades_a_plain_import_to_user_attached_with_the_files_sha(self):
+        import hashlib
+
+        folder = isolation.fresh_dir("plainimp_")
+        path = os.path.join(folder, "part.step")
+        shutil.copyfile(OFFSET_PATH, path)
+        doc = self.new_doc("PlainDoc")
+        self.ok("import_file", path=path, doc_name=doc.Name, include_screenshot=False)
+        obj = next(o for o in doc.Objects if o.TypeId == "Part::Feature")
+        text = self.ok("measure_reference_part", doc_name=doc.Name, object=obj.Name)
+        self.assertIn("reference_status: user-attached", text)
+        prov = self.project.read_provenance()
+        self.assertEqual(prov["reference"]["status"], "user-attached")
+        entry = prov["entries"][-1]
+        self.assertEqual(entry["kind"], "measurement")
+        digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
+        self.assertEqual(entry["sha256"], digest)
+
+
 PI4_URL = ("https://raw.githubusercontent.com/multigamesystem/MGS-CAD-Files/main/STEP%20files%20with%20images/"
            "Raspberry%20Pi%204%20Model%20B%20v4.step")
 PI5_URL = "https://pip.raspberrypi.com/documents/RP-010083-CA"

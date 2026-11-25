@@ -5,7 +5,9 @@ deviation (the "source mesh" — its ground truth is the plan's parameters), the
 survey recovers and what the deviation rows say:
 
 * dimension estimation error per recovered dimension (hole / bore / step diameters, positions, extents);
-* deviation rows of the built body against the source mesh (near-zero everywhere);
+* deviation rows of the built body against the sewn source mesh — the rows ``compare_to_reference``
+  reports (per-axis size, centre offset, volume, symmetric difference), every one PASS for a faithful
+  rebuild, judged by that tool's own thresholds;
 * parametric editability through the existing +-10% rebuild;
 * wall-clock times of build, survey and comparison.
 
@@ -30,7 +32,7 @@ isolation.isolate_process()   # temp settings / projects / logs / cache / downlo
 import FreeCAD as App  # noqa: E402
 import Mesh  # noqa: E402
 
-from oscar.cad import health_eval  # noqa: E402
+from oscar.cad import health_eval, imported  # noqa: E402
 from oscar.plan import builder  # noqa: E402
 from oscar.refparts import compare, mesh_survey  # noqa: E402
 from oscar.tools_verify_edit import editability_test  # noqa: E402
@@ -51,10 +53,20 @@ def source_mesh(body, deviation=TESS) -> "Mesh.Mesh":
     return Mesh.Mesh([list(verts[i]) + list(verts[j]) + list(verts[k]) for i, j, k in tris])
 
 
+def source_solid(mesh) -> "Part.Shape":
+    """The closed source mesh as a solid — the reference ``compare_to_reference`` judges a
+    rebuild against, made the way an import makes it (``cad.imported.solid_from_mesh``)."""
+    solid, why = imported.solid_from_mesh(mesh)
+    if solid is None:
+        raise AssertionError(f"the source mesh could not be sewn into a solid: {why}")
+    return solid
+
+
 class BenchmarkCase(unittest.TestCase):
     def setUp(self):
         self.doc = App.newDocument(f"BM{uuid.uuid4().hex[:6]}")
         self.addCleanup(App.closeDocument, self.doc.Name)
+        self.report = None
 
     def build(self, name: str):
         plan = load_plan(name)
@@ -62,6 +74,7 @@ class BenchmarkCase(unittest.TestCase):
         result = builder.apply_plan(self.doc, plan)
         build_s = time.perf_counter() - t0
         self.assertTrue(result["success"], result["error"])
+        self.report = result
         body = self.doc.getObject(result["body"])
         return plan, body, build_s
 
@@ -73,8 +86,10 @@ class BenchmarkCase(unittest.TestCase):
         return mesh, survey, survey_s
 
     def compare_rows(self, body, mesh):
+        reference = source_solid(mesh)
         t0 = time.perf_counter()
-        rows = compare.deviation_rows(body.Shape, mesh)
+        rows = compare.compare_shapes(body.Shape, reference,
+                                      built_name=body.Label or body.Name, ref_name="source mesh")
         return rows, time.perf_counter() - t0
 
     def record(self, name: str, **numbers):
@@ -113,11 +128,11 @@ class PlateWithFourHolesTest(BenchmarkCase):
         self.assertAlmostEqual(size[2], 8.0, delta=0.05)
 
         by_id = {r["id"]: r for r in rows}
-        self.assertLessEqual(by_id["deviation.bbox_axis"]["value"], 0.05)
-        self.assertLessEqual(by_id["deviation.surface_sampled"]["value"], TESS + 0.05)
-        self.assertGreaterEqual(by_id["deviation.iou_exact"]["value"], 0.995)
+        self.assertLessEqual(max(by_id[f"size.deviation_{ax}"]["value"] for ax in "xyz"), 0.05)
+        self.assertEqual({r["status"] for r in rows}, {"PASS"}, rows)
         self.record("plate_4holes", hole_dia_err_mm=round(max(abs(h["diameter"] - 10.0) for h in holes), 3),
-                    iou=round(by_id["deviation.iou_exact"]["value"], 5))
+                    volume_delta_pct=by_id["volume.deviation"]["value"],
+                    overlap_difference_pct=by_id["overlap.difference"]["value"])
 
     def test_the_model_stays_editable_after_reconstruction(self):
         _plan, body, _t = self.build("plate_4holes")
@@ -147,10 +162,10 @@ class LBracketTest(BenchmarkCase):
         self.assertAlmostEqual(size[2], 50.0, delta=0.05)
 
         by_id = {r["id"]: r for r in rows}
-        self.assertLessEqual(by_id["deviation.surface_sampled"]["value"], TESS + 0.05)
-        self.assertGreaterEqual(by_id["deviation.iou_exact"]["value"], 0.995)
+        self.assertEqual({r["status"] for r in rows}, {"PASS"}, rows)
         self.record("l_bracket", bore_dia_err_mm=round(abs(bores[0]["diameter"] - 12.0), 3),
-                    iou=round(by_id["deviation.iou_exact"]["value"], 5))
+                    volume_delta_pct=by_id["volume.deviation"]["value"],
+                    overlap_difference_pct=by_id["overlap.difference"]["value"])
 
     def test_the_model_stays_editable(self):
         _plan, _body, _t = self.build("l_bracket")
@@ -180,10 +195,11 @@ class SteppedShaftTest(BenchmarkCase):
         self.assertAlmostEqual(steps[2]["depth"], 20.0, delta=0.35)
 
         by_id = {r["id"]: r for r in rows}
-        self.assertGreaterEqual(by_id["deviation.iou_exact"]["value"], 0.995)
+        self.assertEqual({r["status"] for r in rows}, {"PASS"}, rows)
         self.record("stepped_shaft", step_dia_err_mm=round(max(
             abs(s["diameter"] - d) for s, d in zip(steps, (20.0, 12.0, 8.0))), 3),
-            iou=round(by_id["deviation.iou_exact"]["value"], 5))
+            volume_delta_pct=by_id["volume.deviation"]["value"],
+            overlap_difference_pct=by_id["overlap.difference"]["value"])
 
     def test_editability_baseline_is_recorded(self):
         # pre-existing on this base: one stepped_shaft parameter breaks at +-10% (recorded, not fixed here)
@@ -200,20 +216,19 @@ class WrongDimensionCorrectionTest(BenchmarkCase):
         """The correction loop the reconstruction playbook prescribes, proven end to end:
         build with a wrong hole diameter, see the deficit in the deviation rows, fix the
         spreadsheet cell, recompute, see the rows recover."""
-        plan, body, _t = self.build("plate_4holes")
-        mesh = source_mesh(body)
-        sheet = self.doc.getObject("Parameters")
+        _plan, body, _t = self.build("plate_4holes")
+        reference = source_solid(source_mesh(body))
+        sheet = self.doc.getObject(self.report["spreadsheet"])
         sheet.set(sheet.getCellFromAlias("hole_dia"), "=12.0")
         self.doc.recompute()
-        before = {r["id"]: r for r in compare.deviation_rows(body.Shape, mesh)}
-        self.assertLess(before["deviation.volume_share"]["value"], -0.5)   # missing material
-        self.assertEqual(before["deviation.volume_share"]["status"], "WARN")
+        before = {r["id"]: r for r in compare.compare_shapes(body.Shape, reference)}
+        self.assertGreater(before["volume.deviation"]["value"], 1.0)    # holes too big: material missing
+        self.assertEqual(before["volume.deviation"]["status"], "WARN")
 
         sheet.set(sheet.getCellFromAlias("hole_dia"), "=10.0")
         self.doc.recompute()
-        after = {r["id"]: r for r in compare.deviation_rows(body.Shape, mesh)}
-        self.assertLessEqual(abs(after["deviation.volume_share"]["value"]), 0.1)
-        self.assertEqual(after["deviation.volume_share"]["status"], "PASS")
+        after = {r["id"]: r for r in compare.compare_shapes(body.Shape, reference)}
+        self.assertEqual(after["volume.deviation"]["status"], "PASS")
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -17,6 +17,7 @@ Threading: tool handlers and ``run_validation`` run on the agent thread; every d
 lock is held across a dispatch. Both tools are read-only (not mutating, not geometry): no step record, no checkpoint.
 """
 
+import os
 import time
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable
@@ -66,6 +67,7 @@ class ValidationResult:
     text: str = ""                 # model-facing rendering (health + FIT lines + DFM lines)
     after_step: int = 0            # project.last_geometry_step() at run time
     editability: dict = field(default_factory=dict)
+    reopen: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         """A JSON-safe plain dict (``validation.json`` shape plus ``text``)."""
@@ -91,6 +93,8 @@ def fit_entry(row: dict) -> str:
         return "fit.retention"
     if kind in ("containment", "alignment"):
         return "fit.ports"
+    if kind == "reference_deviation":
+        return "reference.deviation"
     return ""
 
 
@@ -324,6 +328,65 @@ def _fit_part(ctx: ToolContext, doc: str, *, spec: dict | None, parts: list[str]
     return {"rows": list(result.get("rows") or []), "coverage": list(result.get("coverage") or [])}
 
 
+def _reopen_probe(ctx: ToolContext, doc: str) -> dict:
+    """D-2 item 8, OPT-IN (OSCAR_VALIDATE_REOPEN=1): save a COPY of the document, reopen it and
+    verify the feature tree survives — the Tip volume and the parameter expressions are the
+    same. Default-off: the row then reports `not checked` (an opt-in check is never claimed).
+    Evidence only for the text; a failure is a gate error (a model that cannot reopen is not
+    verified)."""
+    if os.environ.get("OSCAR_VALIDATE_REOPEN", "") != "1":
+        return {"checked": False, "note": "not checked (opt-in: OSCAR_VALIDATE_REOPEN=1)"}
+    import FreeCAD as App
+
+    def task() -> dict:
+        import tempfile
+
+        d = App.getDocument(doc) if doc in App.listDocuments() else None
+        if d is None:
+            return {"checked": False, "note": f"document '{doc}' is not open"}
+        fd, path = tempfile.mkstemp(suffix=".FCStd", prefix="oscar_reopen_")
+        os.close(fd)
+        try:
+            def _solids(doc_o):
+                return [o.Name for o in doc_o.Objects
+                        if getattr(o, "Shape", None) is not None and o.Shape.Solids]
+
+            def _volume(doc_o):
+                return sum(abs(float(o.Shape.Volume)) for o in doc_o.Objects
+                           if getattr(o, "Shape", None) is not None and o.Shape.Solids)
+
+            bodies = _solids(d)
+            vol_before = _volume(d)
+            sheets = [o for o in d.Objects if getattr(o, "TypeId", "") == "Spreadsheet::Sheet"]
+            expr_before = sum(len(o.ExpressionEngine) for o in d.Objects)
+            d.saveCopy(path)
+            reopened = App.openDocument(path)
+            try:
+                r_bodies = _solids(reopened)
+                vol_after = _volume(reopened)
+                r_expr = sum(len(o.ExpressionEngine) for o in reopened.Objects)
+                ok = (vol_before > 0 and vol_after > 0
+                      and abs(vol_after - vol_before) <= 1e-6 * max(vol_before, 1.0)
+                      and r_expr >= expr_before and len(r_bodies) == len(bodies))
+                return {"checked": True, "ok": bool(ok),
+                        "volume_preserved": vol_after, "expressions": r_expr,
+                        "note": "" if ok else "the reopened copy differs (tip volume or expressions)"}
+            finally:
+                App.closeDocument(reopened.Name)
+        except Exception as exc:  # noqa: BLE001 - a probe failure is reported, never raised
+            return {"checked": True, "ok": False, "note": f"{type(exc).__name__}: {exc}"[:160]}
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    result, error = _gui(ctx, task, 60.0, "reopen probe")
+    if error or not isinstance(result, dict):
+        return {"checked": False, "note": f"probe failed: {error or 'no result'}"}
+    return result
+
+
 def _editability(ctx: ToolContext, doc: str, table: dict) -> dict:
     def task() -> dict:
         d = _open_doc(doc)
@@ -424,6 +487,9 @@ def _run_validation(ctx: ToolContext, doc_name: str | None, deep: bool, fit: boo
     if parametric:
         gate.extend(_parametric_gate_errors(ctx, doc, touched))
         gate.extend(_gate_entry(f) for f in _promoted_findings(report, baseline, touched))
+    gate.extend(_cutter_gate_errors(ctx, doc))
+    gate.extend(_params_unbound_gate_errors(ctx, doc))
+    gate.extend(_non_parametric_gate_errors(ctx, doc))
     spec = _spec_of(ctx)
     run_fit = bool(fit) if fit is not None else (ctx.intent in FIT_INTENTS or spec is not None)
     rows: list[dict] = []
@@ -438,18 +504,25 @@ def _run_validation(ctx: ToolContext, doc_name: str | None, deep: bool, fit: boo
     fit_ran = run_fit and not fit_error
     dfm = _dfm(spec)
     edit: dict = {}
+    reopen: dict = {"checked": False, "note": "not checked"}
     if deep:
         edit = _editability(ctx, doc, health.param_table_via_dispatch(doc))
         gate.extend(_edit_gate_errors(edit))
+        reopen = _reopen_probe(ctx, doc)
+        if reopen.get("checked") and not reopen.get("ok", True):
+            gate.append(f"REOPEN {reopen.get('note') or 'failed'}")
     fail_rows = [r for r in rows if r.get("status") == "FAIL"]
     ran = _ran_ids(True, rows, fit_ran, dfm, edit)
     text = _compose_text(report, {f.key() for f in pre}, rows, fit_ran, dfm, edit)
     if fit_error:
         text += f"\nFIT checks did not run: {fit_error}"
+    if deep:
+        text += ("\nREOPEN: ok" if reopen.get("checked") and reopen.get("ok")
+                 else f"\nREOPEN: {reopen.get('note') or 'failed'}")
     result = ValidationResult(
         ok=not gate and not fail_rows, doc=doc, health=report.to_dict(), gate_errors=gate, fit_rows=rows,
         fit_ran=fit_ran, fail_rows=fail_rows, dfm=dfm, coverage=coverage, ran=ran,
-        not_validated=[c for c in _catalog() if c not in ran], text=text, after_step=_after_step(ctx), editability=edit)
+        not_validated=[c for c in _catalog() if c not in ran], text=text, after_step=_after_step(ctx), editability=edit, reopen=reopen)
     computed = {"doc", "health", "gate_errors", "ran", "not_validated", "after_step"}
     if fit_ran:
         computed |= {"fit_rows", "fit_ran", "fail_rows", "coverage"}
@@ -516,6 +589,9 @@ def _validate(tool_name: str, doc_name: str, deep: bool, include_params: bool) -
                         "pressed); call it again")
     counted, pre = split_findings(report, _baseline_keys(ctx, actual), _touched_names(ctx, actual))
     gate = [_gate_entry(f) for f in counted]
+    gate.extend(_cutter_gate_errors(ctx, actual))
+    gate.extend(_params_unbound_gate_errors(ctx, actual))
+    gate.extend(_non_parametric_gate_errors(ctx, actual))
     table: dict = {}
     if include_params or deep:
         table = health.param_table_via_dispatch(actual)
@@ -525,6 +601,8 @@ def _validate(tool_name: str, doc_name: str, deep: bool, include_params: bool) -
         gate.extend(_edit_gate_errors(edit))
     lines = [f"VALIDATE doc '{actual}' (deep={'True' if deep else 'False'})",
              _rows_text(report, {f.key() for f in pre})]
+    lines.extend(f"ERROR {e['code']}: {e['message']}" for e in gate
+                 if e.get("code") in ("LEFTOVER_CUTTERS", "PARAMS_UNBOUND", "NON_PARAMETRIC_DELIVERABLE"))
     if include_params:
         lines.append(_text.params_block(table))
     if edit:
@@ -660,100 +738,249 @@ def _check_fit(doc_name: str, parts: list | None = None, reference: str | None =
     return text, None
 
 
-# ---------------------------------------------------------------------------------------------- compare to reference
+# ---------------------------------------------------------------------------------------------- compare_to_reference
 
 
-def _compare_task(doc_name: str, reference: str | None, built: str | None) -> dict:
-    """GUI thread: resolve the reference mesh and the built body, run the deviation rows."""
+def _shape_volume(obj) -> float:
+    try:
+        return abs(float(obj.Shape.Volume))
+    except Exception:  # noqa: BLE001 - an exotic shape simply loses the largest-volume contest
+        return 0.0
+
+
+# loose Part primitives are helper cutters when a distinct final solid exists (Issue 003 Area 5)
+_HELPER_TYPES = frozenset({"Part::Box", "Part::Cylinder", "Part::Sphere", "Part::Cone", "Part::Torus"})
+_BOOLEAN_TYPES = frozenset({"Part::Cut", "Part::Fuse", "Part::MultiFuse", "Part::Common", "Part::Section"})
+
+
+def _boxes_overlap(a, b) -> bool:
+    """True when two bounding boxes intersect (strictly — touching faces do not count)."""
+    return (a.XMin < b.XMax and a.XMax > b.XMin
+            and a.YMin < b.YMax and a.YMax > b.YMin
+            and a.ZMin < b.ZMax and a.ZMax > b.ZMin)
+
+
+def _leftover_cutters(doc, touched: set) -> list:
+    """Names of THIS TURN'S visible, unconsumed helper cutters: loose Part primitives that OVERLAP
+    a distinct final solid, in a document that shows boolean intent (a Part boolean exists — the
+    model was cutting/fusing and left a piece unused). False-positive-safe (Issue 003 Area 5): the
+    user's own pre-existing primitives, consumed construction objects, hidden cutters, the
+    reference, primitive-only models, sibling deliverable parts and documents with no booleans are
+    NOT leftovers. GUI-thread only."""
     from .cad import health_eval
-    from .refparts import compare
+
+    geo = _fit._geometry(doc, health_eval)
+    if not any(o.TypeId in _BOOLEAN_TYPES for o in geo):
+        return []
+    consumed = {o.Name for g in geo for o in (getattr(g, "OutList", None) or []) if getattr(o, "Name", "")}
+    primitives = [o for o in geo
+                  if o.TypeId in _HELPER_TYPES and o.Name in touched and not _fit.is_reference(o)
+                  and o.Name not in consumed and _fit._visible(o)]
+    finals = [o for o in geo if o.TypeId not in _HELPER_TYPES and o.Name not in consumed]
+    if not finals:
+        return []
+    flagged = []
+    for obj in primitives:
+        try:
+            if any(_boxes_overlap(obj.Shape.BoundBox, other.Shape.BoundBox) for other in finals):
+                flagged.append(obj.Name)
+        except Exception:  # noqa: BLE001 - a shapeless object simply cannot overlap
+            continue
+    return flagged
+
+
+def _params_unbound_gate_errors(ctx: ToolContext, doc_name: str) -> list:
+    """M1 F4 (RC5): a deliverable parameter sheet whose parameters bind NOTHING is decoration, not a
+    parametric model. When the document holds non-reference geometry but the reported parameter sheet
+    has zero expression bindings, validation fails. Only a sheet THIS TURN wrote counts (its name is
+    in the touched set): a user's or an earlier turn's sheet is never penalized here. Silent when the
+    scan cannot run, when there is no sheet or no geometry, and whenever anything at all is bound."""
+    touched = _touched_names(ctx, doc_name)
+    if not touched:
+        return []
+
+    def task() -> dict:
+        doc = _open_doc(doc_name)
+        if doc is None:
+            return {}
+        from .cad import health_eval
+        table = health_eval.read_param_table(doc)
+        if not table.get("sheet") or not table.get("rows"):
+            return {}
+        if not [o for o in doc.Objects if health_eval.is_geometry(o) and not _fit.is_reference(o)]:
+            return {}
+        return {"sheet": table["sheet"], "params": len(table["rows"]),
+                "bound": sum(int(r.get("bound", 0)) for r in table["rows"])}
+
+    info, failure = _gui(ctx, task, 15.0, "params_unbound")
+    if failure or not info or info.get("bound") or info.get("sheet") not in touched:
+        return []
+    return [{"code": "PARAMS_UNBOUND", "object": info["sheet"],
+             "message": f"the parameter sheet {info['sheet']!r} holds {info['params']} parameter(s) but nothing "
+                        "is expression-bound to them: a populated spreadsheet is not a parametric model — build "
+                        "through apply_feature_plan (or bind_expression) so every driving dimension moves the "
+                        "geometry"}]
+
+
+def _non_parametric_gate_errors(ctx: ToolContext, doc_name: str) -> list:
+    """M1 F5 (RC4, the 16:54 session): loose solids and booleans delivered as a RECONSTRUCTION.
+    When the turn's request is a reconstruction (``flow_intent.is_reconstruction_request``) and the
+    touched geometry holds no native sketches / PartDesign features and nothing is expression-bound,
+    the deliverable is not a parametric reconstruction and cannot validate as one. Ordinary boolean
+    workflows (no reconstruction wording), feature-built and bound deliverables never trip it."""
+    from .flow_intent import is_reconstruction_request
+
+    if not is_reconstruction_request(str(getattr(ctx.ledger, "request", "") or "")):
+        return []
+    touched = _touched_names(ctx, doc_name)
+    if not touched:
+        return []
+
+    def task() -> dict:
+        doc = _open_doc(doc_name)
+        if doc is None:
+            return {}
+        from .cad import health_eval
+        names: list[str] = []
+        boolean = False
+        for name in touched:
+            obj = doc.getObject(name)
+            if obj is None:
+                continue
+            type_id = str(obj.TypeId)
+            if type_id.startswith(("PartDesign::", "Sketcher::")):
+                return {}                     # native parametric features exist: not this gate's case
+            boolean = boolean or type_id in ("Part::Cut", "Part::Fuse", "Part::Common", "Part::MultiFuse")
+            if health_eval.is_geometry(obj) and not _fit.is_reference(obj):
+                names.append(obj.Name)
+        if not names or not (boolean or len(names) > 1):
+            return {}                         # a lone imported solid is a reference, not a deliverable claim
+        table = health_eval.read_param_table(doc)
+        return {"names": names,
+                "bound": sum(int(r.get("bound", 0)) for r in table.get("rows", []))}
+
+    info, failure = _gui(ctx, task, 15.0, "non_parametric")
+    if failure or not info or info.get("bound"):
+        return []
+    listing = ", ".join(info["names"][:6])
+    return [{"code": "NON_PARAMETRIC_DELIVERABLE", "object": listing,
+             "message": f"the reconstruction is loose solids and booleans ({listing}): no native sketches or "
+                        "PartDesign features and nothing bound to a parameter — a parametric reconstruction needs "
+                        "editable features (build it with apply_feature_plan, or say plainly that only a faceted / "
+                        "boolean approximation was made)"}]
+
+
+def _cutter_gate_errors(ctx: ToolContext, doc_name: str) -> list:
+    """Gate errors for leftover helper cutters (Issue 003 Area 5); silent when the scan cannot run."""
+    touched = _touched_names(ctx, doc_name)
+
+    def task() -> list:
+        doc = _open_doc(doc_name)
+        return _leftover_cutters(doc, touched) if doc is not None else []
+
+    names, failure = _gui(ctx, task, 30.0, "leftover_cutters")
+    if failure or not names:
+        return []
+    listing = ", ".join(names[:8])
+    return [{"code": "LEFTOVER_CUTTERS", "object": listing,
+             "message": f"leftover helper cutters stay in the model ({listing}): delete or hide them; "
+                        "the deliverable is one final solid"}]
+
+
+def _settle_reference_view(built, refs) -> list:
+    """M1 F3: a successful comparison hands the viewport to the reconstruction — the reference
+    objects are hidden (they stay in the document; toggling Visibility shows them again) and the
+    built body is shown and framed. Best-effort: never fails the comparison."""
+    hidden = []
+    try:
+        for ref in refs:
+            if getattr(ref, "Visibility", False):
+                ref.Visibility = False
+                hidden.append(ref.Name)
+        if hasattr(built, "Visibility") and not built.Visibility:
+            built.Visibility = True
+        from .cad import views
+        views.fit_view()                     # cosmetic; a no-op in console sessions
+    except Exception:  # noqa: BLE001 - visibility must never break the comparison
+        pass
+    return hidden
+
+
+def _compare_task(doc_name: str, wanted: str, ref_name: str, warn_mm: float, warn_pct: float) -> dict:
+    """GUI thread: resolve the built object and the reference, compare their GLOBAL shapes (Issue 003)."""
+    import Part
+
+    from .cad import health_eval
+    from .refparts import compare, measure
 
     doc = _open_doc(doc_name)
     if doc is None:
-        return {"error": f"document '{doc_name}' is not open"}
-
-    def find_mesh(obj):
-        if obj.TypeId == "Mesh::Feature":
-            return obj.Mesh
-        mesh = None
-        for child in getattr(obj, "Group", None) or []:
-            mesh = find_mesh(child) or mesh
-        return mesh
-
-    if reference:
-        node = doc.getObject(reference)
-        if node is None:
-            try:
-                hits = doc.getObjectsByLabel(reference)
-                node = hits[0] if len(hits) == 1 else None
-            except Exception:  # noqa: BLE001
-                node = None
-        if node is None:
-            return {"error": f"reference '{reference}' is not an object of document '{doc_name}'"}
-        ref_mesh = find_mesh(node)
+        return {"error": f"compare_to_reference: document '{doc_name}' is not open"}
+    if wanted:
+        built = _fit._find_object(doc, wanted)
+        if built is None:
+            return {"error": f"compare_to_reference: '{wanted}' is not an object of document '{doc.Name}'"}
+        if not health_eval.is_geometry(built) or not hasattr(built, "Shape"):
+            return {"error": f"compare_to_reference: '{wanted}' is not solid geometry (a sketch or mesh cannot be compared)"}
     else:
-        ref_mesh = None
-        for obj in doc.Objects:
-            if _fit.is_reference(obj):
-                ref_mesh = find_mesh(obj) or ref_mesh
-    if ref_mesh is None:
-        return {"error": "no reference mesh found (pass reference=<name> of the Mesh object, or "
-                         "import one with import_file / import_reference_part first)"}
-
-    if built:
-        body = doc.getObject(built)
-        if body is None:
-            try:
-                hits = doc.getObjectsByLabel(built)
-                body = hits[0] if len(hits) == 1 else None
-            except Exception:  # noqa: BLE001
-                body = None
-        if body is None or not hasattr(body, "Shape"):
-            return {"error": f"built '{built}' is not a shape-bearing object of document '{doc_name}'"}
-    else:
-        bodies = [o for o in doc.Objects
-                  if o.TypeId == "PartDesign::Body" and hasattr(o, "Shape")
-                  and o.Shape is not None and not o.Shape.isNull() and not _fit.is_reference(o)
-                  and _fit._visible(o)]
-        if not bodies:
-            return {"error": "no PartDesign Body to compare (pass built=<name>)"}
-        body = max(bodies, key=lambda o: o.Shape.Volume)
-    shape = health_eval.global_shape(body)
-    rows = compare.deviation_rows(shape, ref_mesh, a=body.Label or body.Name, b="reference")
-    text = compare.render_rows(rows, built=body.Label or body.Name, reference="reference")
-    return {"rows": rows, "text": text, "body": body.Name}
+        candidates = [o for o in _fit._geometry(doc, health_eval) if not _fit.is_reference(o)]
+        if not candidates:
+            return {"error": f"compare_to_reference: document '{doc.Name}' holds no solid geometry to compare"}
+        visible = [o for o in candidates if _fit._visible(o)] or candidates
+        built = max(visible, key=_shape_volume)
+    refs, ref_error = _fit.reference_objects(doc, health_eval, ref_name or None)
+    if ref_error or not refs:
+        problem = ref_error or f"no reference object (Ref_* / OscarRole ref) in document '{doc.Name}'"
+        return {"error": f"compare_to_reference: no reference to compare against ({problem}); import it first "
+                         "(import_reference_part, or import_file for an attached file)"}
+    ref_display = ref_name or (refs[0].Name if len(refs) == 1 else "reference")
+    rows = compare.compare_shapes(measure.global_shape(built),
+                                  Part.makeCompound([measure.global_shape(o) for o in refs]),
+                                  built_name=built.Name, ref_name=ref_display,
+                                  warn_mm=warn_mm, warn_pct=warn_pct)
+    hidden = _settle_reference_view(built, refs)
+    return {"rows": rows, "built": built.Name, "reference": ref_display, "hidden": hidden}
 
 
 @tool(
     "compare_to_reference",
-    "Measure how far the built model deviates from the imported source mesh: per-axis size deltas, centre "
-    "offset, volume share, sampled surface distance and the exact intersection-over-union. Returns PASS / "
-    "WARN / SKIP rows (they inform the correction loop, they never fail the turn). After a mesh-driven "
-    "reconstruction run it, fix the dimensions a WARN names (edit the Parameters cell, recompute), and run "
-    "it again; a SKIP says what could not be measured - never report accuracy you did not measure.",
+    "Compare the built model with the imported reference geometry: per-axis size deviation of the bounding boxes, the "
+    "box-centre offset, the volume deviation and a boolean symmetric-difference share, each PASS / WARN / SKIP with the "
+    "real numbers. Informational: a WARN says how far the reconstruction drifted (report the numbers); it never fails "
+    "the turn.",
     {"type": "object", "properties": {
         "doc_name": _DOC,
+        "object": {"type": "string",
+                   "description": "The built object; default = the largest visible solid that is not the reference."},
         "reference": {"type": "string",
-                      "description": "Name of the reference mesh (Mesh::Feature or its Ref_ container). "
-                                     "Default: the reference mesh of the document."},
-        "built": {"type": "string",
-                  "description": "Name of the built Body to judge. Default: the largest visible "
-                                     "non-reference PartDesign Body."},
-     },
+                      "description": "The reference object or container (Ref_... or any name); default = the tagged reference."},
+        "warn_mm": {"type": "number", "default": 0.5, "minimum": 0.01, "maximum": 10,
+                    "description": "WARN threshold for the size and offset deviations, mm."},
+        "warn_pct": {"type": "number", "default": 1.0, "minimum": 0.01, "maximum": 50,
+                     "description": "WARN threshold for the volume deviation, percent of the reference volume."}},
      "required": ["doc_name"]},
     category="verify", phases=_PHASES,
-    title=lambda a: "Compare to reference",
+    title=lambda a: "Compare with reference",
 )
-def _compare_to_reference(doc_name: str, reference: str | None = None, built: str | None = None):
+def _compare_to_reference(doc_name: str, object: str | None = None, reference: str | None = None,  # noqa: A002
+                          warn_mm: float = 0.5, warn_pct: float = 1.0):
     ctx = current_context()
     actual = _require_document(doc_name)
 
-    def task():
-        return _compare_task(actual, reference, built)
+    def task() -> dict:
+        return _compare_task(actual, str(object or ""), str(reference or ""), float(warn_mm), float(warn_pct))
 
-    result, error = _gui(ctx, task, 180.0, "compare_to_reference")
-    if error or not isinstance(result, dict):
-        raise ToolError(f"compare_to_reference: {error or 'no answer from the GUI thread'}; call it again")
-    if result.get("error"):
-        raise ToolError(f"compare_to_reference: {result['error']}")
-    return result["text"], None
+    result, failure = _gui(ctx, task, _FIT_TIMEOUT_S, "compare_to_reference")
+    if failure or not isinstance(result, dict) or result.get("error"):
+        message = failure or (result or {}).get("error") or "the comparison returned nothing"
+        raise ToolError(f"compare_to_reference: {message}")
+    rows = result["rows"]
+    lines = [f"COMPARE_TO_REFERENCE doc '{actual}' (built '{result['built']}' vs reference "
+             f"'{result['reference']}')", _text.fit_block(rows)]
+    if result.get("hidden"):
+        lines.append(f"Reference hidden after the comparison ({', '.join(result['hidden'])}); "
+                     "toggle its Visibility in the model tree to see it again.")
+    text = "\n".join(lines)
+    _persist(ctx, {"doc": actual, "fit_rows": rows, "fit_ran": True, "fail_rows": [],
+                   "ran": _ran_ids(False, rows, True, [], {}), "after_step": _after_step(ctx)}, actual)
+    return text, None
