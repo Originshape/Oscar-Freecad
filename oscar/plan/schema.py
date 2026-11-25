@@ -27,9 +27,11 @@ model gets them fed back for repair):
   reference an earlier sketch;
 * a polyline profile's declared segment dimensions (``length`` /
   ``diameter`` / ``radius``) must agree with the geometry its coordinates
-  describe, and an arc's endpoints must sit equidistant on its centre's
-  circle — the builder follows the coordinates, so a contradicting declared
-  dimension is an error; a sketch no later feature consumes is a warning;
+  describe — the builder follows the coordinates, so a contradicting declared
+  dimension is an error; an arc that declares a size needs one circle of that
+  size through both end points, one that names no size only a non-zero chord
+  and radius (the builder draws one arc through its end points); a sketch no
+  later feature consumes is a warning;
 * the op/profile vocabulary is a closed set — anything else is rejected
   by name.
 
@@ -802,9 +804,11 @@ def _check_segment_consistency(prof: dict, fid: str, val, errors: list[str]) -> 
     """A polyline profile's declared segment dimensions must agree with the
     geometry its own coordinates describe: the builder follows the
     coordinates, so a ``length`` / ``radius`` / ``diameter`` that contradicts
-    them is a plan that lies about its shape (and an arc whose endpoints are
-    not equidistant from its centre has no circle through them at all —
-    the sketch solver would fail naming the wrong constraints)."""
+    them is a plan that lies about its shape. An arc that DECLARES a size
+    needs one circle of that size through both end points; an arc that names
+    no size is only checked for degeneracy (zero chord or zero radius) — the
+    builder draws one arc through its two constrained end points, which is
+    what the reconstruction engine's noise-fitted arcs rely on."""
 
     def coords(point):
         if not isinstance(point, list) or len(point) != 2:
@@ -852,14 +856,21 @@ def _check_segment_consistency(prof: dict, fid: str, val, errors: list[str]) -> 
                 cursor = to
                 continue
             r_start, r_end = dist(cursor, center), dist(to, center)
-            if not near(r_start, r_end):
-                errors.append(f"feature {fid}: arc segment {i}: the start "
-                              f"point is {r_start:g} mm and the end point "
-                              f"{r_end:g} mm from the center — both must sit "
-                              f"on the arc (fix the center or an endpoint)")
-            elif dist(cursor, to) <= 1e-9:
+            if dist(cursor, to) <= 1e-9:
                 errors.append(f"feature {fid}: arc segment {i} ends where it "
                               f"starts; use shape 'circle' for a full circle")
+            elif r_start <= 1e-9:
+                # the builder takes the arc's radius from its start point
+                errors.append(f"feature {fid}: arc segment {i}: the center "
+                              f"sits on the start point (a radius of 0 mm), "
+                              f"so no arc exists; move the center or the "
+                              f"start point")
+            elif ("radius" in seg or "diameter" in seg) and not near(r_start, r_end):
+                errors.append(f"feature {fid}: arc segment {i}: the start "
+                              f"point is {r_start:g} mm and the end point "
+                              f"{r_end:g} mm from the center — a declared "
+                              f"radius or diameter must fit both; fix the "
+                              f"center or an endpoint")
             else:
                 if "radius" in seg:
                     declared = val(seg["radius"])

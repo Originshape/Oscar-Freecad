@@ -61,6 +61,18 @@ def run_reconstruct(shape, tess=0.3, warn=0.5):
         App.closeDocument(doc.Name)
 
 
+def noisy_mesh(shape, dev, sigma, seed):
+    """``shape`` tessellated at ``dev`` with Gaussian vertex noise of ``sigma`` mm
+    (a fixed seed, so the mesh is the same on every run)."""
+    mesh = Mesh.Mesh(shape.tessellate(dev))
+    pts, facs = mesh.Topology
+    rng = np.random.default_rng(seed)
+    points = np.array([[p.x, p.y, p.z] for p in pts], dtype=float)
+    points = points + sigma * rng.standard_normal(points.shape)
+    return Mesh.Mesh(([App.Vector(*p) for p in points],
+                      [tuple(int(i) for i in f) for f in facs]))
+
+
 class SlicingTest(unittest.TestCase):
     def test_l_bracket_slice_gives_one_closed_loop_with_hole(self):
         mesh = Mesh.Mesh(l_bracket().tessellate(0.3))
@@ -155,6 +167,32 @@ class EndToEndTest(unittest.TestCase):
         analytic = 40 * 20 * 5 + 3.14159 * 100 * 5
         self.assertAlmostEqual(volume, analytic, delta=analytic * 0.02)
         self.assertEqual(result["outcome"], "verified_parametric")
+
+    def test_a_noisy_rounded_plate_still_reconstructs(self):
+        # 0.05 mm of scan noise makes the section fitter emit arcs whose end
+        # points sit off the circle their centre describes. That plan built
+        # until a validation rule insisted on a size nothing had declared and
+        # refused the whole profile; this mesh is the guard (it is rebuilt
+        # from a fixed seed, so the outline is the same on every run).
+        mesh = noisy_mesh(rounded_plate(), 0.3, 0.05, 8)
+        doc = App.newDocument("r2noisy")
+        try:
+            result = reconstruct.reconstruct(doc, mesh, warn_mm=0.5)
+            self.assertTrue(result.get("supported"), result.get("note"))
+            self.assertTrue(result["build"]["success"], result["build"])
+            arcs = [s for f in result["plan"]["features"]
+                    for s in (f.get("profile") or {}).get("segments") or []
+                    if s.get("type") == "arc"]
+            if any("radius" not in s and "diameter" not in s for s in arcs):
+                # the sketch solves and builds; its free degree of freedom is
+                # REPORTED on the feature, never raised
+                info = next(f["info"] for f in result["build"]["features"]
+                            if f.get("op") == "sketch")
+                self.assertFalse(info["fully_constrained"], info)
+                self.assertTrue(info["under_constrained"], info)
+                self.assertIn("not fully constrained", info["warning"])
+        finally:
+            App.closeDocument(doc.Name)
 
     def test_box_reconstructs_as_exact_section_rectangle(self):
         result, volume = run_reconstruct(Part.makeBox(30, 20, 10))

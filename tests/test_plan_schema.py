@@ -585,9 +585,9 @@ class SegmentConsistencyTest(unittest.TestCase):
         self.assertIn("segment 0 is zero-length",
                       _joined(self.profile_plan(segments)))
 
-    def test_arc_endpoints_must_be_equidistant_from_the_center(self):
-        # |center -> start| = 0, |center -> end| = 5: the center sits ON the
-        # start point, so no arc through both endpoints exists
+    def test_an_arc_whose_center_sits_on_its_start_point_is_an_error(self):
+        # |center -> start| = 0: the builder takes the radius from the start
+        # point, so this arc would have a radius of 0 and no arc exists
         segments = [{"type": "line", "to": [20, 0]},
                     {"type": "arc", "to": [23, 4], "center": [20, 0],
                      "ccw": True},
@@ -596,7 +596,33 @@ class SegmentConsistencyTest(unittest.TestCase):
                     {"type": "line", "to": [0, 0]}]
         joined = _joined(self.profile_plan(segments))
         self.assertIn("arc segment 1", joined)
-        self.assertIn("start point is 0 mm and the end point 5 mm", joined)
+        self.assertIn("center sits on the start point", joined)
+        self.assertIn("radius of 0 mm", joined)
+
+    def test_a_declared_arc_size_must_fit_both_end_points(self):
+        # start 5.85 mm and end 5.6 mm from the centre: the declared radius
+        # fits the start point only, so one circle of that size cannot be the arc
+        segments = [{"type": "line", "to": [20, 0]},
+                    {"type": "arc", "to": [19.3497, 4.8], "center": [14.5, 2],
+                     "ccw": True, "radius": "seg_r"},
+                    {"type": "line", "to": [19.3497, 10]},
+                    {"type": "line", "to": [0, 10]},
+                    {"type": "line", "to": [0, 0]}]
+        joined = _joined(self.profile_plan(segments, seg_r=5.8547))
+        self.assertIn("arc segment 1", joined)
+        self.assertIn("a declared radius or diameter must fit both", joined)
+
+    def test_an_arc_without_a_size_may_sit_off_its_circle(self):
+        # the same arc with NO size named: the builder draws one arc through
+        # the two constrained end points, so this is valid — the spelling the
+        # reconstruction engine's noise-fitted arcs use
+        segments = [{"type": "line", "to": [20, 0]},
+                    {"type": "arc", "to": [19.3497, 4.8], "center": [14.5, 2],
+                     "ccw": True},
+                    {"type": "line", "to": [19.3497, 10]},
+                    {"type": "line", "to": [0, 10]},
+                    {"type": "line", "to": [0, 0]}]
+        self.assertEqual(_errors(self.profile_plan(segments)), [])
 
     def test_arc_radius_must_agree_with_the_geometry(self):
         # both endpoints are 5 mm from [23, 4], but the radius says 6

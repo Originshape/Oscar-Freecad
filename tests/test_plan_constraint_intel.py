@@ -1,15 +1,17 @@
-"""Sketch / constraint intelligence of the plan builder: arcs carry a size
-constraint (radius or the named diameter), a sketch that solves but is not
-fully constrained is refused with a repair hint before any dependent feature
-consumes it, conflicting constraints are named, redundancy is counted, and a
-sketch no feature consumes is flagged at validation.
+"""Sketch / constraint intelligence of the plan builder: a declared segment
+dimension must agree with the geometry its coordinates describe, an arc's end
+points must sit on its centre's circle, an arc can bind a named ``diameter``,
+a sketch that solves but is not fully constrained is REPORTED with a repair
+hint and still builds (never refused: the reconstruction engine's own arcs
+carry no size parameter), conflicting constraints are named, redundancy is
+counted, and a sketch no feature consumes is flagged at validation.
 
 Every defect case here was reproduced on FreeCAD 1.1.4 before its fix
 (probe 2026-11-22): the radius-less arc built silently with
-``fully_constrained: false``, a declared segment ``length`` that contradicted
-the geometry passed validation, an off-circle arc center failed deep in the
-solver ("SetRadius() - radius should be positive") and a dead sketch built
-without a word.
+``fully_constrained: false`` and nothing said so, a declared segment ``length``
+that contradicted the geometry passed validation, an off-circle arc center
+failed deep in the solver ("SetRadius() - radius should be positive") and a
+dead sketch built without a word.
 
 Runs in console mode via tests/run.py (Sketcher/PartDesign are App-level;
 no GUI needed)."""
@@ -122,20 +124,25 @@ class _DocTest(unittest.TestCase):
 
 
 class ArcSizeConstraintTest(_DocTest):
-    """An arc's size must be bound by a constraint (radius, or the named
-    diameter) — an arc without one leaves the profile under-constrained."""
+    """An arc's size rides a constraint when the plan names one (radius, or
+    the named diameter); an arc without one still builds and is REPORTED as
+    under-constrained, with the repair hint."""
 
-    def test_an_arc_without_a_size_is_refused_with_a_repair_hint(self):
+    def test_an_arc_without_a_size_builds_and_is_reported_with_a_repair_hint(self):
         plan = _rounded_corner_pocket("intel_no_rad", p_len=30, p_hgt=20,
                                       p_r=6, p_h=5)
-        doc, report = self.build(plan, "ArcNoRad", ok=False)
-        self.assertFalse(report["success"])
-        self.assertEqual(report["feature_id"], "d_sketch")
-        self.assertIn("not fully constrained", report["error"])
-        self.assertIn("radius", report["error"])
-        self.assertIn("two quarter arcs", report["error"])
-        self.assertEqual(report["completed"], ["base_sketch", "base_pad"])
-        self.assertIsNone(doc.getObject("d_sketch"))
+        doc, report = self.build(plan, "ArcNoRad")
+        info = self.sketch_info(report, "d_sketch")
+        self.assertFalse(info["fully_constrained"], info)
+        self.assertTrue(info["under_constrained"], info)
+        self.assertGreaterEqual(info.get("dof", 0), 1, info)
+        self.assertIn("not fully constrained", info["warning"])
+        self.assertIn("radius", info["warning"])
+        self.assertIn("two quarter arcs", info["warning"])
+        # the profile still cuts the rounded pocket it describes
+        self.assertIsNotNone(doc.getObject("d_pocket"))
+        area = 30 * 20 - (36 - math.pi * 36 / 4)
+        self.assertAlmostEqual(self.volume(doc), PLATE_VOLUME - area * 5, delta=0.5)
 
     def test_the_repaired_plan_with_a_named_radius_builds_and_resizes(self):
         plan = _rounded_corner_pocket("intel_rad", p_len=30, p_hgt=20,
@@ -168,24 +175,67 @@ class ArcSizeConstraintTest(_DocTest):
         self.assertAlmostEqual(self.volume(doc), PLATE_VOLUME - area * 5, delta=0.5)
 
 
+class ExactSemicircleTest(_DocTest):
+    """The exact semicircle is the singular spelling. Unnamed it BUILDS (one
+    degree of freedom stays free) and is reported; with its radius named the
+    dimension is redundant, the profile no longer closes and the sketch is
+    refused, naming the repair."""
+
+    def _dshape(self, plan_id, radius_named):
+        plan = _plate(plan_id, p_h=5, arc_r=8)
+        arc = {"type": "arc", "to": [15, 8], "center": [15, 0], "ccw": True}
+        if radius_named:
+            arc["radius"] = "arc_r"
+        plan["features"] += [
+            {"id": "d_sketch", "op": "sketch", "plane": {"frame_plane": "top"},
+             "profile": {"shape": "profile", "start": [-15, -8], "segments": [
+                 {"type": "line", "to": [15, -8]},
+                 arc,
+                 {"type": "line", "to": [-15, 8]},
+                 {"type": "line", "to": [-15, -8]}]}},
+            {"id": "d_pocket", "op": "pocket", "sketch": "d_sketch", "depth": "p_h"}]
+        return plan
+
+    def test_an_exact_semicircle_builds_and_is_reported(self):
+        doc, report = self.build(self._dshape("intel_semi", False), "Semicircle")
+        info = self.sketch_info(report, "d_sketch")
+        self.assertTrue(info["under_constrained"], info)
+        self.assertFalse(info["fully_constrained"], info)
+        self.assertEqual(info.get("dof"), 1, info)
+        self.assertIn("semicircle", info["warning"])
+        area = 30 * 16 + math.pi * 64 / 2
+        self.assertAlmostEqual(self.volume(doc), PLATE_VOLUME - area * 5, delta=0.5)
+
+    def test_naming_its_radius_is_refused_as_singular(self):
+        # a radius dimension over a semicircle's chord is redundant
+        doc, report = self.build(self._dshape("intel_semi_rad", True),
+                                 "SemicircleRad", ok=False)
+        self.assertFalse(report["success"])
+        self.assertEqual(report["feature_id"], "d_sketch")
+        self.assertIn("redundant", report["error"])
+        self.assertIn("semicircle", report["error"])
+
+
 class SolverVerdictTest(_DocTest):
-    """The sketch verdict gate: solved-but-under-constrained is refused;
-    conflicting constraints are named; redundancy is counted."""
+    """The sketch verdict: solved-but-under-constrained is reported, not
+    refused; conflicting constraints are named; redundancy is counted."""
 
     def sketch(self, name: str):
         doc = self.new_doc(name)
         sketch = doc.addObject("Sketcher::SketchObject", "S")
         return doc, sketch
 
-    def test_a_solved_but_under_constrained_sketch_is_refused(self):
+    def test_a_solved_but_under_constrained_sketch_is_reported_not_refused(self):
         import Part
         doc, sketch = self.sketch("UnderCon")
         sketch.addGeometry(
             Part.Circle(App.Vector(0, 0, 0), App.Vector(0, 0, 1), 5.0), False)
         doc.recompute()
-        with self.assertRaises(_buildcore.BuildError) as caught:
-            _sketchbuild.sketch_report(sketch, "circle", 0, "gate_probe")
-        self.assertIn("not fully constrained", str(caught.exception))
+        info = _sketchbuild.sketch_report(sketch, "circle", 0, "gate_probe")
+        self.assertFalse(info["fully_constrained"], info)
+        self.assertTrue(info["under_constrained"], info)
+        self.assertIn("not fully constrained", info["warning"])
+        self.assertIn("'radius'", info["warning"])
 
     def test_conflicting_constraints_are_named(self):
         import Part
@@ -253,7 +303,9 @@ class SegmentConsistencyBuildTest(_DocTest):
         self.assertIn("20 mm apart", joined)
         self.assertIsNone(doc.getObject("d_sketch"))
 
-    def test_an_off_circle_arc_center_never_reaches_the_solver(self):
+    def test_an_arc_whose_center_sits_on_its_start_point_never_reaches_the_solver(self):
+        # the builder takes the radius from the start point: a center ON it is a
+        # zero-radius arc, which used to fail deep in the solver
         plan = _plate("intel_offc", d_len=20, d_h=5)
         plan["features"] += [
             {"id": "d_sketch", "op": "sketch", "plane": {"frame_plane": "top"},
@@ -270,8 +322,30 @@ class SegmentConsistencyBuildTest(_DocTest):
         self.assertEqual(report["stage"], "validation")
         joined = "; ".join(report["errors"])
         self.assertIn("arc segment 1", joined)
-        self.assertIn("both must sit on the arc", joined)
+        self.assertIn("center sits on the start point", joined)
         self.assertIsNone(doc.getObject("d_sketch"))
+
+    def test_an_arc_without_a_size_sits_off_its_circle_and_still_builds(self):
+        # a noise-fitted arc: its end point is 0.25 mm off the circle its start
+        # point and centre describe. Nothing is declared, so nothing is
+        # contradicted — the solver draws one arc through both end points and
+        # the pocket builds (the sketch is reported as under-constrained)
+        plan = _plate("intel_offcircle", d_h=5)
+        plan["features"] += [
+            {"id": "d_sketch", "op": "sketch", "plane": {"frame_plane": "top"},
+             "profile": {"shape": "profile", "start": [5, 0], "segments": [
+                 {"type": "line", "to": [25, 0]},
+                 {"type": "arc", "to": [24.3497, 4.8], "center": [19.5, 2],
+                  "ccw": True},
+                 {"type": "line", "to": [24.3497, 10]},
+                 {"type": "line", "to": [5, 10]},
+                 {"type": "line", "to": [5, 0]}]}},
+            {"id": "d_pocket", "op": "pocket", "sketch": "d_sketch",
+             "depth": "d_h"}]
+        doc, report = self.build(plan, "OffCircleBuilds")
+        info = self.sketch_info(report, "d_sketch")
+        self.assertTrue(info["under_constrained"], info)
+        self.assertIsNotNone(doc.getObject("d_pocket"))
 
     def test_a_plan_with_rounded_coordinates_builds(self):
         # a model writing coordinates to two decimals is not lying about its shape: the
