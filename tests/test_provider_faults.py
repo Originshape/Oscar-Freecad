@@ -285,7 +285,8 @@ class BackoffAndRetryAfterTest(FaultCase):
         (delay,) = self.delays(http_status(503, headers={"Retry-After": past}), ok())
         self.assertEqual(delay, 0.0)                                   # a past date means "now", not "unknown"
         (delay,) = self.delays(http_status(503, headers={"Retry-After": "soon-ish"}), ok())
-        self.assertTrue(1.0 <= delay < 2.0, delay)
+        # sleeps are recorded rounded to 3 decimals: a legal delay just under 2 s reads as 2.0
+        self.assertTrue(1.0 <= delay < 2.0 + 1e-9, delay)
 
     def test_retry_after_parsing_unit(self):
         r = provider_transport.retry_after_seconds
