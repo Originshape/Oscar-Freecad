@@ -609,9 +609,9 @@ def _import_text(summary: dict, kind: str, doc_name: str, ref_id: str, attached:
 
 @tool(
     "measure_reference_part",
-    "Measure the imported reference: bounding box, PCB plane and thickness, mounting holes (cylindrical faces), and connector "
-    "candidates with side, offset, width, height and overhang. With write_params=true the board dimensions are written into the "
-    "Params sheet with source step_measurement.",
+    "Measure the imported reference: bounding box, PCB plane and thickness, mounting holes (cylindrical faces), raised bosses, "
+    "and connector candidates with side, offset, width, height and overhang. With write_params=true the board dimensions are "
+    "written into the Params sheet with source step_measurement.",
     {"type": "object", "properties": {
         "doc_name": {"type": "string"},
         "object": {"type": "string", "description": "Reference object; default the latest Ref_*"},
@@ -787,6 +787,10 @@ def _measure_text(ctx, project, result: dict, doc_name: str, write: bool) -> str
     elif not result["is_ref_part"]:
         lines.append(f"Note: '{result['object']}' is not a reference part, so its frame was not changed; the numbers above are in the board frame.")
     lines.extend(_params_lines(sync, write, bool(m.get("pcb"))))
+    from .refparts import synthesize
+    hint = synthesize.emission_line(m)
+    if hint:
+        lines.append(hint)
     lines.append(f"reference_status: {new_status}; provenance: " + (entry_id or f"none ({record_note or 'no project is bound'})"))
     if not write and m.get("pcb") and result["kind"] == "brep":
         lines.append(f"Next: measure_reference_part(doc_name=\"{doc_name}\", write_params=true) writes the board dimensions into Params, then enclosure_spec.")

@@ -404,7 +404,8 @@ class AnalyzeFixtureTest(unittest.TestCase):
 
     def test_to_dict_is_json_safe_and_complete(self):
         data = json.loads(json.dumps(self.m.to_dict()))
-        self.assertEqual(sorted(data), ["bbox", "bottom_z", "connectors", "frame", "holes", "identity", "kind", "mesh", "mounting", "object", "part",
+        self.assertEqual(sorted(data), ["bbox", "bosses", "bottom_z", "connectors", "frame", "holes", "identity", "kind", "mesh",
+                                        "mounting", "object", "part",
                                         "pcb", "solid_count", "solids", "survey", "tall", "tallest_z", "units", "warnings"])
         self.assertEqual(data["object"], "Ref_RPI4B")
         self.assertIsNone(data["part"], "a PCB model carries no general-part section")
