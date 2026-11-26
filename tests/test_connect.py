@@ -301,6 +301,47 @@ class LoopTests(ConnectCase):
         errors = [e["data"]["message"] for e in self.fake.events["t1"] if e["kind"] == "error"]
         self.assertIn("Couldn’t upload preview-2.stl: the OriginShape server was busy.", errors)
 
+    def test_the_final_preview_is_retried_when_the_turn_ends_while_the_preview_is_made(self):
+        """The same contract when the turn ENDS while its preview is being made (a busy FreeCAD can
+        take minutes for one). The loop's wait() then reports the turn as still running, so the model
+        taken afterwards is its FINAL preview and must get the retry ladder exactly once - it used to
+        go out as a mid-turn preview with one attempt, and again as the final one, which read as
+        attempts [1, 1, 2, 3] (the intermittent macOS CI failure)."""
+        class EndsDuringThePreview(FakeTurn):
+            def __init__(self, job):
+                super().__init__(job, steps=(), hold=True)
+
+            def wait(self, timeout):
+                return self._done.wait(0.0 if not self._done.is_set() else timeout)
+
+            def take_preview(self):
+                self._done.set()            # the turn ends while the preview is being made
+                return (2, b"\x00" * 84)
+
+        self.fake.add_job("A flange", task_id="t1")
+        made, logged = [], []
+
+        def log(kind, **fields):
+            logged.append((kind, fields))
+
+        def unavailable(*args, **kwargs):
+            raise AuthUnavailable("The server is busy.")
+
+        with mock.patch.object(connect.Client, "upload", unavailable), \
+                mock.patch.object(connect, "UPLOAD_RETRY_S", (0.0, 0.0)):
+            loop = connect.Loop(lambda: self.session,
+                                start_turn=lambda job, files: made.append(EndsDuringThePreview(job)) or made[0],
+                                is_idle=lambda: True, on_state=lambda state, message: None,
+                                versions=connect.versions("1.1.3"), files_dir=lambda: self.files_dir, log=log)
+            self.addCleanup(loop.stop, 2.0)
+            loop.start()
+            self.assertTrue(wait_until(lambda: "t1" in self.fake.finished))
+        failed = [fields for kind, fields in logged if kind == "connect_upload_failed"]
+        attempts = [f["attempt"] for f in failed if f["file_kind"] == "preview"]
+        self.assertEqual(attempts, [1, 2, 3])            # the ladder, once
+        errors = [e["data"]["message"] for e in self.fake.events["t1"] if e["kind"] == "error"]
+        self.assertIn("Couldn’t upload preview-2.stl: the OriginShape server was busy.", errors)
+
     def test_the_turn_ends_with_a_verifiable_artifacts_manifest(self):
         """Issue #7: everything a turn uploaded is posted as one manifest (name, version, size,
         sha256) so the workspace can prove WHICH bytes the finished turn produced instead of
