@@ -1403,6 +1403,11 @@ class Loop:
                 with self._alive(keep_alive):   # a busy FreeCAD can take minutes for one preview
                     preview = self._guarded(job, "preview", turn.take_preview)
                     if preview is not None:
+                        # the turn may have ENDED while the preview was being made (a busy
+                        # FreeCAD can take minutes for one): this then is its final model and
+                        # earns the retry ladder, instead of going out as a mid-turn preview
+                        # with a single attempt that is never reported when it fails
+                        done = done or turn.wait(0)
                         version, data = preview[0], preview[1]
                         fmt = preview[2] if len(preview) > 2 and preview[2] in PREVIEW_FORMATS else "stl"
                         name = f"preview-{version}.{fmt}"
