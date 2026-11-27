@@ -360,3 +360,16 @@ class ExactIouTest(unittest.TestCase):
         row = deviation.exact_iou(mesh, None)
         self.assertIsNone(row["iou"])
         self.assertIn("shape", row["note"])
+
+    def test_a_time_budget_is_refused_not_ignored(self):
+        # the sew and the boolean are single kernel calls that cannot be interrupted, so this
+        # function is bounded by facet count only: a `budget_s` argument would promise a bound
+        # that does not exist. A caller who passes one must hear it at once, not minutes later.
+        import inspect
+
+        from oscar.recon import deviation
+
+        mesh, shape = self._mesh_and_shape(20, 10, 5)
+        self.assertNotIn("budget_s", inspect.signature(deviation.exact_iou).parameters)
+        with self.assertRaises(TypeError):
+            deviation.exact_iou(mesh, shape, budget_s=1.0)

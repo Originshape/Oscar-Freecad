@@ -332,6 +332,64 @@ class G6FillPolicyRenderTest(unittest.TestCase):
         self.assertIn("measured regions only", text)
 
 
+class ExactIouRenderTest(unittest.TestCase):
+    """D-1: the opt-in exact IoU is evidence the operator can see — rendered when it was
+    computed and when an opted-in run says why it could not compute; silent by default."""
+
+    @staticmethod
+    def _parametric(exact_iou):
+        return {"mode": "parametric", "mesh": "Scan", "supported": True,
+                "meta": {"route": "prismatic_extrusion", "holes": 0},
+                "build": {"success": True, "body": "Body", "spreadsheet": "Parameters",
+                          "feature_count": 2, "parameter_count": 3},
+                "classification": {"class": "prismatic"},
+                "units": None, "deviation": [], "registration": None,
+                "exact_iou": exact_iou}
+
+    def test_a_computed_iou_reaches_the_tool_text(self):
+        from oscar.tools_recon import _render
+
+        text = _render(self._parametric({"kind": "exact_iou", "iou": 0.9938, "note": "",
+                                         "elapsed_s": 6.2}))
+        self.assertIn("EXACT IOU", text)
+        self.assertIn("0.9938", text)
+        self.assertIn("not used by the result class", text)
+
+    def test_the_default_path_stays_silent(self):
+        from oscar.tools_recon import _render
+
+        with mock.patch.dict(os.environ, {"OSCAR_RECON_IOU": ""}):
+            text = _render(self._parametric({"kind": "exact_iou", "iou": None,
+                                             "note": "not computed (opt-in: OSCAR_RECON_IOU=1)"}))
+        self.assertNotIn("EXACT IOU", text)
+
+    def test_an_opted_in_run_that_could_not_compute_says_why(self):
+        from oscar.tools_recon import _render
+
+        note = "skipped: 34628 facets above the 20000 cap (boolean cost)"
+        with mock.patch.dict(os.environ, {"OSCAR_RECON_IOU": "1"}):
+            text = _render(self._parametric({"kind": "exact_iou", "iou": None, "note": note}))
+        self.assertIn("EXACT IOU", text)
+        self.assertIn(note, text)
+
+    def test_an_opted_in_reconstruction_shows_its_iou_and_the_default_does_not(self):
+        case = ReconToolCase()
+        case.setUp()
+        self.addCleanup(case._close)
+        box = Mesh.Mesh(Part.makeBox(20, 10, 5).tessellate(0.3))
+        with mock.patch.dict(os.environ, {"OSCAR_RECON_IOU": ""}):
+            default, _img, is_error = case.run_tool(
+                doc_name=case.doc_with_mesh("RIouDefault", mesh=box).Name)
+        with mock.patch.dict(os.environ, {"OSCAR_RECON_IOU": "1"}):
+            opted, _img, is_error_opted = case.run_tool(
+                doc_name=case.doc_with_mesh("RIouOptedIn", mesh=box).Name)
+        self.assertFalse(is_error, default)
+        self.assertFalse(is_error_opted, opted)
+        self.assertIn("RESULT CLASS: PARAMETRIC CAD MODEL", default)
+        self.assertNotIn("EXACT IOU", default)
+        self.assertIn("EXACT IOU", opted)
+
+
 class PlanPreviewTest(ReconToolCase):
     """P2.3/P2.4: mode='plan' previews the FeaturePlan (validated, nothing
     built); plan_override builds the agent's amended plan through the same

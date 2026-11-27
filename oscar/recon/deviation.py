@@ -910,8 +910,7 @@ def registered_deviation(mesh, shape, *, a="scan", b="model", warn_mm=0.3, budge
     return {"raw": raw, "aligned": aligned, "registration": reg, "mask": masked}
 
 
-def exact_iou(mesh, shape, *, facet_cap: int = 20000, a: str = "scan", b: str = "model",
-              budget_s: float = 60.0) -> dict:
+def exact_iou(mesh, shape, *, facet_cap: int = 20000, a: str = "scan", b: str = "model") -> dict:
     """Exact OCC boolean intersection-over-union: ``volume(A∩B) / volume(A∪B)`` between the
     reconstructed ``shape`` and the SEWN scan solid (D-1; the CADBench-comparable acceptance
     metric, DISTINCT from the sampled deviation rows — those stay authoritative for the outcome).

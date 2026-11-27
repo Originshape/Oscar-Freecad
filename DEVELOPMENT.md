@@ -436,6 +436,7 @@ drops profile fields it doesn't know when it saves (ids are then found again by 
 | `OSCAR_REFPART_LOCAL_DIR` | offline mirror for reference parts: `<dir>/<catalog id>.step` | unset |
 | `OSCAR_HEALTH_BUDGET_S` | wall-clock budget of one model health check | `4.0` |
 | `OSCAR_REBUILD_SET` | `name=value,...` parameter overrides for a `rebuild.py` run | unset |
+| `OSCAR_RECON_IOU` | `1` makes `reconstruct_mesh` also compute the exact boolean intersection-over-union of the sewn scan and the rebuilt body and print it as evidence (volume overlap only; it never changes the result class). The sew can hold FreeCAD for minutes on large or noisy meshes | unset |
 | `OSCAR_TEST_MODULES` | comma-separated test modules for `tests/run.py` | all |
 | `OSCAR_TEST_REAL_KEYCHAIN` | `1` lets `test_auth_keystore` write a test entry to your real macOS login keychain (and remove it) | unset |
 
