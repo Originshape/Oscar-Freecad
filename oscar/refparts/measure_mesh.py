@@ -1,12 +1,15 @@
 """Measuring a MESH reference (an STL): the part of ``measure_reference_part`` that has no exact B-rep to work with.
 
-FreeCAD module, GUI-thread only (document access). A mesh is an approximation: the result is the exact bounding box,
-volume and facet count of FreeCAD's own mesh; it never claims PCB length / width, mounting holes or connector
-positions (the board outline is not separable from the connectors in one lump of triangles), so ``write_params``
-writes nothing for a mesh and the report says why.
+FreeCAD module, GUI-thread only (document access). A mesh is an approximation: the bounding box,
+volume and facet count are exact facts of FreeCAD's own mesh, and the FEATURE SURVEY
+(``mesh_survey``) recognizes what the tessellation shows — planes, hole / boss diameters and
+positions, with the chord error of the mesh as their accuracy bound. What it still never
+claims: PCB-specific structure (the board outline is not separable from the connectors in one
+lump of triangles), so ``write_params`` writes nothing for a mesh and the report says where
+each number comes from instead.
 """
 
-from . import measure
+from . import measure, mesh_survey
 
 
 def collect_meshes(root) -> list:
@@ -22,7 +25,8 @@ def collect_meshes(root) -> list:
 
 
 def analyze_mesh(root, *, top_n: int = 8, object_name: str = "") -> "measure.Measurement":
-    """Measure the meshes of ``root``: bounding box, volume and facets per mesh. Never raises on an empty reference."""
+    """Measure the meshes of ``root``: bounding box, volume and facets per mesh, plus the
+    feature survey of the largest one. Never raises on an empty reference."""
     m = measure.Measurement(kind="mesh", object=object_name or str(getattr(root, "Name", "")))
     meshes = collect_meshes(root)
     m.solid_count = len(meshes)
@@ -40,6 +44,7 @@ def analyze_mesh(root, *, top_n: int = 8, object_name: str = "") -> "measure.Mea
     m.bbox = measure._bbox_dict(boxes)
     m.frame = {"found": False, "applied": False, "description": "a mesh keeps its imported frame (no exact PCB planes to normalize with)"}
     m.mesh = {"facets": sum(int(mesh.CountFacets) for _l, mesh in meshes)}
+    m.survey = mesh_survey.survey_mesh(max(meshes, key=lambda lm: int(lm[1].CountFacets))[1])
     return m
 
 
@@ -51,8 +56,14 @@ def render_text(m: "measure.Measurement") -> str:
         lo, hi, size = box["min"], box["max"], box["size"]
         lines.append(f"Bounding box: x {measure._mm(lo[0])}..{measure._mm(hi[0])}, y {measure._mm(lo[1])}..{measure._mm(hi[1])}, "
                      f"z {measure._mm(lo[2])}..{measure._mm(hi[2])} (size {measure._mm(size[0])} x {measure._mm(size[1])} x {measure._mm(size[2])} mm).")
-    lines.append("Board length / width, mounting holes and connector positions are not measured on a mesh; Params were not changed. "
-                 "Ask the user for the manufacturer's STEP file for exact dimensions.")
+    if m.survey:
+        text = mesh_survey.render_text(m.survey)
+        if text:
+            lines.append("Feature survey of the source mesh (recovered from the tessellation; "
+                         "use these numbers as step_measurement evidence for plan parameters):")
+            lines.append(text)
+    lines.append("PCB-specific structure is not separated out on a mesh; Params were not changed. "
+                 "A manufacturer's STEP file would give exact B-rep faces.")
     for warning in m.warnings:
         lines.append(f"Warning: {warning}.")
     return "\n".join(lines)

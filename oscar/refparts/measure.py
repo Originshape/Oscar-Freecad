@@ -660,6 +660,7 @@ class Measurement:
     bottom_z: "float | None" = None
     identity: "dict | None" = None
     mesh: "dict | None" = None        # facts of a mesh reference (measure_mesh); None for a B-rep
+    survey: "dict | None" = None      # the feature survey of a mesh reference (mesh_survey); None for a B-rep
     warnings: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
