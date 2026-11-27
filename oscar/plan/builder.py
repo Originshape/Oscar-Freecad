@@ -68,10 +68,13 @@ Known v2 limits, reported honestly rather than papered over:
 
 Known v1 limits, reported honestly rather than papered over:
 * polyline profiles bind vertex positions via per-segment DistanceX/Y
-  expressions; arcs bind radius only when the plan names it; an arc that is
-  exactly a semicircle over its chord is singular for a radius dimension
-  (the sketch fails with the solver's redundancy named: use a ``slot`` or
-  two quarter arcs).
+  expressions; an arc binds its size only when the plan names a ``radius``
+  (or ``diameter``) parameter — without one the arc's size stays free, so
+  the sketch is not fully constrained: that is reported as a warning, not
+  refused (the reconstruction engine's own arcs are spelled this way); an
+  arc that is exactly a semicircle over its chord is singular for a radius
+  dimension (name it and the solver reports the redundancy: use a ``slot``
+  or two quarter arcs).
 """
 
 from contextlib import contextmanager

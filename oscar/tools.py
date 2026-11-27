@@ -894,7 +894,12 @@ def _apply_feature_plan(doc_name: str, plan: dict):
         extra = ""
         if "fully_constrained" in info:
             extra = (f" (fully constrained: {info['fully_constrained']}, "
-                     f"{info['dimensional_expressions']} param expressions)")
+                     f"{info['dimensional_expressions']} param expressions")
+            if info.get("redundant"):
+                extra += f", {info['redundant']} redundant constraints"
+            extra += ")"
+            if info.get("warning"):
+                extra += f"\n  warning: {info['warning']}"
         text += f"\n- {f['id']} [{f['op']}] → {f['object']}{extra}"
     return _shot(text, True, "Isometric", doc_name)
 

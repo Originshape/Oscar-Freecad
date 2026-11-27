@@ -141,6 +141,7 @@ def add_geometry(sketch, profile: dict, plan: dict, feat_id: str) -> dict:
                 meta.append({"from": cursor, "to": to, "center": ctr,
                              "ref_to": seg.get("to"), "index": idx,
                              "radius_ref": seg.get("radius"),
+                             "diameter_ref": seg.get("diameter"),
                              "rev": not seg.get("ccw", True)})
             else:
                 raise BuildError(feat_id, f"segment {i}: unknown type "
@@ -313,11 +314,18 @@ def _constrain_profile(sketch, geom: dict, profile: dict, ctx: Ctx, named) -> No
                 skip_dims[last] = skip_dims.get(last, ()) + (axis,)
 
     for i, m in enumerate(metas):
-        if m.get("radius_ref"):
+        # an arc's size rides a Radius (or, when the plan names it, a
+        # Diameter) constraint — without one the solver leaves the arc's
+        # bulge free and the sketch report refuses it (see sketch_report)
+        if "center" in m:
             r_val = math.hypot(m["from"][0] - m["center"][0],
                                m["from"][1] - m["center"][1])
-            named(Sketcher.Constraint("Radius", m["index"], r_val), f"rad_{i}",
-                  ref_expr(sheet, m["radius_ref"]))
+            if m.get("radius_ref"):
+                named(Sketcher.Constraint("Radius", m["index"], r_val),
+                      f"rad_{i}", ref_expr(sheet, m["radius_ref"]))
+            elif m.get("diameter_ref"):
+                named(Sketcher.Constraint("Diameter", m["index"], 2 * r_val),
+                      f"diam_{i}", ref_expr(sheet, m["diameter_ref"]))
         from_ref = metas[i - 1]["ref_to"] if i > 0 else profile.get("start")
         to_ref = m.get("ref_to")
         # each vertex is bound relative to the previous one; the constraint
@@ -425,7 +433,12 @@ def build_sketch(doc, body, feat: dict, plan: dict, ctx: Ctx):
 
 def sketch_report(sketch, kind: str, bound: int, feature_id: str) -> dict:
     """The solver's verdict on a built sketch. Raises BuildError when the
-    constraints conflict or are malformed (the shape would be invalid)."""
+    constraints conflict or are malformed (the shape would be invalid). A
+    sketch that solves but is not fully constrained is BUILDABLE, so it is
+    reported (``under_constrained``, ``dof``, ``warning``) and never refused:
+    the reconstruction engine spells its own arcs without a size parameter
+    (``recon/section.py`` corner rounds, ``recon/reconstruct.py`` the dome
+    meridian) and a scan with a little noise produces a dozen of them."""
     info = {"geometry": kind, "dimensional_expressions": bound}
     try:
         info["solver"] = int(sketch.solve())
@@ -446,6 +459,23 @@ def sketch_report(sketch, kind: str, bound: int, feature_id: str) -> dict:
                          f"sketch constraints {'conflict' if conflicting else 'are malformed'}"
                          f" ({', '.join(names)}); check that the dimensions "
                          f"describe one consistent closed profile")
+    if info.get("solver") == 0 and info.get("fully_constrained") is False:
+        # free degrees of freedom stay free — the usual cause is an arc that
+        # names no size; the profile still builds (the solver sets the arc's
+        # size from its constrained end points), so the model is TOLD, not
+        # stopped
+        info["under_constrained"] = True
+        try:
+            info["dof"] = int(sketch.DoF)
+        except Exception:  # noqa: BLE001 - the count is a convenience
+            pass
+        info["warning"] = (
+            "sketch is not fully constrained ("
+            f"{info.get('dof', 'some')} degree(s) of freedom stay free, so a "
+            "parameter edit may not reproduce the profile); give every arc "
+            "segment a 'radius' (or 'diameter') parameter — an arc that is "
+            "exactly a semicircle is singular for a radius dimension, so "
+            "spell it as a 'slot' or two quarter arcs")
     redundant = list(getattr(sketch, "RedundantConstraints", []) or [])
     if redundant:
         info["redundant"] = len(redundant)

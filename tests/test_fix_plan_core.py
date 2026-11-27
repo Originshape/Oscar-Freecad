@@ -219,6 +219,26 @@ class ProfileArcTest(_DocCase):
         doc, _ = self._build(_dshape(False))
         self.assertVolume(doc, (600 - self.HALF_DISC) * 5)
 
+    def test_a_two_quarter_arc_dshape_builds_fully_constrained(self):
+        # the sanctioned spelling of the D-shape: two quarter arcs, each with
+        # a radius, build fully constrained to the same half-disc volume
+        plan = _dshape(True)
+        plan["id"] = "dshape_quarters"
+        plan["parameters"]["arc_r"] = {"value": 10.0,
+                                       "assumption": "test fixture dimension"}
+        plan["parameters"]["mid_x"] = {"expr": "lenx + arc_r"}
+        plan["features"][0]["profile"]["segments"][1] = {
+            "type": "arc", "to": ["mid_x", 10], "center": ["lenx", 10],
+            "ccw": True, "radius": "arc_r"}
+        insert = {"type": "arc", "to": ["lenx", "heit"],
+                  "center": ["lenx", 10], "ccw": True, "radius": "arc_r"}
+        plan["features"][0]["profile"]["segments"].insert(2, insert)
+        doc, report = self._build(plan)
+        info = report["features"][0]["info"]
+        self.assertTrue(info["fully_constrained"], info)
+        self.assertNotIn("redundant", info)
+        self.assertVolume(doc, (600 + self.HALF_DISC) * 5)
+
     def test_arc_profile_rides_the_spreadsheet(self):
         # minor arc segment: 20 mm chord, r = sqrt(125)
         theta = 2 * math.asin(10 / math.sqrt(125))

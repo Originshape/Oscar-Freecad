@@ -525,6 +525,167 @@ class SlotAndProfileTest(unittest.TestCase):
         self.assertIn("needs ccw true/false", joined)
 
 
+class SegmentConsistencyTest(unittest.TestCase):
+    """A profile's declared dimensions must agree with the geometry its
+    coordinates describe (the builder follows the coordinates; a declared
+    length / radius / diameter that contradicts them is a plan that lies
+    about its own shape)."""
+
+    def profile_plan(self, segments, start=(0, 0), **params):
+        plan = _plate()
+        values = {"seg_len": 20, "seg_r": 6, "seg_dia": 12}
+        values.update(params)
+        plan["parameters"].update({k: _p(v) for k, v in values.items()})
+        plan["features"].append({
+            "id": "p", "op": "sketch", "plane": {"frame_plane": "top"},
+            "profile": {"shape": "profile", "start": list(start),
+                        "segments": segments}})
+        return plan
+
+    def test_a_line_length_that_matches_the_geometry_validates(self):
+        segments = [{"type": "line", "to": [20, 0], "length": "seg_len"},
+                    {"type": "line", "to": [20, 10]},
+                    {"type": "line", "to": [0, 10]},
+                    {"type": "line", "to": [0, 0]}]
+        self.assertEqual(_errors(self.profile_plan(segments)), [])
+
+    def test_rounded_coordinates_are_not_a_contradiction(self):
+        # people and models write coordinates to one or two decimals: the declared number
+        # then differs from the geometry by rounding alone, and the builder follows the
+        # coordinates, so the plan builds exactly what it says
+        line = [{"type": "line", "to": [30, 30], "length": "seg_len"}, {"type": "line", "to": [60, 0]},
+                {"type": "line", "to": [0, 0]}]
+        self.assertEqual(_errors(self.profile_plan(line, seg_len=42.43)), [])     # true 42.4264
+        arc = [{"type": "arc", "to": [5, 8.66], "center": [0, 0], "radius": "seg_r", "ccw": True},
+               {"type": "line", "to": [0, 8.66]}, {"type": "line", "to": [0, 0]},
+               {"type": "line", "to": [10, 0]}]
+        self.assertEqual(_errors(self.profile_plan(arc, start=(10, 0), seg_r=10)), [])  # end 0.0002 mm off the circle
+
+    def test_a_dimension_off_by_more_than_rounding_is_still_an_error(self):
+        near = [{"type": "line", "to": [20, 0], "length": 20.5}, {"type": "line", "to": [20, 10]},
+                {"type": "line", "to": [0, 10]}, {"type": "line", "to": [0, 0]}]
+        self.assertIn("segment 0 declares length 20.5", _joined(self.profile_plan(near)))
+        far = [{"type": "line", "to": [300, 300], "length": 420}, {"type": "line", "to": [600, 0]},
+               {"type": "line", "to": [0, 0]}]                 # true 424.26: far beyond rounding
+        self.assertIn("declares length 420", _joined(self.profile_plan(far)))
+
+    def test_a_line_length_that_contradicts_the_geometry_is_an_error(self):
+        segments = [{"type": "line", "to": [20, 0], "length": 99},
+                    {"type": "line", "to": [20, 10]},
+                    {"type": "line", "to": [0, 10]},
+                    {"type": "line", "to": [0, 0]}]
+        joined = _joined(self.profile_plan(segments))
+        self.assertIn("segment 0 declares length 99", joined)
+        self.assertIn("20 mm apart", joined)
+
+    def test_a_zero_length_line_is_an_error(self):
+        segments = [{"type": "line", "to": [0, 0]},
+                    {"type": "line", "to": [0, 10]},
+                    {"type": "line", "to": [0, 0]}]
+        self.assertIn("segment 0 is zero-length",
+                      _joined(self.profile_plan(segments)))
+
+    def test_an_arc_whose_center_sits_on_its_start_point_is_an_error(self):
+        # |center -> start| = 0: the builder takes the radius from the start
+        # point, so this arc would have a radius of 0 and no arc exists
+        segments = [{"type": "line", "to": [20, 0]},
+                    {"type": "arc", "to": [23, 4], "center": [20, 0],
+                     "ccw": True},
+                    {"type": "line", "to": [23, 10]},
+                    {"type": "line", "to": [0, 10]},
+                    {"type": "line", "to": [0, 0]}]
+        joined = _joined(self.profile_plan(segments))
+        self.assertIn("arc segment 1", joined)
+        self.assertIn("center sits on the start point", joined)
+        self.assertIn("radius of 0 mm", joined)
+
+    def test_a_declared_arc_size_must_fit_both_end_points(self):
+        # start 5.85 mm and end 5.6 mm from the centre: the declared radius
+        # fits the start point only, so one circle of that size cannot be the arc
+        segments = [{"type": "line", "to": [20, 0]},
+                    {"type": "arc", "to": [19.3497, 4.8], "center": [14.5, 2],
+                     "ccw": True, "radius": "seg_r"},
+                    {"type": "line", "to": [19.3497, 10]},
+                    {"type": "line", "to": [0, 10]},
+                    {"type": "line", "to": [0, 0]}]
+        joined = _joined(self.profile_plan(segments, seg_r=5.8547))
+        self.assertIn("arc segment 1", joined)
+        self.assertIn("a declared radius or diameter must fit both", joined)
+
+    def test_an_arc_without_a_size_may_sit_off_its_circle(self):
+        # the same arc with NO size named: the builder draws one arc through
+        # the two constrained end points, so this is valid — the spelling the
+        # reconstruction engine's noise-fitted arcs use
+        segments = [{"type": "line", "to": [20, 0]},
+                    {"type": "arc", "to": [19.3497, 4.8], "center": [14.5, 2],
+                     "ccw": True},
+                    {"type": "line", "to": [19.3497, 10]},
+                    {"type": "line", "to": [0, 10]},
+                    {"type": "line", "to": [0, 0]}]
+        self.assertEqual(_errors(self.profile_plan(segments)), [])
+
+    def test_arc_radius_must_agree_with_the_geometry(self):
+        # both endpoints are 5 mm from [23, 4], but the radius says 6
+        segments = [{"type": "line", "to": [20, 0]},
+                    {"type": "arc", "to": [26, 8], "center": [23, 4],
+                     "ccw": True, "radius": "seg_r"},
+                    {"type": "line", "to": [26, 10]},
+                    {"type": "line", "to": [0, 10]},
+                    {"type": "line", "to": [0, 0]}]
+        joined = _joined(self.profile_plan(segments))
+        self.assertIn("declares radius 6", joined)
+        self.assertIn("are 5 mm from its center", joined)
+
+    def test_arc_diameter_must_agree_with_the_geometry(self):
+        segments = [{"type": "line", "to": [20, 0]},
+                    {"type": "arc", "to": [26, 8], "center": [23, 4],
+                     "ccw": True, "diameter": "seg_dia"},
+                    {"type": "line", "to": [26, 10]},
+                    {"type": "line", "to": [0, 10]},
+                    {"type": "line", "to": [0, 0]}]
+        joined = _joined(self.profile_plan(segments))
+        self.assertIn("declares diameter 12", joined)
+        self.assertIn("a 10 mm diameter", joined)
+
+    def test_an_arc_that_ends_where_it_starts_is_an_error(self):
+        segments = [{"type": "line", "to": [20, 0]},
+                    {"type": "arc", "to": [20, 0], "center": [10, 0],
+                     "ccw": True, "radius": 10},
+                    {"type": "line", "to": [0, 10]},
+                    {"type": "line", "to": [0, 0]}]
+        joined = _joined(self.profile_plan(segments))
+        self.assertIn("arc segment 1 ends where it starts", joined)
+        self.assertIn("shape 'circle'", joined)
+
+    def test_consistent_arc_dimensions_validate(self):
+        segments = [{"type": "line", "to": [20, 0]},
+                    {"type": "arc", "to": [26, 8], "center": [23, 4],
+                     "ccw": True, "radius": "seg_r", "diameter": "seg_dia"},
+                    {"type": "line", "to": [26, 10]},
+                    {"type": "line", "to": [0, 10]},
+                    {"type": "line", "to": [0, 0]}]
+        # radius 5 == |center->start| and diameter 10 == 2r: no error
+        self.assertEqual(
+            _errors(self.profile_plan(segments, seg_r=5, seg_dia=10)), [])
+
+
+class UnusedSketchTest(unittest.TestCase):
+    def test_a_sketch_no_feature_consumes_is_a_warning(self):
+        plan = _plate()
+        plan["features"].append({"id": "dead", "op": "sketch",
+                                 "plane": {"frame_plane": "top"},
+                                 "profile": {"shape": "circle",
+                                             "diameter": "plate_len"}})
+        ok, _errors, warnings = schema.validate(plan)
+        self.assertTrue(ok)
+        self.assertTrue(any("sketch 'dead' is never used" in w
+                            for w in warnings), warnings)
+
+    def test_a_consumed_sketch_draws_no_warning(self):
+        ok, _errors, warnings = schema.validate(_plate())
+        self.assertFalse(any("never used" in w for w in warnings), warnings)
+
+
 class DerivedParameterTest(unittest.TestCase):
     def plan(self, **derived):
         plan = _plate()
