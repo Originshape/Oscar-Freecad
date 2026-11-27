@@ -43,21 +43,66 @@ STAGE_PARAMETERS = "parameters"   # writing the Parameters spreadsheet failed
 STAGE_BUILD = "build"             # one feature failed (feature_id says which)
 STAGE_BUILT = "built"             # success
 
+# machine-readable cause codes of a build failure (the message stays the
+# actionable text; the code is what a caller counts attempts against)
+CAUSE_NO_SOLID = "no_solid"               # the feature left the Body with no solid at all
+CAUSE_INVALID_SOLID = "invalid_solid"     # the kernel marked the result invalid
+CAUSE_MULTIPLE_SOLIDS = "multiple_solids" # the Body fell apart into separate solids
+CAUSE_ADDED_NOTHING = "added_nothing"     # an additive feature added no volume
+CAUSE_CUT_NOTHING = "cut_nothing"         # a subtractive feature removed no volume
+CAUSE_CHANGED_NOTHING = "changed_nothing" # a dressing feature changed nothing
+CAUSE_BOX_SHRANK = "box_shrank"           # an additive feature shrank the bounding box
+CAUSE_BOX_GREW = "box_grew"               # a cut / dressing grew the bounding box
+CAUSE_RECOMPUTE_FAILED = "recompute_failed"  # FreeCAD left a freshly built object in error
+CAUSE_DEPENDENTS_EXIST = "dependents_exist"  # a repair would orphan the features after it
+
+# what to try next, per cause (short, deterministic; the message carries the detail)
+RECOVERY_ALTERNATIVES: dict[str, tuple[str, ...]] = {
+    CAUSE_NO_SOLID: ("check the sketch plane, the profile and the dimensions",
+                     "reduce the cut depth"),
+    CAUSE_INVALID_SOLID: ("check the profile for self-intersections",
+                          "avoid degenerate dimensions",
+                          "drop this dressing feature"),
+    CAUSE_MULTIPLE_SOLIDS: ("move the sketch onto the body or overlap it",
+                            "check the plane position and 'midplane'"),
+    CAUSE_ADDED_NOTHING: ("move the sketch plane so the profile touches the body",
+                          "increase the length",
+                          "set 'invert': true"),
+    CAUSE_CUT_NOTHING: ("flip the plane normal (holes drill along the negative normal)",
+                        "move the sketch so the profile lies in the material",
+                        "check the depth and 'invert'"),
+    CAUSE_CHANGED_NOTHING: ("increase 'size'",
+                            "choose different 'edges'",
+                            "drop this dressing feature"),
+    CAUSE_BOX_SHRANK: ("check the profile stays inside the part",
+                       "re-check the plane orientation"),
+    CAUSE_BOX_GREW: ("check the profile stays inside the part",
+                     "re-check the plane orientation"),
+    CAUSE_RECOMPUTE_FAILED: ("read the failing object's status in the Report view",
+                             "fix the feature's inputs and send the plan again"),
+    CAUSE_DEPENDENTS_EXIST: ("reapply_plan_feature with rebuild_later=true",
+                             "re-apply the whole plan"),
+}
+
 
 class BuildError(Exception):
     """Raised with the failing feature id + actionable message.
 
     ``metrics`` carries the numbers that explain a post-condition failure
-    (volume before / after, solids, bbox) and ``stage`` the contract stage
-    the failure belongs to."""
+    (volume before / after, solids, bbox), ``stage`` the contract stage the
+    failure belongs to, ``cause`` its machine-readable code ("" when the
+    failure has none) and ``alternatives`` what to try next."""
 
     def __init__(self, feature_id: str, message: str, *,
-                 stage: str = STAGE_BUILD, metrics: dict | None = None):
+                 stage: str = STAGE_BUILD, metrics: dict | None = None,
+                 cause: str = "", alternatives: tuple | list = ()):
         super().__init__(message)
         self.feature_id = feature_id
         self.message = message
         self.stage = stage
         self.metrics = dict(metrics or {})
+        self.cause = str(cause or "")
+        self.alternatives = tuple(alternatives or RECOVERY_ALTERNATIVES.get(self.cause, ()))
 
 
 @dataclass(frozen=True)
@@ -137,6 +182,14 @@ def format_build_failure(result: dict) -> str:
         done = list(completed) if isinstance(completed, (list, tuple, set)) \
             else [completed]
         text += f"\nCompleted features: {done}"
+    cause = _text(result.get("cause"))
+    if cause:
+        text += f"\nCause: {cause}"
+    alts = result.get("alternatives")
+    if isinstance(alts, (list, tuple)):
+        listed = [_text(a) for a in alts if _text(a)]
+        if listed:
+            text += "\nTry: " + "; ".join(listed)
     return text
 
 
@@ -356,23 +409,24 @@ def check_postconditions(op: str, feature_id: str, before: dict,
     subtractive = kind == "subtractive"
     shaping = kind in ("dress", "any")
 
-    def fail(msg: str) -> BuildError:
-        return BuildError(feature_id, msg, metrics=metrics)
+    def fail(msg: str, cause: str = "") -> BuildError:
+        return BuildError(feature_id, msg, metrics=metrics, cause=cause,
+                          alternatives=RECOVERY_ALTERNATIVES.get(cause, ()))
 
     if after["solids"] == 0:
         removed = (" — the cut removed all material" if before["solids"] and
                    (subtractive or shaping) else "")
         raise fail(f"{op} produced no solid{removed} (volume "
                    f"{metrics['volume_before']:g} → 0); check the sketch "
-                   f"plane, the profile and the dimensions")
+                   f"plane, the profile and the dimensions", CAUSE_NO_SOLID)
     if not after["valid"]:
         raise fail(f"{op} produced an invalid solid; check the profile for "
                    f"self-intersections and the dimensions for degenerate "
-                   f"values")
+                   f"values", CAUSE_INVALID_SOLID)
     if after["solids"] != 1:
         raise fail(f"{op} left {after['solids']} separate solids (expected 1): "
                    f"the profile does not touch the existing body; move the "
-                   f"sketch onto the body or overlap it")
+                   f"sketch onto the body or overlap it", CAUSE_MULTIPLE_SOLIDS)
     tol = max(1e-6 * max(before["volume"], after["volume"], 1.0), 1e-6)
     delta = after["volume"] - before["volume"]
     if additive and delta <= tol:
@@ -380,7 +434,7 @@ def check_postconditions(op: str, feature_id: str, before: dict,
         raise fail(f"{op} {what}: volume {metrics['volume_before']:g} → "
                    f"{metrics['volume_after']:g}; the profile may lie inside "
                    f"the body or the length is too small — check the sketch "
-                   f"plane and 'invert'")
+                   f"plane and 'invert'", CAUSE_ADDED_NOTHING)
     if shaping and before["solids"] and abs(delta) <= tol:
         hint = {"fillet": "the size may be too small to matter, or the edges "
                           "it selected were already round",
@@ -389,7 +443,7 @@ def check_postconditions(op: str, feature_id: str, before: dict,
                              "face rule and the wall"}.get(
             op, "the feature changed nothing")
         raise fail(f"{op} changed nothing: volume {metrics['volume_before']:g} "
-                   f"→ {metrics['volume_after']:g}; {hint}")
+                   f"→ {metrics['volume_after']:g}; {hint}", CAUSE_CHANGED_NOTHING)
     if subtractive and before["solids"] and delta >= -tol:
         facts = ""
         if context:
@@ -406,7 +460,8 @@ def check_postconditions(op: str, feature_id: str, before: dict,
                     "(holes and pockets drill along the plane's negative normal)")
         raise fail(f"{op} cut nothing: volume {metrics['volume_before']:g} → "
                    f"{metrics['volume_after']:g}; the profile lies outside "
-                   f"the material or cuts the wrong way{facts}{'— ' if not facts else ''}{hint}")
+                   f"the material or cuts the wrong way{facts}{'— ' if not facts else ''}{hint}",
+                   CAUSE_CUT_NOTHING)
     bb0, bb1 = before["bbox"], after["bbox"]
     if bb1 is None or any(not math.isfinite(v) for v in bb1):
         raise fail(f"{op} left no usable bounding box")
@@ -421,12 +476,12 @@ def check_postconditions(op: str, feature_id: str, before: dict,
             raise fail(f"{op} shrank the bounding box "
                        f"({[round(v, 3) for v in bb0]} → "
                        f"{[round(v, 3) for v in bb1]}); an additive feature "
-                       f"must not remove material")
+                       f"must not remove material", CAUSE_BOX_SHRANK)
         if (subtractive or kind == "dress") and (
                 any(a < b - grow for a, b in zip(bb1[:3], bb0[:3]))
                 or any(a > b + grow for a, b in zip(bb1[3:], bb0[3:]))):
             raise fail(f"{op} grew the bounding box "
                        f"({[round(v, 3) for v in bb0]} → "
                        f"{[round(v, 3) for v in bb1]}); a cut must not add "
-                       f"material")
+                       f"material", CAUSE_BOX_GREW)
     return metrics

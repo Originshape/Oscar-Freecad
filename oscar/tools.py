@@ -28,6 +28,7 @@ from . import cad as _cad
 from .cad import imported as _imported
 from . import codeguard
 from . import netguard
+from .plan import schema as _plan_schema  # pure (no FreeCAD import): the generated op reference
 from . import toolpipe
 from . import turnlog as _turnlog
 from .providers import ToolSpec
@@ -827,12 +828,9 @@ _PLAN_SCHEMA_HINT = (
     "FeaturePlan: schema_version 1 or 2, id, part_class, units='mm', target='freecad', frame (datum planes), "
     "parameters (name → {value, source{kind: user_requirement|datasheet|step_measurement|standard|assumption, "
     "ref} or evidence{op,detail} or assumption}; a derived one is {expr:'plate_w/2'}), features = ordered list of "
-    "{id, op, ...} where every dimension is a parameter NAME. v1 ops: sketch (rectangle|circle|slot|profile), pad, "
-    "pocket, revolution, hole. v2 adds fillet|chamfer {size, edges: all_outer|vertical|top_outer|bottom_outer|"
-    "edges_of_feature:<id>}, thickness {wall, open_faces: top|bottom}, linear_pattern {of, count, spacing, "
-    "direction}, polar_pattern {of, count, angle, axis}, mirror {of, plane}, boss {face, profile, length}; a sketch "
-    "may take several 'profiles'; 'parts' [{id, features, placement{x,y,z,rx,ry,rz: parameter names}}] builds one "
-    "Body per part, never fused, plus 'assembly' {placements:[{name, part, x, y, z}]}. Example v2: "
+    "{id, op, ...}. " + _plan_schema.op_reference() + " 'parts' [{id, features, placement{x,y,z,rx,ry,rz: "
+    "parameter names}}] builds one Body per part, never fused, plus 'assembly' {placements:[{name, part, x, y, "
+    "z}]}. Example v2: "
     '{"schema_version":2,"id":"plate","part_class":"bracket","units":"mm","frame":{"planes":{"base":{"origin":'
     '[0,0,0],"normal":[0,0,1]}}},"parameters":{"plate_w":{"value":60,"source":{"kind":"user_requirement","ref":'
     '"user: 60 mm wide"}},"plate_t":{"value":4,"source":{"kind":"user_requirement","ref":"user: 4 mm thick"}},'
@@ -926,8 +924,10 @@ def _feature_tree_status(doc_name: str):
     "reapply_plan_feature",
     f"(Re-)apply ONE feature of a FeaturePlan into a document that was "
     f"built with apply_feature_plan (repair path). The feature must "
-    f"not have later features depending on it — those cases re-apply the "
-    f"whole plan. Pass the whole (possibly patched) FeaturePlan, schema 1 or 2, exactly as for "
+    f"not have later features depending on it — those cases either re-apply the "
+    f"whole plan or pass rebuild_later=true, which rebuilds the feature and every later "
+    f"feature in place (the features before it keep their objects and bindings). Pass the whole "
+    f"(possibly patched) FeaturePlan, schema 1 or 2, exactly as for "
     f"apply_feature_plan; in a multi-part plan the feature is rebuilt inside its own part's Body.",
     {
         "type": "object",
@@ -937,12 +937,17 @@ def _feature_tree_status(doc_name: str):
                      "description": "the (possibly patched) FeaturePlan"},
             "feature_id": {"type": "string",
                            "description": "id of the feature to apply"},
+            "rebuild_later": {"type": "boolean", "default": False,
+                              "description": "also rebuild every feature after "
+                                             "feature_id (in place; use when later "
+                                             "features depend on it)"},
         },
         "required": ["doc_name", "plan", "feature_id"],
     },
     category="build", geometry=True, phases=_P("----X--"),
 )
-def _reapply_plan_feature(doc_name: str, plan: dict, feature_id: str):
+def _reapply_plan_feature(doc_name: str, plan: dict, feature_id: str,
+                          rebuild_later: bool = False):
     def task():
         from .cad.engine import _resolve_doc
         from .plan import builder
@@ -951,6 +956,8 @@ def _reapply_plan_feature(doc_name: str, plan: dict, feature_id: str):
         if doc is None:
             return {"success": False,
                     "error": f"document '{doc_name}' is not open"}
+        if rebuild_later:
+            return builder.rebuild_from(doc, plan, feature_id)
         return builder.apply_feature(doc, plan, feature_id)
 
     from .cad import dispatch as _d
@@ -960,7 +967,12 @@ def _reapply_plan_feature(doc_name: str, plan: dict, feature_id: str):
         raise ToolError(f"reapply_plan_feature failed: {result}")
     if not result.get("success"):
         raise ToolError(toolpipe.build_failure_text(result, feature_id))
-    text = f"Feature '{feature_id}' applied → object '{result['object']}'."
+    if result.get("object"):
+        text = f"Feature '{feature_id}' applied → object '{result['object']}'."
+    else:   # the rebuild_later path rebuilds a suffix; it has no single object
+        done = ", ".join(result.get("completed") or [])
+        text = (f"Rebuilt {result.get('feature_count', 1)} feature(s) from "
+                f"'{feature_id}' (now present: {done}).")
     if result.get("parameters_changed"):
         # the plan is the source of truth for the sheet: say what it reset,
         # including a value the user may have edited by hand

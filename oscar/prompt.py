@@ -19,6 +19,8 @@ import re
 from functools import lru_cache
 from typing import Iterable
 
+from .plan import schema as _plan_schema  # pure (no FreeCAD import): the generated op reference
+
 # Every tool Oscar knows: the registry plus the optional net tools. A backticked identifier
 # in this set makes its sentence conditional on the tool being offered.
 KNOWN_TOOLS = frozenset({
@@ -155,22 +157,21 @@ _PLAYBOOK_SECTIONS: dict[str, tuple[_Section, ...]] = {
     ),
     "structured_part": (
         ("PLAYBOOK structured_part (prismatic parts: plates, flanges, brackets, fixtures)", (
-            "Build prismatic parts with one structured plan, not a script (a request that says parametric or "
-            "editable means this path): choose the parameters first (name, value, where the number comes from), "
+            "Build prismatic parts with one structured plan, not a script (parametric or editable means this "
+            "path): choose the parameters first (name, value, where the number comes from), "
             "then one feature per entry, then call `apply_feature_plan`.",
-            "Use schema_version 2 with a parameter name for every dimension. Sketch (rectangle, circle, slot, several "
-            "profiles), pad, pocket, hole, fillet, chamfer, thickness (shell), linear_pattern, polar_pattern, "
-            "mirror, boss. Pick edges by rule (all_outer, vertical, top_outer, bottom_outer, edges_of_feature:<id>), "
-            "never by index.",
-            "Several parts (a base and a lid): one entry in parts each, with its own placement parameters; parts are "
-            "never fused.",
-            "If the call fails, fix the field the error names (it suggests the spelling) and send the whole plan "
-            "again; `reapply_plan_feature` repairs one feature. If the same feature fails twice, do not fall back "
-            "to loose Part primitives and booleans (non-parametric, cutters left visible): fix the named field or "
-            "reshape that one feature.",
+            "Use schema_version 2 with a parameter name for every dimension. Ops: "
+            + ", ".join(_plan_schema.OPS)
+            + ". "
+            "Pick edges by rule (all_outer, vertical, top_outer, bottom_outer, edges_of_feature:<id>), never by "
+            "index.",
+            "Several parts (a base and a lid): one entry each, own placement; never fused.",            "If the call fails, fix the field the error names (it suggests the spelling) and resend; at most two "
+            "attempts per cause, then follow the failure's alternative or stop. `reapply_plan_feature` repairs one "
+            "feature; rebuild_later=true also rebuilds every later feature. If one fails twice, do not fall "
+            "back to loose Part primitives (non-parametric, cutters visible): fix the named field or reshape it.",
             "Then `validate_model`. To resize, change the parameter, not the geometry.",
             "Only what no plan op can express goes to `execute_code`: hide every helper cutter, leave one final "
-            "solid, bind its dimensions to the Params sheet and say in the final report that this piece is not "
+            "solid, bind dimensions to the Params sheet and say in the final report that this piece is not "
             "parametric.",
         )),
     ),

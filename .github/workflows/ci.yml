@@ -141,10 +141,11 @@ jobs:
           }
           $failed = @()
           foreach ($m in (Get-ChildItem "tests\test_*.py" | ForEach-Object { $_.BaseName })) {
-            $ok = Invoke-Module $m "$env:RUNNER_TEMP\oscar-test\113-$m"
+            # Invoke-Module's output is the process's own stdout followed by its verdict: take the verdict
+            $ok = @(Invoke-Module $m "$env:RUNNER_TEMP\oscar-test\113-$m")[-1]
             if (-not $ok) {
               Write-Host "::warning::$m exited non-zero without a green verdict - retrying once in a fresh sandbox"
-              $ok = Invoke-Module $m "$env:RUNNER_TEMP\oscar-test\113-$m-retry"
+              $ok = @(Invoke-Module $m "$env:RUNNER_TEMP\oscar-test\113-$m-retry")[-1]
               if (-not $ok) { $failed += $m }
             }
           }
@@ -190,10 +191,11 @@ jobs:
           }
           $failed = @()
           foreach ($m in (Get-ChildItem "tests\test_*.py" | ForEach-Object { $_.BaseName })) {
-            $ok = Invoke-Module $m "$env:RUNNER_TEMP\oscar-test\114-$m"
+            # Invoke-Module's output is the process's own stdout followed by its verdict: take the verdict
+            $ok = @(Invoke-Module $m "$env:RUNNER_TEMP\oscar-test\114-$m")[-1]
             if (-not $ok) {
               Write-Host "::warning::$m exited non-zero without a green verdict - retrying once in a fresh sandbox"
-              $ok = Invoke-Module $m "$env:RUNNER_TEMP\oscar-test\114-$m-retry"
+              $ok = @(Invoke-Module $m "$env:RUNNER_TEMP\oscar-test\114-$m-retry")[-1]
               if (-not $ok) { $failed += $m }
             }
           }
